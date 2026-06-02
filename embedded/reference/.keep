@@ -1,0 +1,2 @@
+Reference docs (reference.docx, reference.pptx, reference.odt) are added in a
+later step; pandoc backend falls back to its default styling if a key is missing.

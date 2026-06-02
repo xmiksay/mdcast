@@ -1,0 +1,37 @@
+[package]
+name = "mdcast"
+version = "0.1.0"
+edition = "2024"
+description = "Markdown → DOCX/PDF/PPTX/HTML with per-page layout templates"
+license = "MIT OR Apache-2.0"
+
+[features]
+default = ["pandoc", "typst"]
+pandoc = []
+typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib"]
+
+[dependencies]
+anyhow = "1"
+bytes = "1"
+clap = { version = "4", features = ["derive"] }
+futures = "0.3"
+pulldown-cmark = { version = "0.13", default-features = false }
+regex = "1"
+rust-embed = "8"
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+typst = { version = "0.14", optional = true }
+typst-pdf = { version = "0.14", optional = true }
+typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+[[bin]]
+name = "mdcast"
+path = "src/bin/mdcast.rs"
