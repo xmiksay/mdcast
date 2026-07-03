@@ -2,8 +2,21 @@
 name = "mdcast"
 version = "0.1.0"
 edition = "2024"
-description = "Markdown → DOCX/PDF/PPTX/HTML with per-page layout templates"
+description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
 license = "MIT OR Apache-2.0"
+authors = ["Martin Miksanik <miksanik@gmail.com>"]
+readme = "README.md"
+repository = "https://github.com/xmiksay/mdcast"
+homepage = "https://github.com/xmiksay/mdcast"
+documentation = "https://docs.rs/mdcast"
+keywords = ["markdown", "pandoc", "typst", "slides", "document"]
+categories = ["text-processing", "template-engine", "command-line-utilities"]
+exclude = [
+    ".claude/",
+    "PROJECT_PLAN.md",
+    "examples/dump_pandoc_input.rs",
+    "examples/dump_typst_driver.rs",
+]
 
 [features]
 default = ["pandoc", "typst"]
@@ -35,3 +48,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 [[bin]]
 name = "mdcast"
 path = "src/bin/mdcast.rs"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
