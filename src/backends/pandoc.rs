@@ -16,6 +16,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
+use futures::future::try_join_all;
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -34,20 +35,20 @@ async fn materialise_subtree(
     dest: &Path,
 ) -> Result<usize> {
     let keys = provider.list(prefix).await?;
-    let mut written = 0usize;
-    for key in keys {
-        let Some(bytes) = provider.get(&key).await? else {
-            continue;
+    let written = try_join_all(keys.iter().map(|key| async move {
+        let Some(bytes) = provider.get(key).await? else {
+            return Ok(0usize);
         };
-        let rel = key.strip_prefix(prefix).unwrap_or(&key);
+        let rel = key.strip_prefix(prefix).unwrap_or(key);
         let path = dest.join(rel);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
         tokio::fs::write(&path, &bytes).await?;
-        written += 1;
-    }
-    Ok(written)
+        Ok::<usize, anyhow::Error>(1)
+    }))
+    .await?;
+    Ok(written.into_iter().sum())
 }
 
 pub struct PandocBackend {
@@ -337,5 +338,53 @@ mod tests {
         assert!(!out.contains("openxml"));
         assert!(!out.contains("opendocument"));
         assert!(out.starts_with("# {.hero}"));
+    }
+
+    struct MockAssets(std::collections::BTreeMap<&'static str, &'static [u8]>);
+
+    impl AssetProvider for MockAssets {
+        fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
+            let v = self.0.get(key).map(|b| Bytes::from_static(b));
+            Box::pin(async move { Ok(v) })
+        }
+
+        fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+            let out: Vec<String> = self
+                .0
+                .keys()
+                .filter(|k| k.starts_with(prefix))
+                .map(|k| k.to_string())
+                .collect();
+            Box::pin(async move { Ok(out) })
+        }
+    }
+
+    #[tokio::test]
+    async fn materialise_subtree_fetches_only_prefixed_keys_in_parallel() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("revealjs/dist/reveal.js", b"AAA".as_slice());
+        m.insert("revealjs/plugin/notes.js", b"BBB".as_slice());
+        m.insert("reference/reference.odt", b"CCC".as_slice());
+        let provider = MockAssets(m);
+
+        let dir = tempfile::tempdir().unwrap();
+        let written = materialise_subtree(&provider, "revealjs/", dir.path())
+            .await
+            .unwrap();
+
+        assert_eq!(written, 2);
+        assert_eq!(
+            tokio::fs::read(dir.path().join("dist/reveal.js"))
+                .await
+                .unwrap(),
+            b"AAA"
+        );
+        assert_eq!(
+            tokio::fs::read(dir.path().join("plugin/notes.js"))
+                .await
+                .unwrap(),
+            b"BBB"
+        );
+        assert!(!dir.path().join("reference.odt").exists());
     }
 }
