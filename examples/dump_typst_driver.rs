@@ -1,64 +1,30 @@
-// Dumps the typst driver source that the backend would feed to the compiler,
-// for the cover-deck.md fixture.
+// Dumps the typst driver source the backend would feed to the compiler, by
+// calling the real code path (classify -> md_to_typst -> build_driver) in
+// src/backends/typst instead of a hand-copied mirror. Image refs aren't
+// resolved here (no AssetProvider), so they show up as "unresolved" in the
+// output — that's expected for a dump tool.
 
+use std::collections::BTreeMap;
+
+use mdcast::backends::typst::{build_driver, md_to_typst};
 use mdcast::pages::auto::classify;
 use mdcast::pages::splitter::DefaultSplitter;
 use mdcast::{AutoLayout, PageSplitter};
 
 fn main() {
-    let md = std::fs::read_to_string("tests/golden/cover-deck.md").unwrap();
+    let path = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "tests/golden/cover-deck.md".to_string());
+    let md = std::fs::read_to_string(&path).unwrap();
     let raw = DefaultSplitter.split(&md);
     let pages = classify(raw, &AutoLayout::default());
 
-    let driver = build_driver(&pages);
+    let images = BTreeMap::new();
+    let typst_bodies: Vec<String> = pages
+        .iter()
+        .map(|p| md_to_typst(&p.body, &images))
+        .collect();
+
+    let driver = build_driver(&pages, &typst_bodies);
     println!("=== driver ===\n{driver}\n=== /driver ===");
-}
-
-// Mirror of src/backends/typst.rs::build_driver — kept in sync manually.
-fn build_driver(pages: &[mdcast::Page]) -> String {
-    let mut s = String::new();
-    let mut classes: Vec<&str> = pages.iter().map(|p| p.class.as_str()).collect();
-    classes.sort();
-    classes.dedup();
-    for class in &classes {
-        s.push_str(&format!(
-            "#import \"layouts/{}.typ\": layout as {}\n",
-            class.replace(['/', '\\'], "_"),
-            alias_for(class)
-        ));
-    }
-    s.push('\n');
-    for page in pages {
-        let alias = alias_for(&page.class);
-        let escaped = typst_string(&page.body);
-        s.push_str(&format!("#{alias}({escaped})\n"));
-    }
-    s
-}
-
-fn alias_for(class: &str) -> String {
-    let mut out = String::from("layout_");
-    for c in class.chars() {
-        if c.is_ascii_alphanumeric() {
-            out.push(c)
-        } else {
-            out.push('_')
-        }
-    }
-    out
-}
-
-fn typst_string(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => {}
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
