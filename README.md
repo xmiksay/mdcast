@@ -247,9 +247,12 @@ Anything the provider returns `None` for falls through to the next layer.
   `section-divider`, `callout`) for `pdf` and `pdf-presentation`.
 - Minimal reveal.js 4.6.1 distribution (with stripped font imports — falls
   back to system sans-serif).
-- Pandoc reference-doc placeholders for docx/pptx (a real branded set is still
-  TBD); `reference.odt` is real but minimal — pandoc's own default plus a
-  `PageBreak` paragraph style used for page separators.
+- Real, branded pandoc reference docs: `reference.docx`/`reference.odt`
+  define named paragraph styles for the six built-in classes (`hero`,
+  `content`, `thanks`, `image-full`, `section-divider`, `callout`), plus
+  `PageBreak` (odt) for page separators; `reference.pptx` brands pandoc's
+  seven built-in content-shape layouts (pptx has no per-class layout
+  selection — see `.claude/CLAUDE.md`'s Known limitations).
 
 ## Cargo features
 
@@ -311,10 +314,11 @@ list them:
 These are not bugs — they're chosen scope cuts. Each lands as an additive
 change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://github.com/xmiksay/mdcast/blob/master/PROJECT_PLAN.md#10-future-evolution--with-explicit-triggers) on GitHub).
 
-- Real branded `reference.{docx,pptx}` assets (`.keep` placeholders for now;
-  pandoc default styling applies). `reference.odt` exists already, but only
-  carries the `PageBreak` style needed for page separators — other classes
-  still fall back to pandoc's defaults.
+- PPTX per-class layout selection: pandoc's writer only ever picks from
+  seven fixed, content-shape-driven layouts, never by our page class, so
+  `reference.pptx` brands those seven instead of adding one layout per class.
+  True per-class selection needs post-render patching of each slide's layout
+  relationship.
 - Full markdown coverage in the md→Typst converter (v1 handles headings,
   emphasis, lists, blockquotes, images, and code; links, footnotes, and tables
   are not yet projected — their text comes through unstyled).

@@ -115,7 +115,9 @@ Rust.
    `#let layout(body) = …`).
 3. For pandoc: nothing for docx/odt/html-reveal — pandoc just emits the class
    onto the slide/div; the style is whatever the reference doc / theme CSS
-   provides. For PPTX: needs a layout of that name in `reference.pptx`.
+   provides. For PPTX: pandoc's writer has no notion of arbitrary named
+   layouts — see the PPTX bullet under Known limitations — so a new class
+   gets no dedicated pptx treatment.
 4. Author uses `<page class="two-column">…</page>` or `::: {.two-column}`.
 5. Missing template → warn + fall back to `content`.
 
@@ -134,15 +136,23 @@ Rust.
 - DOCX/ODT honour a class as a paragraph-style name only (typographic
   projection). Spatial layout — multi-column, image positioning — would need a
   template-injection backend; documented in `PROJECT_PLAN.md` §10.
-- PPTX layout-name → slide-master mapping requires a `reference.pptx` that
-  defines slide masters with the expected names. The vendored placeholder
-  doesn't; pandoc default styling applies until a real reference doc lands.
-- `reference.docx/pptx` are placeholder `.keep` files in `embedded/`. Real
-  reference docs (with named paragraph styles + slide masters) are the next
-  asset task. `reference.odt` exists — it's pandoc's own default reference.odt
-  plus one added paragraph style (`PageBreak`, `fo:break-before="page"`) that
-  page separators reference; custom-style class projection for other classes
-  still falls back to pandoc's defaults there too.
+  `reference.docx`/`reference.odt` each define real named paragraph styles for
+  the six built-in classes (`hero`, `content`, `thanks`, `image-full`,
+  `section-divider`, `callout`), so `custom-style` projection actually renders
+  distinct styling instead of falling back to pandoc's defaults.
+  `reference.odt` also carries the `PageBreak` style
+  (`fo:break-before="page"`) that page separators reference.
+- PPTX has no reference-doc mechanism for arbitrary named layouts: pandoc's
+  writer always picks one of seven fixed, content-shape-driven layouts
+  (`Title Slide`, `Section Header`, `Two Content`, `Comparison`,
+  `Content with Caption`, `Blank`, `Title and Content`) — see [PowerPoint
+  layout choice](https://pandoc.org/MANUAL.html#powerpoint-layout-choice).
+  Our per-page `{.<class>}` heading attribute is a no-op for pptx (it's only
+  meaningful for html-reveal's theme CSS). `reference.pptx` still gives real
+  branding (accent color + title styling) to those seven layouts instead of
+  pandoc's stock look, but true per-class layout selection would require
+  post-render patching of each slide's layout relationship — out of scope for
+  v1 (`PROJECT_PLAN.md` §10).
 - Image-ref rewriter uses a small regex; reference-style links, titles
   (`![alt](url "title")`), and angle-bracket URLs are not recognised in v1.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
