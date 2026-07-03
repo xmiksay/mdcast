@@ -23,7 +23,9 @@ src/
 │  └─ auto.rs         classify() — explicit > shape > positional > default
 ├─ backends/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
-│  └─ typst.rs        #[cfg(feature = "typst")]   pdf/pdf-presentation
+│  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
+│     ├─ mod.rs       TypstBackend, driver assembly, in-process compile
+│     └─ markdown.rs  md_to_typst() — markdown → Typst-markup conversion
 └─ bin/mdcast.rs      CLI (render / explain)
 
 embedded/             rust-embed source — keys mirror these paths
@@ -118,12 +120,16 @@ Rust.
 
 ## Known limitations
 
-- The md→Typst converter (`typst.rs::md_to_typst`) covers a v1 subset:
-  headings, paragraphs, emphasis/strong, lists, blockquotes, images, inline
-  code, and code blocks. Links, footnotes, tables, and HTML blocks are dropped
-  (their text content still comes through). Literal `_` / `*` in prose are not
-  escaped. Layouts receive the converted body as a string and typeset it via
-  `#eval(body, mode: "markup")`.
+- The md→Typst converter (`typst/markdown.rs::md_to_typst`) covers a v1
+  subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
+  inline code, and code blocks. Links, footnotes, tables, and HTML blocks are
+  dropped (their text content still comes through). Literal `_` / `*` in prose
+  are not escaped. Layouts receive the converted body as a string and typeset
+  it via `#eval(body, mode: "markup")`. Code block text is passed through
+  verbatim (not escaped) inside the fence, with the fence language forwarded
+  from the markdown info string; inline code renders via `#raw(...)` (a
+  function call, not the backtick shorthand) so embedded backticks can't break
+  out of it.
 - DOCX/ODT honour a class as a paragraph-style name only (typographic
   projection). Spatial layout — multi-column, image positioning — would need a
   template-injection backend; documented in `PROJECT_PLAN.md` §10.
