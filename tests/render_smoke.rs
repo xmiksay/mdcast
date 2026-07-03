@@ -88,6 +88,19 @@ async fn render(target: Target, doc: &ResolvedDoc) -> (tempfile::TempDir, PathBu
     (tmp, out)
 }
 
+/// Read one entry out of a zip-based document (docx/odt/pptx are all zip
+/// containers) as a UTF-8 string.
+fn zip_entry_to_string(bytes: &[u8], entry: &str) -> String {
+    let mut archive = zip::ZipArchive::new(std::io::Cursor::new(bytes))
+        .unwrap_or_else(|e| panic!("{entry} archive should be a valid zip: {e}"));
+    let mut file = archive
+        .by_name(entry)
+        .unwrap_or_else(|e| panic!("{entry} missing from archive: {e}"));
+    let mut s = String::new();
+    std::io::Read::read_to_string(&mut file, &mut s).unwrap();
+    s
+}
+
 fn has_external_resource_ref(html: &str) -> bool {
     let lower = html.to_ascii_lowercase();
     [
@@ -153,6 +166,15 @@ async fn pandoc_docx_smoke() {
         "suspiciously small docx: {} bytes",
         bytes.len()
     );
+
+    // README_EXAMPLE has 5 pages — the writer must have emitted 4 real page
+    // breaks, not just a raw-LaTeX marker pandoc silently drops.
+    let document_xml = zip_entry_to_string(&bytes, "word/document.xml");
+    let break_count = document_xml.matches(r#"<w:br w:type="page"/>"#).count();
+    assert_eq!(
+        break_count, 4,
+        "expected 4 page breaks in word/document.xml, found {break_count}:\n{document_xml}"
+    );
 }
 
 #[tokio::test]
@@ -169,6 +191,25 @@ async fn pandoc_odt_smoke() {
         bytes.len() > 200,
         "suspiciously small odt: {} bytes",
         bytes.len()
+    );
+
+    // README_EXAMPLE has 5 pages — the writer must have emitted 4 real page
+    // breaks, referencing a style that's actually defined with
+    // fo:break-before="page" (not just a dangling style-name reference).
+    let content_xml = zip_entry_to_string(&bytes, "content.xml");
+    let break_count = content_xml
+        .matches(r#"<text:p text:style-name="PageBreak"/>"#)
+        .count();
+    assert_eq!(
+        break_count, 4,
+        "expected 4 page breaks in content.xml, found {break_count}:\n{content_xml}"
+    );
+    let styles_xml = zip_entry_to_string(&bytes, "styles.xml");
+    assert!(
+        styles_xml.contains(r#"style:name="PageBreak""#)
+            && styles_xml.contains(r#"fo:break-before="page""#),
+        "reference.odt's PageBreak style (fo:break-before=\"page\") should be \
+         carried into the output styles.xml"
     );
 }
 

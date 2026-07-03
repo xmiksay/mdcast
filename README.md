@@ -247,7 +247,9 @@ Anything the provider returns `None` for falls through to the next layer.
   `section-divider`, `callout`) for `pdf` and `pdf-presentation`.
 - Minimal reveal.js 4.6.1 distribution (with stripped font imports — falls
   back to system sans-serif).
-- Pandoc reference-doc placeholders (a real branded set is still TBD).
+- Pandoc reference-doc placeholders for docx/pptx (a real branded set is still
+  TBD); `reference.odt` is real but minimal — pandoc's own default plus a
+  `PageBreak` paragraph style used for page separators.
 
 ## Cargo features
 
@@ -309,8 +311,10 @@ list them:
 These are not bugs — they're chosen scope cuts. Each lands as an additive
 change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://github.com/xmiksay/mdcast/blob/master/PROJECT_PLAN.md#10-future-evolution--with-explicit-triggers) on GitHub).
 
-- Real branded `reference.{docx,odt,pptx}` assets (`.keep` placeholders for
-  now; pandoc default styling applies).
+- Real branded `reference.{docx,pptx}` assets (`.keep` placeholders for now;
+  pandoc default styling applies). `reference.odt` exists already, but only
+  carries the `PageBreak` style needed for page separators — other classes
+  still fall back to pandoc's defaults.
 - Full markdown coverage in the md→Typst converter (v1 handles headings,
   emphasis, lists, blockquotes, images, and code; links, footnotes, and tables
   are not yet projected — their text comes through unstyled).
