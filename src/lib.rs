@@ -10,6 +10,7 @@ pub mod preprocessor;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
 pub use assets::{AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, async_provider, sync_provider};
@@ -39,6 +40,17 @@ impl Target {
             Target::PdfPresentation => "pdf-presentation",
             Target::Pptx => "pptx",
             Target::HtmlReveal => "html-reveal",
+        }
+    }
+
+    /// File extension (without the leading dot) for a suggested filename.
+    pub fn extension(&self) -> &'static str {
+        match self {
+            Target::Docx => "docx",
+            Target::Odt => "odt",
+            Target::Pdf | Target::PdfPresentation => "pdf",
+            Target::Pptx => "pptx",
+            Target::HtmlReveal => "html",
         }
     }
 }
@@ -73,29 +85,69 @@ pub struct ResolvedDoc {
     pub assets: Vec<AssetRef>,
 }
 
-/// Per-render input passed to every backend. Holds the doc, the asset provider,
-/// and the destination path. Borrowed so the renderer never owns runtime state.
+/// Per-render input passed to the path-based render entry point. Holds the
+/// doc, the asset provider, and the destination path. Borrowed so the
+/// renderer never owns runtime state.
 pub struct RenderRequest<'a> {
     pub doc: &'a ResolvedDoc,
     pub assets: &'a dyn AssetProvider,
     pub out: &'a Path,
 }
 
-/// What a backend produced. Backends may write multiple files (e.g. HTML + assets);
-/// the primary artifact is the one a caller should hand back to the user.
+/// What a backend produced, written to disk. Backends may write multiple
+/// files (e.g. HTML + assets); the primary artifact is the one a caller
+/// should hand back to the user.
 #[derive(Debug, Clone)]
 pub struct Artifact {
     pub primary: PathBuf,
     pub extras: Vec<PathBuf>,
 }
 
+/// What a backend produced, held entirely in memory — the shape a server
+/// embedder wants to hand straight back in an HTTP response body, with no
+/// temp file to mint or clean up.
+#[derive(Debug, Clone)]
+pub struct RenderedArtifact {
+    pub primary: Bytes,
+    /// Suggested filename, including extension.
+    pub filename: String,
+    pub extras: Vec<(String, Bytes)>,
+}
+
+impl RenderedArtifact {
+    /// Write this artifact to disk at `out`, extras alongside it in the same
+    /// directory under their own filenames. Used to implement the path-based
+    /// `RenderRequest` API over the bytes-first one.
+    pub async fn write_to(&self, out: &Path) -> Result<Artifact> {
+        if let Some(parent) = out.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(out, &self.primary).await?;
+
+        let dir = out.parent().unwrap_or_else(|| Path::new("."));
+        let mut extras = Vec::with_capacity(self.extras.len());
+        for (name, bytes) in &self.extras {
+            let p = dir.join(name);
+            tokio::fs::write(&p, bytes).await?;
+            extras.push(p);
+        }
+        Ok(Artifact { primary: out.to_path_buf(), extras })
+    }
+}
+
 /// Every output format is one impl. Pandoc is just one kind of guest.
 /// Async because resolving templates and engine subprocesses are inherently async.
+///
+/// Bytes-first: a backend renders straight into memory. Typst already
+/// produces bytes in-process; pandoc still needs a temp file at the
+/// subprocess boundary, but owns that temp lifecycle internally and reads the
+/// result back before returning — no file ever escapes to the caller.
 pub trait Backend: Send + Sync {
     fn target(&self) -> Target;
 
-    fn render<'a>(
+    fn render_to_bytes<'a>(
         &'a self,
-        req: &'a RenderRequest<'a>,
-    ) -> BoxFuture<'a, Result<Artifact>>;
+        doc: &'a ResolvedDoc,
+        assets: &'a dyn AssetProvider,
+    ) -> BoxFuture<'a, Result<RenderedArtifact>>;
 }

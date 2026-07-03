@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 
-use crate::{Artifact, Backend, RenderRequest, Target};
+use crate::{Artifact, AssetProvider, Backend, RenderRequest, RenderedArtifact, ResolvedDoc, Target};
 
 #[cfg(feature = "pandoc")]
 pub mod pandoc;
@@ -44,10 +44,24 @@ impl Registry {
         self.backends.insert(backend.target(), backend);
     }
 
-    pub async fn render(&self, target: Target, req: &RenderRequest<'_>) -> Result<Artifact> {
+    /// Render straight into memory — no temp dir, no file to clean up. The
+    /// entry point for server embedders handing bytes back in a response.
+    pub async fn render_to_bytes(
+        &self,
+        target: Target,
+        doc: &ResolvedDoc,
+        assets: &dyn AssetProvider,
+    ) -> Result<RenderedArtifact> {
         let Some(b) = self.backends.get(&target) else {
             bail!("no backend registered for target {:?}", target);
         };
-        b.render(req).await
+        b.render_to_bytes(doc, assets).await
+    }
+
+    /// Render to a file on disk. Implemented over `render_to_bytes` — one
+    /// render path, this just adds the write.
+    pub async fn render(&self, target: Target, req: &RenderRequest<'_>) -> Result<Artifact> {
+        let artifact = self.render_to_bytes(target, req.doc, req.assets).await?;
+        artifact.write_to(req.out).await
     }
 }

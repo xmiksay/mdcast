@@ -13,7 +13,7 @@ sub-crates).
 
 ```
 src/
-├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest, re-exports
+├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
 ├─ brand.rs           BrandSpec + AutoLayout config
 ├─ images.rs          resolve_images() — async per-page image rewriter
@@ -34,8 +34,17 @@ embedded/             rust-embed source — keys mirror these paths
 ## Architectural seams (don't violate)
 
 - **`ResolvedDoc` is the IR.** Never pandoc's AST. Single load-bearing schema.
-- **`Backend` trait per target.** Async (`BoxFuture`). Pandoc and Typst are
-  *guests*; the core never imports either.
+- **`Backend` trait per target.** Async (`BoxFuture`), bytes-first —
+  `render_to_bytes(doc, assets) -> RenderedArtifact` is the one method every
+  backend implements. Pandoc and Typst are *guests*; the core never imports
+  either.
+- **One render path, two ways to collect it.** `Registry::render_to_bytes`
+  (in-memory, for server embedders) and `Registry::render` (path-based, used
+  by the CLI) both funnel through `Backend::render_to_bytes`; the latter just
+  adds `RenderedArtifact::write_to`. Typst already compiles to bytes
+  in-process; pandoc's temp dir (input file, reference doc, subprocess
+  output) is owned and cleaned up inside `PandocBackend::render_to_bytes` —
+  nothing escapes to the caller but the bytes.
 - **`AssetProvider` is the only way backends reach files.** No `std::fs` in
   backend code. Trait is `async` (boxed-future, dyn-safe). Image refs are
   resolved through it via `images::resolve_images` *before* pandoc sees the
@@ -69,7 +78,7 @@ cargo build                              # default = pandoc + typst
 cargo check --no-default-features        # core only — neither engine
 cargo check --no-default-features --features pandoc
 cargo check --no-default-features --features typst
-cargo test                               # 25 tests; runs in <1s
+cargo test                               # 33 tests; a few shell out to pandoc/typst
 ```
 
 CI must verify all four `cargo check` combinations; engine binaries are not
@@ -120,9 +129,10 @@ Rust.
 
 ## Conventions
 
-- **Async everywhere on the boundary.** `Backend::render` and `AssetProvider`
-  are both async. Default impls (`EmbeddedAssets`) return ready futures —
-  zero cost. Slow consumers (S3, DB, image renderer) `.await` freely.
+- **Async everywhere on the boundary.** `Backend::render_to_bytes` and
+  `AssetProvider` are both async. Default impls (`EmbeddedAssets`) return
+  ready futures — zero cost. Slow consumers (S3, DB, image renderer) `.await`
+  freely.
 - **`try_join_all` for fan-out fetches.** Multiple assets per render
   (templates + reference doc + images + reveal.js dist) resolve in parallel.
 - **`anyhow` for app-level errors**, `thiserror` for typed library errors
