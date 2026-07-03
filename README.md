@@ -87,6 +87,27 @@ What you get with no extra config:
 
 Run `mdcast explain slides.md` to print this table for any file.
 
+## Frontmatter
+
+A leading YAML block is stripped before the page splitter runs, so it never
+becomes a phantom `hero` page:
+
+```markdown
+---
+title: Q3 Operations Review
+author: F13
+date: 2026-07-03
+---
+
+# Real first page
+```
+
+Only a flat `key: value` subset is parsed — `title`/`author`/`date` populate
+`DocMeta`, any other keys land in `DocMeta::extra`. Pandoc targets pass
+`title`/`author`/`date` through as `--metadata` (revealjs `<title>`,
+docx/pptx document properties). No frontmatter block → `DocMeta` stays
+default, same as before.
+
 ## Page boundaries and classes
 
 Two surface syntaxes, both accepted:

@@ -3,6 +3,7 @@
 pub mod assets;
 pub mod backends;
 pub mod brand;
+pub mod frontmatter;
 pub mod images;
 pub mod pages;
 pub mod preprocessor;
