@@ -31,11 +31,8 @@ fn classify_one(idx: usize, last_idx: usize, page: RawPage, cfg: &AutoLayout) ->
             origin: PageOrigin::Explicit,
         };
     }
-    let shape = detect_shape(&page.body);
-    if let Some(rule) = cfg
-        .rules
-        .iter()
-        .find(|r| r.when == shape && shape != ShapePredicate::Empty)
+    if let Some(shape) = detect_shape(&page.body)
+        && let Some(rule) = cfg.rules.iter().find(|r| r.when == shape)
     {
         return Page {
             class: rule.class.clone(),
@@ -43,7 +40,8 @@ fn classify_one(idx: usize, last_idx: usize, page: RawPage, cfg: &AutoLayout) ->
             origin: PageOrigin::AutoShape,
         };
     }
-    // Empty pages still go through positional/default — empty hero/thanks are
+    // No shape rule matched (including `Empty` pages with no configured
+    // rule) — fall through to positional/default. Empty hero/thanks are
     // legitimate (image-only cover via assets, etc.).
     if idx == 0
         && let Some(c) = &cfg.first
@@ -71,15 +69,14 @@ fn classify_one(idx: usize, last_idx: usize, page: RawPage, cfg: &AutoLayout) ->
     }
 }
 
-fn detect_shape(body: &str) -> ShapePredicate {
+fn detect_shape(body: &str) -> Option<ShapePredicate> {
     if body.trim().is_empty() {
-        return ShapePredicate::Empty;
+        return Some(ShapePredicate::Empty);
     }
 
     // Walk the markdown event stream and classify the page by what top-level
     // block(s) it contains. We only need to distinguish a handful of shapes;
-    // anything ambiguous falls through to "not a special shape" (returns Empty
-    // sentinel meaning "no shape match" — checked against in classify_one).
+    // anything ambiguous falls through to `None` ("not a special shape").
     let parser = Parser::new_ext(body, Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH);
 
     let mut top_blocks: Vec<TopBlock> = Vec::new();
@@ -124,13 +121,10 @@ fn detect_shape(body: &str) -> ShapePredicate {
     }
 
     match top_blocks.as_slice() {
-        [TopBlock::H1] => ShapePredicate::SingleH1Only,
-        [TopBlock::Image] | [TopBlock::ParagraphWithImage] => ShapePredicate::SingleImageOnly,
-        [TopBlock::BlockQuote] => ShapePredicate::SingleBlockquoteOnly,
-        // Sentinel: nothing matched a shape rule. Use Empty here ONLY for
-        // "no match" — the classify_one early-return ensures we never pick the
-        // Empty rule for non-empty content.
-        _ => ShapePredicate::Empty,
+        [TopBlock::H1] => Some(ShapePredicate::SingleH1Only),
+        [TopBlock::Image] | [TopBlock::ParagraphWithImage] => Some(ShapePredicate::SingleImageOnly),
+        [TopBlock::BlockQuote] => Some(ShapePredicate::SingleBlockquoteOnly),
+        _ => None,
     }
 }
 
@@ -228,5 +222,29 @@ mod tests {
     fn single_page_doc_uses_first_not_last() {
         let pages = classify(vec![raw(None, "hello")], &cfg());
         assert_eq!(pages[0].class, "hero");
+    }
+
+    #[test]
+    fn empty_rule_fires_for_empty_page() {
+        let mut config = cfg();
+        config.rules.push(crate::brand::AutoRule {
+            when: ShapePredicate::Empty,
+            class: "blank".to_string(),
+        });
+        // Middle page — positional doesn't apply, so an `Empty` rule (if
+        // matchable) is what should classify it.
+        let pages = classify(
+            vec![raw(None, "a"), raw(None, "   \n"), raw(None, "b")],
+            &config,
+        );
+        assert_eq!(pages[1].class, "blank");
+        assert_eq!(pages[1].origin, PageOrigin::AutoShape);
+    }
+
+    #[test]
+    fn empty_page_without_rule_falls_through_to_positional() {
+        let pages = classify(vec![raw(None, "   \n"), raw(None, "b")], &cfg());
+        assert_eq!(pages[0].class, "hero");
+        assert_eq!(pages[0].origin, PageOrigin::AutoPositional);
     }
 }
