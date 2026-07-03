@@ -1,8 +1,8 @@
 //! Proves the AssetProvider boundary is genuinely async: a provider that
 //! defers via `tokio::time::sleep` must still complete a render correctly.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use bytes::Bytes;
 use mdcast::{AssetProvider, EmbeddedAssets, LayeredAssets, async_provider};
@@ -25,7 +25,10 @@ async fn async_callback_resolves_after_await() {
         }
     });
 
-    let layered = LayeredAssets { over: provider, base: EmbeddedAssets };
+    let layered = LayeredAssets {
+        over: provider,
+        base: EmbeddedAssets,
+    };
 
     let got = layered.get("user/cover.png").await.unwrap();
     assert_eq!(got, Some(Bytes::from_static(b"PNGBYTES")));

@@ -78,11 +78,19 @@ cargo build                              # default = pandoc + typst
 cargo check --no-default-features        # core only — neither engine
 cargo check --no-default-features --features pandoc
 cargo check --no-default-features --features typst
-cargo test                               # 33 tests; a few shell out to pandoc/typst
+cargo test                               # 40 tests; unit suite runs in <1s
 ```
 
-CI must verify all four `cargo check` combinations; engine binaries are not
-required to build, only to render.
+`tests/render_smoke.rs` drives the real engines (in-process typst, subprocess
+pandoc) to a genuine artifact per `Target` — the rest of the suite is unit
+tests and never invokes an engine. The pandoc-backed smoke tests skip
+gracefully (not `#[ignore]`) when `pandoc` isn't on `PATH`, so `cargo test`
+stays green with or without it installed locally.
+
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets
+-- -D warnings`, all four `cargo check` combinations, and `cargo test` on
+every push/PR to `master`, with `pandoc` installed in the job so the
+OOXML/revealjs smoke tests actually exercise pandoc in CI.
 
 ## Run
 

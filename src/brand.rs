@@ -45,9 +45,18 @@ impl Default for AutoLayout {
             last: Some("thanks".to_string()),
             default: "content".to_string(),
             rules: vec![
-                AutoRule { when: ShapePredicate::SingleH1Only, class: "section-divider".to_string() },
-                AutoRule { when: ShapePredicate::SingleImageOnly, class: "image-full".to_string() },
-                AutoRule { when: ShapePredicate::SingleBlockquoteOnly, class: "callout".to_string() },
+                AutoRule {
+                    when: ShapePredicate::SingleH1Only,
+                    class: "section-divider".to_string(),
+                },
+                AutoRule {
+                    when: ShapePredicate::SingleImageOnly,
+                    class: "image-full".to_string(),
+                },
+                AutoRule {
+                    when: ShapePredicate::SingleBlockquoteOnly,
+                    class: "callout".to_string(),
+                },
             ],
         }
     }

@@ -44,7 +44,11 @@ impl TypstBackend {
         if let Some(b) = assets.get(&key).await? {
             return Ok((class.to_string(), b.to_vec()));
         }
-        tracing::warn!(class, target_dir, "typst layout not found; falling back to {fallback}");
+        tracing::warn!(
+            class,
+            target_dir,
+            "typst layout not found; falling back to {fallback}"
+        );
         let fallback_key = format!("typst/layouts/{target_dir}/{fallback}.typ");
         let Some(b) = assets.get(&fallback_key).await? else {
             bail!(
@@ -124,11 +128,12 @@ async fn collect_images_for_typst(
         }
     }
     let url_vec: Vec<String> = urls.into_keys().collect();
-    let fetched: Vec<(String, Option<Vec<u8>>)> = try_join_all(url_vec.iter().map(|u| async move {
-        let bytes = provider.get(u).await?.map(|b| b.to_vec());
-        Ok::<_, anyhow::Error>((u.clone(), bytes))
-    }))
-    .await?;
+    let fetched: Vec<(String, Option<Vec<u8>>)> =
+        try_join_all(url_vec.iter().map(|u| async move {
+            let bytes = provider.get(u).await?.map(|b| b.to_vec());
+            Ok::<_, anyhow::Error>((u.clone(), bytes))
+        }))
+        .await?;
 
     let mut map = BTreeMap::new();
     let mut files = Vec::new();
@@ -288,7 +293,11 @@ fn escape_typst_inline(s: &str) -> String {
 fn alias_for(class: &str) -> String {
     let mut out = String::from("layout_");
     for c in class.chars() {
-        if c.is_ascii_alphanumeric() { out.push(c) } else { out.push('_') }
+        if c.is_ascii_alphanumeric() {
+            out.push(c)
+        } else {
+            out.push('_')
+        }
     }
     out
 }
@@ -361,7 +370,9 @@ fn format_lib_error(err: typst_as_lib::TypstAsLibError) -> anyhow::Error {
     }
 }
 
-fn format_diagnostics(diags: impl IntoIterator<Item = typst::diag::SourceDiagnostic>) -> anyhow::Error {
+fn format_diagnostics(
+    diags: impl IntoIterator<Item = typst::diag::SourceDiagnostic>,
+) -> anyhow::Error {
     let mut out = String::from("typst compilation errors:\n");
     for e in diags {
         let sev = match e.severity {

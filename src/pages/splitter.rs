@@ -55,19 +55,19 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
 
         match state {
             State::FencedCode { fence } => {
-                if let Some(stripped) = trimmed.strip_prefix(&"`".repeat(fence)) {
-                    if stripped.chars().all(|c| c == '`') {
-                        state = State::Top;
-                    }
+                if let Some(stripped) = trimmed.strip_prefix(&"`".repeat(fence))
+                    && stripped.chars().all(|c| c == '`')
+                {
+                    state = State::Top;
                 }
                 push(&mut buf, &mut wrapper_buf, &wrapper, line);
                 continue;
             }
             State::TildeCode { fence } => {
-                if let Some(stripped) = trimmed.strip_prefix(&"~".repeat(fence)) {
-                    if stripped.chars().all(|c| c == '~') {
-                        state = State::Top;
-                    }
+                if let Some(stripped) = trimmed.strip_prefix(&"~".repeat(fence))
+                    && stripped.chars().all(|c| c == '~')
+                {
+                    state = State::Top;
                 }
                 push(&mut buf, &mut wrapper_buf, &wrapper, line);
                 continue;
@@ -96,7 +96,9 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
             if w.is_closer(trimmed) {
                 pages.push(RawPage {
                     explicit_class: wrapper_class.take(),
-                    body: std::mem::take(&mut wrapper_buf).trim_matches('\n').to_string(),
+                    body: std::mem::take(&mut wrapper_buf)
+                        .trim_matches('\n')
+                        .to_string(),
                 });
                 wrapper = None;
                 continue;
@@ -129,7 +131,10 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
 
     // Trailing content
     if !buf.trim().is_empty() {
-        pages.push(RawPage { explicit_class: None, body: buf.trim_matches('\n').to_string() });
+        pages.push(RawPage {
+            explicit_class: None,
+            body: buf.trim_matches('\n').to_string(),
+        });
     }
 
     pages
@@ -147,9 +152,15 @@ fn flush_thematic(pages: &mut Vec<RawPage>, buf: &mut String, class: Option<Stri
     let body = std::mem::take(buf);
     let trimmed = body.trim_matches('\n');
     if !trimmed.is_empty() {
-        pages.push(RawPage { explicit_class: class, body: trimmed.to_string() });
+        pages.push(RawPage {
+            explicit_class: class,
+            body: trimmed.to_string(),
+        });
     } else if class.is_some() {
-        pages.push(RawPage { explicit_class: class, body: String::new() });
+        pages.push(RawPage {
+            explicit_class: class,
+            body: String::new(),
+        });
     }
 }
 
@@ -321,7 +332,10 @@ mod tests {
             fn split(&self, md: &str) -> Vec<RawPage> {
                 md.lines()
                     .filter(|l| !l.is_empty())
-                    .map(|l| RawPage { explicit_class: None, body: l.to_string() })
+                    .map(|l| RawPage {
+                        explicit_class: None,
+                        body: l.to_string(),
+                    })
                     .collect()
             }
         }

@@ -39,7 +39,11 @@ fn build_driver(pages: &[mdcast::Page]) -> String {
 fn alias_for(class: &str) -> String {
     let mut out = String::from("layout_");
     for c in class.chars() {
-        if c.is_ascii_alphanumeric() { out.push(c) } else { out.push('_') }
+        if c.is_ascii_alphanumeric() {
+            out.push(c)
+        } else {
+            out.push('_')
+        }
     }
     out
 }

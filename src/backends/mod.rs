@@ -18,7 +18,9 @@ pub struct Registry {
 
 impl Registry {
     pub fn empty() -> Self {
-        Self { backends: HashMap::new() }
+        Self {
+            backends: HashMap::new(),
+        }
     }
 
     /// Registry with every feature-enabled backend installed at its default target.

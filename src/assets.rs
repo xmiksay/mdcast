@@ -140,7 +140,10 @@ mod tests {
                 Ok(None)
             }
         });
-        assert_eq!(p.get("hello").await.unwrap(), Some(Bytes::from_static(b"world")));
+        assert_eq!(
+            p.get("hello").await.unwrap(),
+            Some(Bytes::from_static(b"world"))
+        );
         assert!(p.get("nope").await.unwrap().is_none());
     }
 
@@ -148,7 +151,11 @@ mod tests {
     async fn async_provider_can_defer() {
         let p = async_provider(|key: String| async move {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            if key == "k" { Ok(Some(Bytes::from_static(b"v"))) } else { Ok(None) }
+            if key == "k" {
+                Ok(Some(Bytes::from_static(b"v")))
+            } else {
+                Ok(None)
+            }
         });
         assert_eq!(p.get("k").await.unwrap(), Some(Bytes::from_static(b"v")));
     }
@@ -165,8 +172,14 @@ mod tests {
             _ => Ok(None),
         });
         let layered = LayeredAssets { over, base };
-        assert_eq!(layered.get("a").await.unwrap(), Some(Bytes::from_static(b"OVER")));
-        assert_eq!(layered.get("b").await.unwrap(), Some(Bytes::from_static(b"BASE-B")));
+        assert_eq!(
+            layered.get("a").await.unwrap(),
+            Some(Bytes::from_static(b"OVER"))
+        );
+        assert_eq!(
+            layered.get("b").await.unwrap(),
+            Some(Bytes::from_static(b"BASE-B"))
+        );
         assert_eq!(layered.get("c").await.unwrap(), None);
     }
 }

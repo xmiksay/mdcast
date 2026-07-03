@@ -95,8 +95,7 @@ mod tests {
 
     #[test]
     fn html_image_tag_with_src() {
-        let out =
-            HtmlImageTags.preprocess(r#"before <img src="logo.png" alt="Logo"/> after"#);
+        let out = HtmlImageTags.preprocess(r#"before <img src="logo.png" alt="Logo"/> after"#);
         assert_eq!(out, "before ![Logo](logo.png) after");
     }
 
@@ -120,7 +119,10 @@ mod tests {
                 md.to_uppercase()
             }
         }
-        let chain = Chain { first: HtmlImageTags, second: Upper };
+        let chain = Chain {
+            first: HtmlImageTags,
+            second: Upper,
+        };
         let out = chain.preprocess(r#"<img src="a.png"/>"#);
         assert_eq!(out, "![](A.PNG)");
     }
