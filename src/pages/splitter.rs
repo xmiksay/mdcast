@@ -17,7 +17,10 @@ pub trait PageSplitter: Send + Sync {
 ///
 /// Recognises three boundary syntaxes:
 ///   * `<page class="X"> … </page>`             — HTML-style wrapper
-///   * `::: {.X}` … `:::`                       — Pandoc fenced div
+///   * `<page class="X" />`                     — self-closing, empty page
+///   * `::: {.X}` … `:::`                       — Pandoc fenced div (may
+///     nest, e.g. the `::: columns` / `::: column` idiom — only the matching
+///     outermost `:::` closes the page)
 ///   * `---` thematic break                     — implicit page break
 ///
 /// Done with a line-based pass — we don't need the full markdown AST, only
@@ -49,6 +52,7 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
     let mut wrapper: Option<Wrapper> = None;
     let mut wrapper_class: Option<String> = None;
     let mut wrapper_buf = String::new();
+    let mut wrapper_depth: usize = 0;
 
     for line in markdown.split_inclusive('\n') {
         let trimmed = line.trim_end_matches(['\r', '\n']);
@@ -93,7 +97,21 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
 
         // Wrapper handling — only when we are inside one.
         if let Some(w) = wrapper {
+            // Nested fenced divs (e.g. the `::: columns / ::: column` idiom) must not
+            // close the page wrapper on the first inner `:::` — track nesting depth.
+            if matches!(w, Wrapper::FencedDiv) && parse_fenced_div_open(trimmed).is_some() {
+                wrapper_depth += 1;
+                wrapper_buf.push_str(line);
+                continue;
+            }
             if w.is_closer(trimmed) {
+                if matches!(w, Wrapper::FencedDiv) {
+                    wrapper_depth -= 1;
+                    if wrapper_depth > 0 {
+                        wrapper_buf.push_str(line);
+                        continue;
+                    }
+                }
                 pages.push(RawPage {
                     explicit_class: wrapper_class.take(),
                     body: std::mem::take(&mut wrapper_buf)
@@ -108,9 +126,16 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
         }
 
         // Outside a wrapper: detect wrapper openers, page tags, thematic breaks.
-        if let Some(class) = parse_html_page_open(trimmed) {
-            // Self-closing inline form not supported; treat <page class="X" /> as opening
+        if let Some((class, self_closing)) = parse_html_page_tag(trimmed) {
             flush_thematic(&mut pages, &mut buf, None);
+            if self_closing {
+                // `<page class="X" />` — an explicit empty page, not an opener.
+                pages.push(RawPage {
+                    explicit_class: Some(class),
+                    body: String::new(),
+                });
+                continue;
+            }
             wrapper = Some(Wrapper::Html);
             wrapper_class = Some(class);
             continue;
@@ -119,6 +144,7 @@ pub fn split(markdown: &str) -> Vec<RawPage> {
             flush_thematic(&mut pages, &mut buf, None);
             wrapper = Some(Wrapper::FencedDiv);
             wrapper_class = Some(class);
+            wrapper_depth = 1;
             continue;
         }
         if is_thematic_break(trimmed) {
@@ -212,8 +238,9 @@ fn is_thematic_break(line: &str) -> bool {
         && t.chars().filter(|ch| *ch == c).count() >= 3
 }
 
-/// Match `<page class="X">` (also `class='X'`, extra whitespace).
-fn parse_html_page_open(line: &str) -> Option<String> {
+/// Match `<page class="X">` (also `class='X'`, extra whitespace) or the
+/// self-closing `<page class="X" />` form. Returns `(class, self_closing)`.
+fn parse_html_page_tag(line: &str) -> Option<(String, bool)> {
     let t = line.trim();
     if !t.starts_with("<page") {
         return None;
@@ -222,8 +249,10 @@ fn parse_html_page_open(line: &str) -> Option<String> {
         return None;
     }
     let inner = &t[5..t.len() - 1]; // strip "<page" and ">"
+    let self_closing = inner.trim_end().ends_with('/');
     let inner = inner.trim_end_matches('/').trim();
-    extract_class_attr(inner)
+    let class = extract_class_attr(inner)?;
+    Some((class, self_closing))
 }
 
 fn extract_class_attr(s: &str) -> Option<String> {
@@ -303,6 +332,38 @@ mod tests {
         assert_eq!(pages[2].explicit_class, None);
         assert_eq!(pages[2].body, "more body");
         assert_eq!(pages[3].explicit_class.as_deref(), Some("thanks"));
+    }
+
+    #[test]
+    fn self_closing_html_page_is_an_empty_page() {
+        let md = "<page class=\"section\" />\n\nafter\n";
+        let pages = split(md);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].explicit_class.as_deref(), Some("section"));
+        assert_eq!(pages[0].body, "");
+        assert_eq!(pages[1].explicit_class, None);
+        assert_eq!(pages[1].body, "after");
+    }
+
+    #[test]
+    fn self_closing_html_page_no_space_before_slash() {
+        let md = "<page class=\"section\"/>\n\nafter\n";
+        let pages = split(md);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].explicit_class.as_deref(), Some("section"));
+        assert_eq!(pages[0].body, "");
+    }
+
+    #[test]
+    fn nested_fenced_divs_do_not_close_page_early() {
+        let md = "::: {.columns}\n::: {.column}\nleft\n:::\n::: {.column}\nright\n:::\n:::\n\nnext page\n";
+        let pages = split(md);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].explicit_class.as_deref(), Some("columns"));
+        assert!(pages[0].body.contains("left"));
+        assert!(pages[0].body.contains("right"));
+        assert_eq!(pages[1].explicit_class, None);
+        assert_eq!(pages[1].body, "next page");
     }
 
     #[test]
