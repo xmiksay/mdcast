@@ -199,6 +199,25 @@ async fn main() -> Result<()> {
 # async fn your_app_lookup(_: &str) -> Result<Option<Vec<u8>>> { Ok(None) }
 ```
 
+### Server embedding: render straight to bytes
+
+A server handling a render request doesn't want a file on disk — it wants
+bytes to put in a response body. `Registry::render_to_bytes` skips the
+temp-dir dance entirely: Typst PDFs are already produced in memory, and the
+pandoc temp lifecycle (input file, reference doc, subprocess output) is owned
+internally and cleaned up before the call returns.
+
+```rust
+let registry = Registry::with_defaults();
+let artifact = registry.render_to_bytes(Target::HtmlReveal, &doc, &provider).await?;
+// artifact.primary: Bytes, artifact.filename: "output.html"
+respond_with(artifact.filename, artifact.primary);
+```
+
+`RenderRequest`/`registry.render(...)` (the path-based API used above) is
+implemented on top of this — one render path, two ways to collect the
+result.
+
 Anything the provider returns `None` for falls through to the next layer.
 `EmbeddedAssets` is always at the bottom and ships:
 

@@ -12,19 +12,18 @@
 //! Reference docs (`reference.docx`, `reference.pptx`, `reference.odt`) live
 //! in the provider; we materialise them to a tempfile per invocation.
 
-use std::path::PathBuf;
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use bytes::Bytes;
 use tempfile::TempDir;
 use tokio::process::Command;
-
-use std::path::Path;
 
 use crate::AssetProvider;
 use crate::assets::BoxFuture;
 use crate::images::resolve_images;
 use crate::pages::Page;
-use crate::{Artifact, Backend, RenderRequest, Target};
+use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 /// Pull every key beginning with `prefix` from the provider and write the bytes
 /// to `dest/<key-without-prefix>`. Returns the number of files materialised.
@@ -68,18 +67,26 @@ impl Backend for PandocBackend {
         self.target
     }
 
-    fn render<'a>(&'a self, req: &'a RenderRequest<'a>) -> BoxFuture<'a, Result<Artifact>> {
+    fn render_to_bytes<'a>(
+        &'a self,
+        doc: &'a ResolvedDoc,
+        assets: &'a dyn AssetProvider,
+    ) -> BoxFuture<'a, Result<RenderedArtifact>> {
         Box::pin(async move {
+            // Owns its whole temp lifecycle: input, reference doc, revealjs
+            // dist, and the pandoc output itself all live under `root` and
+            // are gone the moment this function returns — nothing escapes to
+            // the caller but the bytes.
             let tmp = TempDir::new().context("create temp dir for pandoc render")?;
             let root = tmp.path();
 
             // Resolve image references via the provider before handing the
             // markdown to pandoc. Anything the provider doesn't know about is
             // left intact so pandoc's own resolution path can have a go.
-            let mut pages = req.doc.pages.clone();
+            let mut pages = doc.pages.clone();
             let assets_dir = root.join("assets");
             tokio::fs::create_dir_all(&assets_dir).await?;
-            resolve_images(&mut pages, req.assets, &assets_dir).await?;
+            resolve_images(&mut pages, assets, &assets_dir).await?;
 
             let input = build_input(&pages, self.target);
             let input_path = root.join("input.md");
@@ -94,7 +101,7 @@ impl Backend for PandocBackend {
                 _ => unreachable!(),
             };
             let reference_path = if let Some((key, name)) = reference {
-                if let Some(bytes) = req.assets.get(key).await? {
+                if let Some(bytes) = assets.get(key).await? {
                     let p = root.join(name);
                     tokio::fs::write(&p, &bytes).await?;
                     Some(p)
@@ -106,10 +113,8 @@ impl Backend for PandocBackend {
                 None
             };
 
-            let out_path: PathBuf = req.out.to_path_buf();
-            if let Some(parent) = out_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+            let filename = format!("output.{}", self.target.extension());
+            let out_path = root.join(&filename);
 
             // For reveal.js: materialise any provider-supplied reveal.js
             // distribution into the temp root so pandoc inlines it via
@@ -118,8 +123,7 @@ impl Backend for PandocBackend {
             // consumers can override by serving the same keys themselves.
             let revealjs_root = if matches!(self.target, Target::HtmlReveal) {
                 let dest = root.join("revealjs");
-                let materialised =
-                    materialise_subtree(req.assets, "revealjs/", &dest).await?;
+                let materialised = materialise_subtree(assets, "revealjs/", &dest).await?;
                 if materialised > 0 { Some(dest) } else { None }
             } else {
                 None
@@ -148,13 +152,13 @@ impl Backend for PandocBackend {
             // caller actually provided — pandoc inserts a synthesised title
             // slide for pptx whenever a title is present, which would collide
             // with the author's own hero page.
-            if let Some(t) = &req.doc.meta.title {
+            if let Some(t) = &doc.meta.title {
                 cmd.arg(format!("--metadata=title={t}"));
             }
-            if let Some(a) = &req.doc.meta.author {
+            if let Some(a) = &doc.meta.author {
                 cmd.arg(format!("--metadata=author={a}"));
             }
-            if let Some(d) = &req.doc.meta.date {
+            if let Some(d) = &doc.meta.date {
                 cmd.arg(format!("--metadata=date={d}"));
             }
 
@@ -166,7 +170,11 @@ impl Backend for PandocBackend {
                 bail!("pandoc failed with status {status}");
             }
 
-            Ok(Artifact { primary: out_path, extras: vec![] })
+            let bytes = tokio::fs::read(&out_path)
+                .await
+                .context("read pandoc output")?;
+
+            Ok(RenderedArtifact { primary: Bytes::from(bytes), filename, extras: vec![] })
         })
     }
 }

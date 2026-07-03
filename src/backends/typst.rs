@@ -8,9 +8,9 @@
 //! thread (`spawn_blocking`) so the executor stays responsive.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use bytes::Bytes;
 use futures::future::try_join_all;
 use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use regex::Regex;
@@ -19,7 +19,7 @@ use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
 use crate::pages::Page;
-use crate::{Artifact, Backend, RenderRequest, Target};
+use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 pub struct TypstBackend {
     target: Target,
@@ -60,47 +60,47 @@ impl Backend for TypstBackend {
         self.target
     }
 
-    fn render<'a>(&'a self, req: &'a RenderRequest<'a>) -> BoxFuture<'a, Result<Artifact>> {
+    fn render_to_bytes<'a>(
+        &'a self,
+        doc: &'a ResolvedDoc,
+        assets: &'a dyn AssetProvider,
+    ) -> BoxFuture<'a, Result<RenderedArtifact>> {
         Box::pin(async move {
             // Resolve all layouts in parallel (deduped by class).
             let tdir = target_dir(self.target);
-            let mut classes: Vec<&str> = req.doc.pages.iter().map(|p| p.class.as_str()).collect();
+            let mut classes: Vec<&str> = doc.pages.iter().map(|p| p.class.as_str()).collect();
             classes.sort();
             classes.dedup();
             let layouts: Vec<(String, Vec<u8>)> = try_join_all(
-                classes.iter().map(|c| Self::fetch_layout(req.assets, tdir, c, "content")),
+                classes.iter().map(|c| Self::fetch_layout(assets, tdir, c, "content")),
             )
             .await?;
 
             // Resolve image refs through the provider. Returns the bytes to
             // register with the typst engine and a (url → virtual-path) map for
             // md→typst conversion.
-            let (image_map, image_files) =
-                collect_images_for_typst(&req.doc.pages, req.assets).await?;
+            let (image_map, image_files) = collect_images_for_typst(&doc.pages, assets).await?;
 
             // Convert each page body from markdown → typst markup.
-            let typst_bodies: Vec<String> = req
-                .doc
-                .pages
-                .iter()
-                .map(|p| md_to_typst(&p.body, &image_map))
-                .collect();
+            let typst_bodies: Vec<String> =
+                doc.pages.iter().map(|p| md_to_typst(&p.body, &image_map)).collect();
 
             // Build the driver source.
-            let driver = build_driver(&req.doc.pages, &typst_bodies);
+            let driver = build_driver(&doc.pages, &typst_bodies);
 
-            // Compile on a blocking thread — typst's compiler is sync and CPU-bound.
-            let out_path: PathBuf = req.out.to_path_buf();
-            if let Some(parent) = out_path.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
+            // Compile on a blocking thread — typst's compiler is sync and
+            // CPU-bound. Produced entirely in memory: no temp file, nothing
+            // to clean up.
             let pdf_bytes =
                 tokio::task::spawn_blocking(move || compile_pdf(driver, layouts, image_files))
                     .await
                     .context("typst compile thread panicked")??;
-            tokio::fs::write(&out_path, &pdf_bytes).await?;
 
-            Ok(Artifact { primary: out_path, extras: vec![] })
+            Ok(RenderedArtifact {
+                primary: Bytes::from(pdf_bytes),
+                filename: format!("output.{}", self.target.extension()),
+                extras: vec![],
+            })
         })
     }
 }
