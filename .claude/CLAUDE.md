@@ -29,7 +29,7 @@ src/
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
 ├─ revealjs/{dist,plugin}/…  vendored reveal.js 4.6.1 (fonts stripped)
-└─ reference/         (placeholder — real .docx/.pptx/.odt TBD)
+└─ reference/         reference.odt (real, minimal); .docx/.pptx TBD
 ```
 
 ## Architectural seams (don't violate)
@@ -130,9 +130,12 @@ Rust.
 - PPTX layout-name → slide-master mapping requires a `reference.pptx` that
   defines slide masters with the expected names. The vendored placeholder
   doesn't; pandoc default styling applies until a real reference doc lands.
-- `reference.docx/odt/pptx` are placeholder `.keep` files in `embedded/`. Real
+- `reference.docx/pptx` are placeholder `.keep` files in `embedded/`. Real
   reference docs (with named paragraph styles + slide masters) are the next
-  asset task.
+  asset task. `reference.odt` exists — it's pandoc's own default reference.odt
+  plus one added paragraph style (`PageBreak`, `fo:break-before="page"`) that
+  page separators reference; custom-style class projection for other classes
+  still falls back to pandoc's defaults there too.
 - Image-ref rewriter uses a small regex; reference-style links, titles
   (`![alt](url "title")`), and angle-bracket URLs are not recognised in v1.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to

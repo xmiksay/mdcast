@@ -203,8 +203,14 @@ fn pandoc_writer(target: Target) -> &'static str {
 ///
 /// * **docx / odt** — page-based outputs; wrap each page's body in
 ///   `::: {custom-style="<class>"}` so the matching paragraph style from the
-///   reference doc is applied. Pages are separated by `\pagebreak{}` (raw
-///   docx page break) so each Page becomes a real page.
+///   reference doc is applied. Pages are separated by a raw-format block pandoc
+///   passes straight through to the writer — `\pagebreak{}` is raw LaTeX and
+///   both writers silently drop it. Docx gets an `openxml` block inserting
+///   `<w:br w:type="page"/>` directly (no reference doc needed). Odt gets an
+///   `opendocument` block referencing the `PageBreak` paragraph style (defined
+///   in `embedded/reference/reference.odt` with `fo:break-before="page"`) —
+///   ODF has no reference-doc-free way to force a break, since page-break
+///   formatting can only live on a named style, not inline on the paragraph.
 /// * **pptx / html-reveal** — slide-based outputs; with `--slide-level=1` only
 ///   an h1 starts a new slide, so we project the class *onto the h1* of each
 ///   page, synthesising an empty h1 when the page has none. This is the
@@ -214,8 +220,18 @@ pub fn build_input(pages: &[Page], target: Target) -> String {
     for (i, page) in pages.iter().enumerate() {
         if i > 0 {
             s.push('\n');
-            if matches!(target, Target::Docx | Target::Odt) {
-                s.push_str("\\pagebreak{}\n\n");
+            match target {
+                Target::Docx => {
+                    s.push_str(
+                        "```{=openxml}\n<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n```\n\n",
+                    );
+                }
+                Target::Odt => {
+                    s.push_str(
+                        "```{=opendocument}\n<text:p text:style-name=\"PageBreak\"/>\n```\n\n",
+                    );
+                }
+                _ => {}
             }
         }
         match target {
@@ -292,9 +308,24 @@ mod tests {
     }
 
     #[test]
-    fn page_input_uses_pagebreak_for_docx() {
+    fn page_input_uses_raw_openxml_pagebreak_for_docx() {
         let out = build_input(&[p("hero", "intro"), p("content", "body")], Target::Docx);
-        assert!(out.contains(r"\pagebreak{}"));
+        assert!(out.contains("```{=openxml}"), "{out}");
+        assert!(out.contains(r#"<w:br w:type="page"/>"#), "{out}");
+        assert!(!out.contains(r"\pagebreak"), "{out}");
+        assert!(out.contains(r#"custom-style="hero""#));
+        assert!(out.contains(r#"custom-style="content""#));
+    }
+
+    #[test]
+    fn page_input_uses_raw_opendocument_pagebreak_for_odt() {
+        let out = build_input(&[p("hero", "intro"), p("content", "body")], Target::Odt);
+        assert!(out.contains("```{=opendocument}"), "{out}");
+        assert!(
+            out.contains(r#"<text:p text:style-name="PageBreak"/>"#),
+            "{out}"
+        );
+        assert!(!out.contains(r"\pagebreak"), "{out}");
         assert!(out.contains(r#"custom-style="hero""#));
         assert!(out.contains(r#"custom-style="content""#));
     }
@@ -303,6 +334,8 @@ mod tests {
     fn single_page_has_no_separator() {
         let out = build_input(&[p("hero", "just one")], Target::HtmlReveal);
         assert!(!out.contains(r"\pagebreak"));
+        assert!(!out.contains("openxml"));
+        assert!(!out.contains("opendocument"));
         assert!(out.starts_with("# {.hero}"));
     }
 }

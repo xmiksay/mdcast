@@ -44,6 +44,7 @@ typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "mdcast"
