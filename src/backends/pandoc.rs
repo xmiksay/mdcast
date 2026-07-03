@@ -179,7 +179,11 @@ impl Backend for PandocBackend {
                 .await
                 .context("read pandoc output")?;
 
-            Ok(RenderedArtifact { primary: Bytes::from(bytes), filename, extras: vec![] })
+            Ok(RenderedArtifact {
+                primary: Bytes::from(bytes),
+                filename,
+                extras: vec![],
+            })
         })
     }
 }

@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 
-use crate::{Artifact, AssetProvider, Backend, RenderRequest, RenderedArtifact, ResolvedDoc, Target};
+use crate::{
+    Artifact, AssetProvider, Backend, RenderRequest, RenderedArtifact, ResolvedDoc, Target,
+};
 
 #[cfg(feature = "pandoc")]
 pub mod pandoc;

@@ -133,7 +133,10 @@ impl RenderedArtifact {
             tokio::fs::write(&p, bytes).await?;
             extras.push(p);
         }
-        Ok(Artifact { primary: out.to_path_buf(), extras })
+        Ok(Artifact {
+            primary: out.to_path_buf(),
+            extras,
+        })
     }
 }
 

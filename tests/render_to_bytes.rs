@@ -33,7 +33,10 @@ async fn pandoc_target_renders_to_bytes() {
     assert_eq!(artifact.filename, "output.html");
     assert!(artifact.extras.is_empty());
     let html = String::from_utf8(artifact.primary.to_vec()).unwrap();
-    assert!(html.contains("<html"), "expected standalone HTML, got: {html}");
+    assert!(
+        html.contains("<html"),
+        "expected standalone HTML, got: {html}"
+    );
 }
 
 #[tokio::test]
@@ -46,7 +49,11 @@ async fn typst_target_renders_to_bytes() {
 
     assert_eq!(artifact.filename, "output.pdf");
     assert!(artifact.extras.is_empty());
-    assert!(artifact.primary.starts_with(b"%PDF"), "not a PDF: {:?}", &artifact.primary[..8.min(artifact.primary.len())]);
+    assert!(
+        artifact.primary.starts_with(b"%PDF"),
+        "not a PDF: {:?}",
+        &artifact.primary[..8.min(artifact.primary.len())]
+    );
 }
 
 #[tokio::test]
@@ -61,7 +68,11 @@ async fn path_based_render_agrees_with_bytes_render() {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let out = tmp.path().join("out.html");
-    let req = RenderRequest { doc: &d, assets: &EmbeddedAssets, out: &out };
+    let req = RenderRequest {
+        doc: &d,
+        assets: &EmbeddedAssets,
+        out: &out,
+    };
     let path_artifact = registry.render(Target::HtmlReveal, &req).await.unwrap();
 
     let written = tokio::fs::read(&path_artifact.primary).await.unwrap();

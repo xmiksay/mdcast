@@ -76,7 +76,9 @@ impl Backend for TypstBackend {
             classes.sort();
             classes.dedup();
             let layouts: Vec<(String, Vec<u8>)> = try_join_all(
-                classes.iter().map(|c| Self::fetch_layout(assets, tdir, c, "content")),
+                classes
+                    .iter()
+                    .map(|c| Self::fetch_layout(assets, tdir, c, "content")),
             )
             .await?;
 
@@ -86,8 +88,11 @@ impl Backend for TypstBackend {
             let (image_map, image_files) = collect_images_for_typst(&doc.pages, assets).await?;
 
             // Convert each page body from markdown → typst markup.
-            let typst_bodies: Vec<String> =
-                doc.pages.iter().map(|p| md_to_typst(&p.body, &image_map)).collect();
+            let typst_bodies: Vec<String> = doc
+                .pages
+                .iter()
+                .map(|p| md_to_typst(&p.body, &image_map))
+                .collect();
 
             // Build the driver source.
             let driver = build_driver(&doc.pages, &typst_bodies);
