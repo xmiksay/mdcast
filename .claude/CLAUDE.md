@@ -17,6 +17,7 @@ src/
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
 ├─ brand.rs           BrandSpec + AutoLayout config
 ├─ images.rs          resolve_images() — async per-page image rewriter
+├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
 │  └─ auto.rs         classify() — explicit > shape > positional > default
@@ -117,9 +118,12 @@ Rust.
 
 ## Known limitations
 
-- Typst layouts use `#raw(body, lang: "markdown")` — body shows as markdown
-  source, not typeset content. The md→Typst body renderer is the Phase-4
-  trigger and is **not** in scope yet.
+- The md→Typst converter (`typst.rs::md_to_typst`) covers a v1 subset:
+  headings, paragraphs, emphasis/strong, lists, blockquotes, images, inline
+  code, and code blocks. Links, footnotes, tables, and HTML blocks are dropped
+  (their text content still comes through). Literal `_` / `*` in prose are not
+  escaped. Layouts receive the converted body as a string and typeset it via
+  `#eval(body, mode: "markup")`.
 - DOCX/ODT honour a class as a paragraph-style name only (typographic
   projection). Spatial layout — multi-column, image positioning — would need a
   template-injection backend; documented in `PROJECT_PLAN.md` §10.
@@ -131,9 +135,8 @@ Rust.
   asset task.
 - Image-ref rewriter uses a small regex; reference-style links, titles
   (`![alt](url "title")`), and angle-bracket URLs are not recognised in v1.
-- `typst` binary not on `PATH` in this dev environment — Typst end-to-end is
-  not exercised here. `cargo check --features typst` passes; render needs
-  `typst` installed.
+- Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
+  render PDF targets. Only pandoc is an external binary dependency.
 
 ## Conventions
 

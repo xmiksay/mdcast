@@ -22,13 +22,14 @@ the LaTeX toolchain is slow and heavy. The value mdcast adds is the
 
 ## Quick start
 
-Install the engines you want to use:
+PDF targets need nothing extra — the Typst compiler is embedded in the
+library. Only the pandoc-backed targets (docx/odt/pptx/html-reveal) need the
+`pandoc` binary:
 
 ```sh
-# both optional, depending on which targets you'll render
-yay -S pandoc typst        # arch
-brew install pandoc typst  # macos
-apt install pandoc         # debian/ubuntu (typst: cargo install typst-cli)
+yay -S pandoc        # arch
+brew install pandoc  # macos
+apt install pandoc   # debian/ubuntu
 ```
 
 Build and render:
@@ -263,6 +264,25 @@ mdcast explain INPUT.md [--brand brand.toml]
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
 
+## Development
+
+All day-to-day commands are wrapped in the `Makefile` — run a bare `make` to
+list them:
+
+| Target                  | What it does                                                    |
+|-------------------------|-----------------------------------------------------------------|
+| `make build` / `release`| Debug / release build (default features = pandoc + typst)      |
+| `make check`            | Fast typecheck (default features)                               |
+| `make check-all`        | All four feature combinations (core, pandoc, typst, both)      |
+| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings`       |
+| `make test`             | Full suite (unit + integration)                                 |
+| `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
+| `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
+| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` — what CI runs   |
+| `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
+
+`CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.
+
 ## What's deferred
 
 These are not bugs — they're chosen scope cuts. Each lands as an additive
@@ -270,9 +290,9 @@ change at a seam that already exists (see `PROJECT_PLAN.md` §10).
 
 - Real branded `reference.{docx,odt,pptx}` assets (`.keep` placeholders for
   now; pandoc default styling applies).
-- Markdown → Typst body rendering (current templates use
-  `#raw(body, lang: "markdown")` — bodies render as source until the md→typst
-  step lands).
+- Full markdown coverage in the md→Typst converter (v1 handles headings,
+  emphasis, lists, blockquotes, images, and code; links, footnotes, and tables
+  are not yet projected — their text comes through unstyled).
 - Mermaid → SVG pre-processing (a Rust renderer the team already owns will
   plug in as a pre-step).
 - Brand projection (one `brand.toml` colour change → propagated to all

@@ -1,5 +1,6 @@
 //! mdcast CLI. Thin wrapper around the library; default `EmbeddedAssets` is
-//! used unless overridden by `--brand` (which can layer custom assets on top).
+//! used unless `--assets DIR` layers a filesystem provider on top. `--brand`
+//! supplies the `brand.toml` (auto-layout rules, palette, fonts).
 
 use std::path::PathBuf;
 use std::sync::Arc;
