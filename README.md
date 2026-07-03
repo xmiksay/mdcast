@@ -286,7 +286,7 @@ list them:
 ## What's deferred
 
 These are not bugs — they're chosen scope cuts. Each lands as an additive
-change at a seam that already exists (see `PROJECT_PLAN.md` §10).
+change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://github.com/xmiksay/mdcast/blob/master/PROJECT_PLAN.md#10-future-evolution--with-explicit-triggers) on GitHub).
 
 - Real branded `reference.{docx,odt,pptx}` assets (`.keep` placeholders for
   now; pandoc default styling applies).
