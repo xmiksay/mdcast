@@ -4,10 +4,17 @@
 //!   * **docx / odt** — wrap content in a `::: {custom-style="<class>"}` div so
 //!     the matching paragraph style from the reference doc is applied. Spatial
 //!     layout is not supported; this is typographic projection only.
-//!   * **pptx** — set a `slide-attributes` map per slide selecting the slide
-//!     layout *name* from the reference deck (`layout="<class>"`).
-//!   * **html-reveal** — annotate each slide with `{.<class>}` so the theme
-//!     CSS picks up the layout.
+//!   * **pptx / html-reveal** — annotate each slide with `{.<class>}` on its
+//!     h1. html-reveal's theme CSS picks this up directly. Pandoc's pptx
+//!     writer, however, has no notion of arbitrary named layouts — it always
+//!     picks one of a fixed set of content-shape-driven layouts (Title Slide,
+//!     Section Header, Two Content, Comparison, Content with Caption, Blank,
+//!     Title and Content) by *structure*, ignoring the class. So `.<class>`
+//!     is a no-op for pptx today; `reference.pptx` still earns its keep by
+//!     giving those seven built-in layouts real branding instead of pandoc's
+//!     stock look. True per-class layout selection would need post-render
+//!     patching of each slide's layout relationship — out of scope for the
+//!     reference-doc-only v1 (see `PROJECT_PLAN.md` §10).
 //!
 //! Reference docs (`reference.docx`, `reference.pptx`, `reference.odt`) live
 //! in the provider; we materialise them to a tempfile per invocation.

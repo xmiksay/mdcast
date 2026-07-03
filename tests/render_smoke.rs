@@ -175,6 +175,134 @@ async fn pandoc_docx_smoke() {
         break_count, 4,
         "expected 4 page breaks in word/document.xml, found {break_count}:\n{document_xml}"
     );
+
+    // Each page's class should resolve to a real paragraph style defined in
+    // reference.docx, not silently fall back to pandoc's default styling.
+    // README_EXAMPLE only exercises "hero", "content" (the image page falls
+    // through auto-classification to the default class, since it carries a
+    // heading alongside the image) and "thanks" this way — see
+    // `docx_custom_styles_apply_to_plain_paragraphs` for the other three,
+    // which pandoc's docx writer never applies to headings/blockquotes
+    // regardless of the enclosing custom-style (documented in the manual's
+    // "Custom Styles" section).
+    for class in ["hero", "content", "thanks"] {
+        let needle = format!(r#"<w:pStyle w:val="{class}" />"#);
+        assert!(
+            document_xml.contains(&needle),
+            "expected {needle:?} in word/document.xml (reference.docx style \
+             not applied for class {class:?}):\n{document_xml}"
+        );
+    }
+
+    // README_EXAMPLE's blockquote page always renders with pandoc's built-in
+    // BlockText style (pandoc never lets a custom-style override a
+    // blockquote's own styling) — reference.docx brands BlockText itself so
+    // that page still looks intentional rather than stock pandoc grey.
+    let styles_xml = zip_entry_to_string(&bytes, "word/styles.xml");
+    assert!(
+        styles_xml.contains("2E5AAC"),
+        "expected reference.docx's brand accent color in word/styles.xml"
+    );
+}
+
+/// Pandoc's docx/odt writers never apply a div's `custom-style` to headings,
+/// blockquotes, code blocks, or links — they always keep their own built-in
+/// style regardless (documented under "Custom Styles" in the pandoc manual).
+/// That means `section-divider` (assigned to heading-only pages) and
+/// `callout` (assigned to blockquote-only pages) never show up via the
+/// README fixture's auto-classified shapes. Exercise them directly against
+/// plain-paragraph bodies instead, where the exception doesn't apply.
+fn all_classes_doc() -> ResolvedDoc {
+    let pages = vec![
+        Page {
+            class: "hero".into(),
+            body: "Hero body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "content".into(),
+            body: "Content body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "thanks".into(),
+            body: "Thanks body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "image-full".into(),
+            body: "Image-full body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "section-divider".into(),
+            body: "Section-divider body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "callout".into(),
+            body: "Callout body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+    ];
+    ResolvedDoc {
+        pages,
+        meta: DocMeta::default(),
+        brand: BrandHandle(Arc::new(BrandSpec::default())),
+        assets: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn docx_custom_styles_apply_to_plain_paragraphs() {
+    if !pandoc_available() {
+        eprintln!("skipping docx_custom_styles_apply_to_plain_paragraphs: `pandoc` not on PATH");
+        return;
+    }
+    let doc = all_classes_doc();
+    let (_tmp, out) = render(Target::Docx, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    let document_xml = zip_entry_to_string(&bytes, "word/document.xml");
+    for class in [
+        "hero",
+        "content",
+        "thanks",
+        "image-full",
+        "section-divider",
+        "callout",
+    ] {
+        let needle = format!(r#"<w:pStyle w:val="{class}" />"#);
+        assert!(
+            document_xml.contains(&needle),
+            "expected {needle:?} in word/document.xml:\n{document_xml}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn odt_custom_styles_apply_to_plain_paragraphs() {
+    if !pandoc_available() {
+        eprintln!("skipping odt_custom_styles_apply_to_plain_paragraphs: `pandoc` not on PATH");
+        return;
+    }
+    let doc = all_classes_doc();
+    let (_tmp, out) = render(Target::Odt, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    let content_xml = zip_entry_to_string(&bytes, "content.xml");
+    for class in [
+        "hero",
+        "content",
+        "thanks",
+        "image-full",
+        "section-divider",
+        "callout",
+    ] {
+        let needle = format!(r#"text:style-name="{class}""#);
+        assert!(
+            content_xml.contains(&needle),
+            "expected {needle:?} in content.xml:\n{content_xml}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -211,6 +339,29 @@ async fn pandoc_odt_smoke() {
         "reference.odt's PageBreak style (fo:break-before=\"page\") should be \
          carried into the output styles.xml"
     );
+
+    // Each page's class should resolve to a real paragraph style defined in
+    // reference.odt, not silently fall back to pandoc's default styling. See
+    // `odt_custom_styles_apply_to_plain_paragraphs` for "image-full",
+    // "section-divider" and "callout" — pandoc never applies a custom style
+    // to headings/blockquotes, so README_EXAMPLE's auto-classified shapes
+    // don't exercise those three.
+    for class in ["hero", "content", "thanks"] {
+        let needle = format!(r#"text:style-name="{class}""#);
+        assert!(
+            content_xml.contains(&needle),
+            "expected {needle:?} in content.xml (reference.odt style not \
+             applied for class {class:?}):\n{content_xml}"
+        );
+    }
+
+    // Same reasoning as the docx blockquote check above: README_EXAMPLE's
+    // blockquote page always renders with the built-in Quotations style, so
+    // reference.odt brands Quotations itself.
+    assert!(
+        styles_xml.contains("#2e5aac"),
+        "expected reference.odt's brand accent color in styles.xml"
+    );
 }
 
 #[tokio::test]
@@ -227,6 +378,15 @@ async fn pandoc_pptx_smoke() {
         bytes.len() > 200,
         "suspiciously small pptx: {} bytes",
         bytes.len()
+    );
+
+    // reference.pptx's accent color should be present in the output theme —
+    // proof the real reference doc was used, not pandoc's bundled default
+    // (which ships accent1 = 4F81BD).
+    let theme_xml = zip_entry_to_string(&bytes, "ppt/theme/theme1.xml");
+    assert!(
+        theme_xml.contains("2E5AAC"),
+        "expected reference.pptx's brand accent color in ppt/theme/theme1.xml:\n{theme_xml}"
     );
 }
 
