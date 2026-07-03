@@ -12,9 +12,8 @@ use mdcast::backends::Registry;
 use mdcast::pages::auto::classify;
 use mdcast::pages::splitter::DefaultSplitter;
 use mdcast::{
-    AssetProvider, AssetRef, BrandHandle, BrandSpec, DocMeta, EmbeddedAssets, HtmlImageTags,
-    Identity, LayeredAssets, MarkdownPreprocessor, PageSplitter, RenderRequest, ResolvedDoc,
-    Target,
+    AssetProvider, AssetRef, BrandHandle, BrandSpec, EmbeddedAssets, HtmlImageTags, Identity,
+    LayeredAssets, MarkdownPreprocessor, PageSplitter, RenderRequest, ResolvedDoc, Target,
 };
 
 #[derive(Parser)]
@@ -171,6 +170,7 @@ async fn load_doc(
     let md = tokio::fs::read_to_string(input)
         .await
         .with_context(|| format!("read {}", input.display()))?;
+    let (meta, md) = mdcast::frontmatter::extract(&md);
     let brand_spec: BrandSpec = match brand {
         Some(p) => {
             let s = tokio::fs::read_to_string(p).await?;
@@ -192,7 +192,7 @@ async fn load_doc(
     let pages = classify(raw, &brand_spec.auto_layout);
     Ok(ResolvedDoc {
         pages,
-        meta: DocMeta::default(),
+        meta,
         brand: BrandHandle(Arc::new(brand_spec)),
         assets: Vec::<AssetRef>::new(),
     })

@@ -16,6 +16,7 @@ src/
 ├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
 ├─ brand.rs           BrandSpec + AutoLayout config
+├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
 ├─ images.rs          resolve_images() — async per-page image rewriter
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
