@@ -91,14 +91,15 @@ pub async fn resolve_images(
     Ok(resolved)
 }
 
-fn image_regex() -> Regex {
-    // Conservative: matches `![alt](url)` where url has no spaces, no inner `)`,
-    // and the alt text has no nested brackets. Pandoc-flavoured links with
-    // titles `(url "title")` aren't supported in v1.
+/// Matches `![alt](url)` where url has no spaces, no inner `)`, and the alt
+/// text has no nested brackets. Pandoc-flavoured links with titles
+/// `(url "title")` aren't supported in v1. Shared by the typst backend, which
+/// only needs the `url` capture.
+pub(crate) fn image_regex() -> Regex {
     Regex::new(r"!\[(?P<alt>[^\]]*)\]\((?P<url>[^)\s]+)\)").unwrap()
 }
 
-fn looks_remote(url: &str) -> bool {
+pub(crate) fn looks_remote(url: &str) -> bool {
     url.starts_with("http://")
         || url.starts_with("https://")
         || url.starts_with("data:")

@@ -9,7 +9,7 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 /// Image refs use the `images` map produced by `collect_images_for_typst`. Anything
 /// the converter doesn't know about (HTML blocks, footnotes, …) is dropped — v1
 /// scope, expanded as concrete fixtures demand it.
-pub(super) fn md_to_typst(md: &str, images: &BTreeMap<String, String>) -> String {
+pub fn md_to_typst(md: &str, images: &BTreeMap<String, String>) -> String {
     let mut out = String::new();
     let mut in_image = 0i32;
     let mut in_code_block = false;

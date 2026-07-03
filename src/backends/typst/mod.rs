@@ -12,16 +12,17 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures::future::try_join_all;
-use regex::Regex;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
+use crate::images::{image_regex, looks_remote};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 mod markdown;
-use markdown::{md_to_typst, typst_string};
+pub use markdown::md_to_typst;
+use markdown::typst_string;
 
 pub struct TypstBackend {
     target: Target,
@@ -123,12 +124,12 @@ async fn collect_images_for_typst(
     pages: &[Page],
     provider: &dyn AssetProvider,
 ) -> Result<(BTreeMap<String, String>, Vec<(String, Vec<u8>)>)> {
-    let re = Regex::new(r"!\[[^\]]*\]\((?P<url>[^)\s]+)\)").unwrap();
+    let re = image_regex();
     let mut urls: BTreeMap<String, ()> = BTreeMap::new();
     for page in pages {
         for cap in re.captures_iter(&page.body) {
             let url = cap.name("url").unwrap().as_str();
-            if is_remote(url) {
+            if looks_remote(url) {
                 continue;
             }
             urls.insert(url.to_string(), ());
@@ -157,13 +158,6 @@ async fn collect_images_for_typst(
     Ok((map, files))
 }
 
-fn is_remote(url: &str) -> bool {
-    url.starts_with("http://")
-        || url.starts_with("https://")
-        || url.starts_with("data:")
-        || url.starts_with("file://")
-}
-
 fn target_dir(target: Target) -> &'static str {
     match target {
         Target::Pdf => "pdf",
@@ -172,7 +166,7 @@ fn target_dir(target: Target) -> &'static str {
     }
 }
 
-fn build_driver(pages: &[Page], typst_bodies: &[String]) -> String {
+pub fn build_driver(pages: &[Page], typst_bodies: &[String]) -> String {
     let mut s = String::new();
 
     // Import every used layout once under a sanitized alias.
