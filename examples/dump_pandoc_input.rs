@@ -1,6 +1,6 @@
 fn main() {
     let md = std::fs::read_to_string("tests/golden/cover-deck.md").unwrap();
-    let raw = mdcast::pages::splitter::DefaultSplitter::default();
+    let raw = mdcast::pages::splitter::DefaultSplitter;
     use mdcast::PageSplitter;
     let pages = raw.split(&md);
     let classified = mdcast::pages::auto::classify(pages, &mdcast::AutoLayout::default());

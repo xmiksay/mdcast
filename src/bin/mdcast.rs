@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
 use bytes::Bytes;
+use clap::{Parser, Subcommand};
 use mdcast::backends::Registry;
 use mdcast::pages::auto::classify;
 use mdcast::pages::splitter::DefaultSplitter;
@@ -89,26 +89,51 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Render { input, target, out, brand, assets, html_image_tags } => {
+        Cmd::Render {
+            input,
+            target,
+            out,
+            brand,
+            assets,
+            html_image_tags,
+        } => {
             let doc = load_doc(&input, brand.as_deref(), html_image_tags).await?;
             let registry = Registry::with_defaults();
             let artifact = match assets {
                 Some(dir) => {
-                    let provider = LayeredAssets { over: FsAssets(dir), base: EmbeddedAssets };
-                    let req = RenderRequest { doc: &doc, assets: &provider, out: &out };
+                    let provider = LayeredAssets {
+                        over: FsAssets(dir),
+                        base: EmbeddedAssets,
+                    };
+                    let req = RenderRequest {
+                        doc: &doc,
+                        assets: &provider,
+                        out: &out,
+                    };
                     registry.render(target.into(), &req).await?
                 }
                 None => {
-                    let req = RenderRequest { doc: &doc, assets: &EmbeddedAssets, out: &out };
+                    let req = RenderRequest {
+                        doc: &doc,
+                        assets: &EmbeddedAssets,
+                        out: &out,
+                    };
                     registry.render(target.into(), &req).await?
                 }
             };
             println!("wrote {}", artifact.primary.display());
         }
-        Cmd::Explain { input, brand, html_image_tags } => {
+        Cmd::Explain {
+            input,
+            brand,
+            html_image_tags,
+        } => {
             let doc = load_doc(&input, brand.as_deref(), html_image_tags).await?;
             for (i, page) in doc.pages.iter().enumerate() {
-                println!("page {:>3}  class={:<20}  origin={:?}", i, page.class, page.origin);
+                println!(
+                    "page {:>3}  class={:<20}  origin={:?}",
+                    i, page.class, page.origin
+                );
             }
         }
     }

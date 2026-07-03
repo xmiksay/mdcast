@@ -118,7 +118,11 @@ mod tests {
     use bytes::Bytes;
 
     fn page(body: &str) -> Page {
-        Page { class: "content".into(), body: body.into(), origin: PageOrigin::Explicit }
+        Page {
+            class: "content".into(),
+            body: body.into(),
+            origin: PageOrigin::Explicit,
+        }
     }
 
     #[tokio::test]
@@ -128,30 +132,44 @@ mod tests {
             _ => Ok(None),
         });
         let tmp = tempfile::tempdir().unwrap();
-        let mut pages = vec![
-            page("![d](img/diagram.svg) and ![x](img/missing.png) and ![ext](https://e.com/p.png)"),
-        ];
-        let resolved = resolve_images(&mut pages, &provider, tmp.path()).await.unwrap();
+        let mut pages = vec![page(
+            "![d](img/diagram.svg) and ![x](img/missing.png) and ![ext](https://e.com/p.png)",
+        )];
+        let resolved = resolve_images(&mut pages, &provider, tmp.path())
+            .await
+            .unwrap();
 
         assert_eq!(resolved, vec!["img/diagram.svg".to_string()]);
         assert!(pages[0].body.contains("img__diagram.svg"));
-        assert!(pages[0].body.contains("img/missing.png"), "missing keys preserved");
-        assert!(pages[0].body.contains("https://e.com/p.png"), "remote URLs preserved");
+        assert!(
+            pages[0].body.contains("img/missing.png"),
+            "missing keys preserved"
+        );
+        assert!(
+            pages[0].body.contains("https://e.com/p.png"),
+            "remote URLs preserved"
+        );
     }
 
     #[tokio::test]
     async fn dedup_fetches_same_key_only_once() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         let calls = Arc::new(AtomicUsize::new(0));
         let calls_c = calls.clone();
         let provider = sync_provider(move |k| {
             calls_c.fetch_add(1, Ordering::SeqCst);
-            if k == "shared.png" { Ok(Some(Bytes::from_static(b"x"))) } else { Ok(None) }
+            if k == "shared.png" {
+                Ok(Some(Bytes::from_static(b"x")))
+            } else {
+                Ok(None)
+            }
         });
         let tmp = tempfile::tempdir().unwrap();
         let mut pages = vec![page("![](shared.png)"), page("![](shared.png)")];
-        resolve_images(&mut pages, &provider, tmp.path()).await.unwrap();
+        resolve_images(&mut pages, &provider, tmp.path())
+            .await
+            .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 }

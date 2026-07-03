@@ -5,7 +5,9 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 
-use crate::{Artifact, AssetProvider, Backend, RenderRequest, RenderedArtifact, ResolvedDoc, Target};
+use crate::{
+    Artifact, AssetProvider, Backend, RenderRequest, RenderedArtifact, ResolvedDoc, Target,
+};
 
 #[cfg(feature = "pandoc")]
 pub mod pandoc;
@@ -18,7 +20,9 @@ pub struct Registry {
 
 impl Registry {
     pub fn empty() -> Self {
-        Self { backends: HashMap::new() }
+        Self {
+            backends: HashMap::new(),
+        }
     }
 
     /// Registry with every feature-enabled backend installed at its default target.

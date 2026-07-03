@@ -36,7 +36,9 @@ async fn materialise_subtree(
     let keys = provider.list(prefix).await?;
     let mut written = 0usize;
     for key in keys {
-        let Some(bytes) = provider.get(&key).await? else { continue };
+        let Some(bytes) = provider.get(&key).await? else {
+            continue;
+        };
         let rel = key.strip_prefix(prefix).unwrap_or(&key);
         let path = dest.join(rel);
         if let Some(parent) = path.parent() {
@@ -106,7 +108,10 @@ impl Backend for PandocBackend {
                     tokio::fs::write(&p, &bytes).await?;
                     Some(p)
                 } else {
-                    tracing::warn!(key, "reference doc not in provider; pandoc default styling will be used");
+                    tracing::warn!(
+                        key,
+                        "reference doc not in provider; pandoc default styling will be used"
+                    );
                     None
                 }
             } else {
@@ -174,7 +179,11 @@ impl Backend for PandocBackend {
                 .await
                 .context("read pandoc output")?;
 
-            Ok(RenderedArtifact { primary: Bytes::from(bytes), filename, extras: vec![] })
+            Ok(RenderedArtifact {
+                primary: Bytes::from(bytes),
+                filename,
+                extras: vec![],
+            })
         })
     }
 }
@@ -264,7 +273,11 @@ mod tests {
     use crate::pages::{Page, PageOrigin};
 
     fn p(class: &str, body: &str) -> Page {
-        Page { class: class.into(), body: body.into(), origin: PageOrigin::Explicit }
+        Page {
+            class: class.into(),
+            body: body.into(),
+            origin: PageOrigin::Explicit,
+        }
     }
 
     #[test]

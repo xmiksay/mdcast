@@ -25,27 +25,50 @@ pub fn classify(raw: Vec<RawPage>, cfg: &AutoLayout) -> Vec<Page> {
 
 fn classify_one(idx: usize, last_idx: usize, page: RawPage, cfg: &AutoLayout) -> Page {
     if let Some(c) = page.explicit_class {
-        return Page { class: c, body: page.body, origin: PageOrigin::Explicit };
+        return Page {
+            class: c,
+            body: page.body,
+            origin: PageOrigin::Explicit,
+        };
     }
     let shape = detect_shape(&page.body);
-    if let Some(rule) = cfg.rules.iter().find(|r| r.when == shape && shape != ShapePredicate::Empty)
+    if let Some(rule) = cfg
+        .rules
+        .iter()
+        .find(|r| r.when == shape && shape != ShapePredicate::Empty)
     {
-        return Page { class: rule.class.clone(), body: page.body, origin: PageOrigin::AutoShape };
+        return Page {
+            class: rule.class.clone(),
+            body: page.body,
+            origin: PageOrigin::AutoShape,
+        };
     }
     // Empty pages still go through positional/default — empty hero/thanks are
     // legitimate (image-only cover via assets, etc.).
     if idx == 0
         && let Some(c) = &cfg.first
     {
-        return Page { class: c.clone(), body: page.body, origin: PageOrigin::AutoPositional };
+        return Page {
+            class: c.clone(),
+            body: page.body,
+            origin: PageOrigin::AutoPositional,
+        };
     }
     if idx == last_idx
         && last_idx != 0
         && let Some(c) = &cfg.last
     {
-        return Page { class: c.clone(), body: page.body, origin: PageOrigin::AutoPositional };
+        return Page {
+            class: c.clone(),
+            body: page.body,
+            origin: PageOrigin::AutoPositional,
+        };
     }
-    Page { class: cfg.default.clone(), body: page.body, origin: PageOrigin::AutoDefault }
+    Page {
+        class: cfg.default.clone(),
+        body: page.body,
+        origin: PageOrigin::AutoDefault,
+    }
 }
 
 fn detect_shape(body: &str) -> ShapePredicate {
@@ -68,7 +91,10 @@ fn detect_shape(body: &str) -> ShapePredicate {
             Event::Start(tag) => {
                 if depth == 0 {
                     current = Some(match &tag {
-                        Tag::Heading { level: HeadingLevel::H1, .. } => TopBlock::H1,
+                        Tag::Heading {
+                            level: HeadingLevel::H1,
+                            ..
+                        } => TopBlock::H1,
                         Tag::Heading { .. } => TopBlock::OtherHeading,
                         Tag::Paragraph => TopBlock::Paragraph,
                         Tag::BlockQuote(_) => TopBlock::BlockQuote,
@@ -128,7 +154,10 @@ mod tests {
     }
 
     fn raw(class: Option<&str>, body: &str) -> RawPage {
-        RawPage { explicit_class: class.map(str::to_string), body: body.to_string() }
+        RawPage {
+            explicit_class: class.map(str::to_string),
+            body: body.to_string(),
+        }
     }
 
     #[test]
@@ -141,7 +170,11 @@ mod tests {
     #[test]
     fn positional_first_and_last() {
         let pages = classify(
-            vec![raw(None, "intro\n"), raw(None, "middle\n"), raw(None, "bye\n")],
+            vec![
+                raw(None, "intro\n"),
+                raw(None, "middle\n"),
+                raw(None, "bye\n"),
+            ],
             &cfg(),
         );
         assert_eq!(pages[0].class, "hero");
@@ -184,7 +217,10 @@ mod tests {
 
     #[test]
     fn shape_rule_beats_positional_on_first() {
-        let pages = classify(vec![raw(None, "# Section"), raw(None, "x"), raw(None, "y")], &cfg());
+        let pages = classify(
+            vec![raw(None, "# Section"), raw(None, "x"), raw(None, "y")],
+            &cfg(),
+        );
         assert_eq!(pages[0].class, "section-divider");
     }
 

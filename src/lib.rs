@@ -13,7 +13,9 @@ use anyhow::Result;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-pub use assets::{AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, async_provider, sync_provider};
+pub use assets::{
+    AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, async_provider, sync_provider,
+};
 pub use brand::{AutoLayout, BrandSpec};
 pub use pages::splitter::{DefaultSplitter, PageSplitter};
 pub use pages::{Page, PageOrigin, RawPage};
@@ -131,7 +133,10 @@ impl RenderedArtifact {
             tokio::fs::write(&p, bytes).await?;
             extras.push(p);
         }
-        Ok(Artifact { primary: out.to_path_buf(), extras })
+        Ok(Artifact {
+            primary: out.to_path_buf(),
+            extras,
+        })
     }
 }
 
