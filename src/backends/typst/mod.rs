@@ -12,7 +12,6 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures::future::try_join_all;
-use pulldown_cmark::{Event, HeadingLevel, Parser, Tag, TagEnd};
 use regex::Regex;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
@@ -20,6 +19,9 @@ use typst_as_lib::TypstEngine;
 use crate::assets::{AssetProvider, BoxFuture};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
+
+mod markdown;
+use markdown::{md_to_typst, typst_string};
 
 pub struct TypstBackend {
     target: Target,
@@ -196,105 +198,6 @@ fn build_driver(pages: &[Page], typst_bodies: &[String]) -> String {
     s
 }
 
-/// Convert markdown to a Typst-markup string suitable for `eval(.., mode: "markup")`.
-/// Image refs use the `images` map produced by `collect_images_for_typst`. Anything
-/// the converter doesn't know about (HTML blocks, footnotes, …) is dropped — v1
-/// scope, expanded as concrete fixtures demand it.
-fn md_to_typst(md: &str, images: &BTreeMap<String, String>) -> String {
-    let mut out = String::new();
-    let mut in_image = 0i32;
-    let parser = Parser::new(md);
-
-    for ev in parser {
-        match ev {
-            Event::Start(Tag::Heading { level, .. }) => {
-                out.push_str(&"=".repeat(heading_depth(level)));
-                out.push(' ');
-            }
-            Event::End(TagEnd::Heading(_)) => out.push_str("\n\n"),
-
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => out.push_str("\n\n"),
-
-            Event::Start(Tag::Emphasis) => out.push('_'),
-            Event::End(TagEnd::Emphasis) => out.push('_'),
-            Event::Start(Tag::Strong) => out.push('*'),
-            Event::End(TagEnd::Strong) => out.push('*'),
-
-            Event::Start(Tag::List(_)) => {}
-            Event::End(TagEnd::List(_)) => out.push('\n'),
-            Event::Start(Tag::Item) => out.push_str("- "),
-            Event::End(TagEnd::Item) => out.push('\n'),
-
-            Event::Start(Tag::BlockQuote(_)) => out.push_str("#quote(block: true)[\n"),
-            Event::End(TagEnd::BlockQuote(_)) => out.push_str("\n]\n\n"),
-
-            Event::Start(Tag::Image { dest_url, .. }) => {
-                in_image += 1;
-                match images.get(dest_url.as_ref()) {
-                    Some(vpath) => {
-                        out.push_str(&format!("#image({})", typst_string(vpath)));
-                    }
-                    None => {
-                        out.push_str(&format!("[image unresolved: {dest_url}]"));
-                    }
-                }
-            }
-            Event::End(TagEnd::Image) => {
-                in_image -= 1;
-            }
-
-            Event::Start(Tag::CodeBlock(_)) => out.push_str("```\n"),
-            Event::End(TagEnd::CodeBlock) => out.push_str("```\n\n"),
-
-            Event::Text(t) => {
-                if in_image == 0 {
-                    out.push_str(&escape_typst_inline(&t));
-                }
-            }
-            Event::Code(c) => {
-                out.push('`');
-                out.push_str(&c);
-                out.push('`');
-            }
-            Event::SoftBreak => out.push(' '),
-            Event::HardBreak => out.push_str("\\\n"),
-
-            _ => {}
-        }
-    }
-    out
-}
-
-fn heading_depth(level: HeadingLevel) -> usize {
-    match level {
-        HeadingLevel::H1 => 1,
-        HeadingLevel::H2 => 2,
-        HeadingLevel::H3 => 3,
-        HeadingLevel::H4 => 4,
-        HeadingLevel::H5 => 5,
-        HeadingLevel::H6 => 6,
-    }
-}
-
-/// Escape characters that have special meaning in Typst markup. We do *not*
-/// escape `_`, `*`, or `` ` `` because those are emitted intentionally by the
-/// converter; markdown text containing literal `_` / `*` in inline contexts is
-/// a known v1 limitation.
-fn escape_typst_inline(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '#' | '@' | '<' | '>' | '$' | '\\' => {
-                out.push('\\');
-                out.push(c);
-            }
-            _ => out.push(c),
-        }
-    }
-    out
-}
-
 fn alias_for(class: &str) -> String {
     let mut out = String::from("layout_");
     for c in class.chars() {
@@ -309,21 +212,6 @@ fn alias_for(class: &str) -> String {
 
 fn sanitize_path(class: &str) -> String {
     class.replace(['/', '\\'], "_")
-}
-
-fn typst_string(s: &str) -> String {
-    let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            '\n' => out.push_str("\\n"),
-            '\r' => {}
-            _ => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 /// Synchronous: builds the engine, compiles, exports to PDF bytes.
