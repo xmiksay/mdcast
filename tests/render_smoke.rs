@@ -262,6 +262,65 @@ async fn show_table_rule_in_layout_applies_across_eval_boundary() {
     );
 }
 
+/// A document with real `DocMeta` (title/author/date + an `extra` key) and a
+/// real `BrandSpec` (name/palette/fonts) — exercises `/context.typ` end to
+/// end against the real typst compiler: the built-in `hero` and `content`
+/// layouts both `#import` it and read `doc-meta`/`brand` fields, so a
+/// compile error here would mean the generated context source (or a layout
+/// reading it) is malformed, not just that a unit-test string assertion on
+/// `build_context_source` is satisfied.
+fn branded_doc() -> ResolvedDoc {
+    let pages = vec![
+        Page {
+            class: "hero".into(),
+            body: "# Q3 Operations Review".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "content".into(),
+            body: "Body text.".into(),
+            origin: PageOrigin::Explicit,
+        },
+    ];
+    let meta = DocMeta {
+        title: Some("Q3 Operations Review".into()),
+        author: Some("F13".into()),
+        date: Some("2026-07-03".into()),
+        extra: std::collections::BTreeMap::from([(
+            "classification".to_string(),
+            "internal".to_string(),
+        )]),
+    };
+    let brand = BrandSpec {
+        name: "F13".into(),
+        palette: std::collections::BTreeMap::from([("accent".to_string(), "#243752".to_string())]),
+        fonts: std::collections::BTreeMap::from([("sans".to_string(), "Arial".to_string())]),
+        ..Default::default()
+    };
+    ResolvedDoc {
+        pages,
+        meta,
+        brand: BrandHandle(Arc::new(brand)),
+        assets: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn typst_pdf_doc_meta_and_brand_smoke() {
+    let doc = branded_doc();
+    let (_tmp, out) = render(Target::Pdf, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+}
+
+#[tokio::test]
+async fn typst_pdf_presentation_doc_meta_and_brand_smoke() {
+    let doc = branded_doc();
+    let (_tmp, out) = render(Target::PdfPresentation, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+}
+
 #[tokio::test]
 async fn pandoc_docx_smoke() {
     if !pandoc_available() {

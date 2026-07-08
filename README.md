@@ -164,6 +164,52 @@ A class name resolves to a *different template per target*. The same
 Missing template for some class? The renderer logs a warning and falls back
 to `content`. Authors are never blocked.
 
+## Typst layout context: `doc-meta` / `brand`
+
+Every typst render (`pdf`, `pdf-presentation`) registers a synthetic
+`/context.typ` source alongside the per-class layouts, built from
+`ResolvedDoc.meta` (`DocMeta`) and `.brand` (`BrandSpec`). A layout opts in
+with an `#import` — layouts that don't import it are completely unaffected,
+so third-party `.typ` files with the plain `layout(body)` signature keep
+working with no changes:
+
+```typst
+#import "/context.typ": doc-meta, brand, doc-meta-get, brand-color, brand-font
+
+#let layout(body) = [
+  #doc-meta.title           // "" if frontmatter set no title
+  #doc-meta.author
+  #doc-meta.date
+  #doc-meta.classification  // any DocMeta.extra key, flattened onto doc-meta
+  #brand.name
+  #brand.palette.navy       // "" — a raw hex string like "#243752", not a color
+  #brand.fonts.sans
+
+  // Safe accessors — missing keys degrade to the given default instead of
+  // erroring, which matters for `extra`/`palette`/`fonts` since those come
+  // from the frontmatter/brand.toml a given document happens to set:
+  #doc-meta-get("classification", default: "internal")
+  #text(fill: brand-color("navy", default: black))[...]
+  #set text(font: brand-font("sans", default: "New Computer Modern"))
+]
+```
+
+- `doc-meta.title` / `.author` / `.date` are always present (empty string if
+  unset). Every other `DocMeta.extra` key (`subtitle`, `classification`, …)
+  is flattened onto the same dict, so `"classification" in doc-meta` /
+  `doc-meta.at("classification", default: "")` both work.
+- `brand.name`, `brand.palette` (name → hex string), and `brand.fonts` (name
+  → family string) mirror `BrandSpec` from `brand.toml` as-is — `rgb(...)`
+  the palette values yourself, or use `brand-color(key, default: ...)`, which
+  does that for you and returns `default` for a missing key.
+- The built-in `hero` and `content` layouts (both targets) already use this:
+  `hero` centres `doc-meta.author`/`.date` under the title and themes it via
+  `brand-color("accent", ...)` / `brand-font("sans", ...)`; `content` renders
+  a running header with `doc-meta.title` and a `classification` extra key
+  when either is set. A document with no frontmatter and no `brand.toml`
+  renders identically to before this existed — every accessor's default
+  reproduces the prior hardcoded value.
+
 ## Library usage
 
 ```rust

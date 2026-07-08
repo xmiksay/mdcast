@@ -26,7 +26,8 @@ src/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs       TypstBackend, driver assembly, in-process compile
-│     └─ markdown.rs  md_to_typst() — markdown → Typst-markup conversion
+│     ├─ markdown.rs  md_to_typst() — markdown → Typst-markup conversion
+│     └─ context.rs   build_context_source() — DocMeta/BrandSpec → `/context.typ`
 └─ bin/mdcast.rs      CLI (render / explain)
 
 embedded/             rust-embed source — keys mirror these paths
@@ -112,7 +113,10 @@ Rust.
 1. Pick a name (`two-column`).
 2. Add `embedded/typst/layouts/pdf/two-column.typ` and
    `embedded/typst/layouts/pdf-presentation/two-column.typ` (export
-   `#let layout(body) = …`).
+   `#let layout(body) = …`). Optionally `#import "/context.typ": doc-meta,
+   brand, ...` to read document title/author/date/extra and brand
+   palette/fonts — see README's "Typst layout context" section for the
+   contract. Layouts that skip the import are unaffected.
 3. For pandoc: nothing for docx/odt/html-reveal — pandoc just emits the class
    onto the slide/div; the style is whatever the reference doc / theme CSS
    provides. For PPTX: pandoc's writer has no notion of arbitrary named
@@ -182,6 +186,15 @@ Rust.
   (`![alt](url "title")`), and angle-bracket URLs are not recognised in v1.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
+- `DocMeta` / `BrandSpec` reach typst layouts via a synthetic `/context.typ`
+  source (`typst/context.rs::build_context_source`), registered alongside the
+  per-class layouts and imported opt-in (`#import "/context.typ": doc-meta,
+  brand, ...`) — see README's "Typst layout context" section for the field
+  contract and the accessor helpers (`doc-meta-get`, `brand-color`,
+  `brand-font`) that degrade missing keys to a default instead of a compile
+  error. Pandoc's equivalent is `--metadata` (`backends/pandoc.rs`); the two
+  mechanisms are unrelated because pandoc metadata and typst's project-root
+  file namespace are different plumbing.
 
 ## Conventions
 
