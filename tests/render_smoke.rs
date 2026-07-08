@@ -30,6 +30,7 @@ fn resolved_doc(md: &str) -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        toc: None,
     }
 }
 
@@ -181,6 +182,7 @@ fn table_doc() -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        toc: None,
     }
 }
 
@@ -302,6 +304,7 @@ fn branded_doc() -> ResolvedDoc {
         meta,
         brand: BrandHandle(Arc::new(brand)),
         assets: Vec::new(),
+        toc: None,
     }
 }
 
@@ -319,6 +322,68 @@ async fn typst_pdf_presentation_doc_meta_and_brand_smoke() {
     let (_tmp, out) = render(Target::PdfPresentation, &doc).await;
     let bytes = std::fs::read(&out).unwrap();
     assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+}
+
+/// Two headinged pages so a requested `#outline()` has real entries to list.
+fn toc_doc(toc: Option<u8>) -> ResolvedDoc {
+    let pages = vec![
+        Page {
+            class: "content".into(),
+            body: "# Chapter One\n\nBody one.\n\n## Section 1.1\n\nMore body.".into(),
+            origin: PageOrigin::Explicit,
+        },
+        Page {
+            class: "content".into(),
+            body: "# Chapter Two\n\nBody two.".into(),
+            origin: PageOrigin::Explicit,
+        },
+    ];
+    ResolvedDoc {
+        pages,
+        meta: DocMeta::default(),
+        brand: BrandHandle(Arc::new(BrandSpec::default())),
+        assets: Vec::new(),
+        toc,
+    }
+}
+
+/// Real in-process typst compile with `toc: Some(_)` — proves the emitted
+/// `#outline(depth: _)` call is valid typst syntax that actually renders (an
+/// extra outline page pushes the rest of the document one page later, which
+/// pdf-to-svg-page-count-style byte growth alone can't fake).
+#[tokio::test]
+async fn typst_pdf_toc_smoke() {
+    let with_toc = toc_doc(Some(2));
+    let (_tmp, out) = render(Target::Pdf, &with_toc).await;
+    let with_toc_bytes = std::fs::read(&out).unwrap();
+    assert!(with_toc_bytes.starts_with(b"%PDF-"), "not a PDF");
+
+    let without_toc = toc_doc(None);
+    let (_tmp2, out2) = render(Target::Pdf, &without_toc).await;
+    let without_toc_bytes = std::fs::read(&out2).unwrap();
+
+    assert_ne!(
+        with_toc_bytes, without_toc_bytes,
+        "requesting a TOC should change the rendered PDF (an extra outline page)"
+    );
+}
+
+/// `pdf-presentation` ignores a TOC request outright — rendering with and
+/// without `toc` set must produce byte-identical output.
+#[tokio::test]
+async fn typst_pdf_presentation_ignores_toc_request() {
+    let with_toc = toc_doc(Some(2));
+    let (_tmp, out) = render(Target::PdfPresentation, &with_toc).await;
+    let with_toc_bytes = std::fs::read(&out).unwrap();
+
+    let without_toc = toc_doc(None);
+    let (_tmp2, out2) = render(Target::PdfPresentation, &without_toc).await;
+    let without_toc_bytes = std::fs::read(&out2).unwrap();
+
+    assert_eq!(
+        with_toc_bytes, without_toc_bytes,
+        "pdf-presentation should ignore the TOC request entirely"
+    );
 }
 
 #[tokio::test]
@@ -420,6 +485,7 @@ fn all_classes_doc() -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        toc: None,
     }
 }
 
@@ -535,6 +601,93 @@ async fn pandoc_odt_smoke() {
 }
 
 #[tokio::test]
+async fn pandoc_docx_toc_smoke() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_docx_toc_smoke: `pandoc` not on PATH");
+        return;
+    }
+    let doc = toc_doc(Some(3));
+    let (_tmp, out) = render(Target::Docx, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    let document_xml = zip_entry_to_string(&bytes, "word/document.xml");
+    assert!(
+        document_xml.contains(r#"TOC \o &quot;1-3&quot;"#),
+        "expected a `TOC \\o \"1-3\"` field instruction (--toc-depth=3) in \
+         word/document.xml:\n{document_xml}"
+    );
+
+    let without_toc = toc_doc(None);
+    let (_tmp2, out2) = render(Target::Docx, &without_toc).await;
+    let bytes2 = std::fs::read(&out2).unwrap();
+    let document_xml2 = zip_entry_to_string(&bytes2, "word/document.xml");
+    assert!(
+        !document_xml2.contains("TOC \\o"),
+        "no TOC was requested — word/document.xml should carry no TOC field"
+    );
+}
+
+#[tokio::test]
+async fn pandoc_odt_toc_smoke() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_odt_toc_smoke: `pandoc` not on PATH");
+        return;
+    }
+    let doc = toc_doc(Some(2));
+    let (_tmp, out) = render(Target::Odt, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    let content_xml = zip_entry_to_string(&bytes, "content.xml");
+    assert!(
+        content_xml.contains("text:table-of-content"),
+        "expected a text:table-of-content element (--toc) in content.xml:\n{content_xml}"
+    );
+
+    let without_toc = toc_doc(None);
+    let (_tmp2, out2) = render(Target::Odt, &without_toc).await;
+    let bytes2 = std::fs::read(&out2).unwrap();
+    let content_xml2 = zip_entry_to_string(&bytes2, "content.xml");
+    assert!(
+        !content_xml2.contains("text:table-of-content"),
+        "no TOC was requested — content.xml should carry no table-of-content element"
+    );
+}
+
+/// Number of `ppt/slides/slideN.xml` entries in a pptx zip — pandoc's pptx
+/// writer *does* support `--toc` (it inserts an extra TOC slide), so a
+/// byte-for-byte comparison won't do here (pandoc's own docProps timestamps
+/// already make two separate invocations of the same input non-identical);
+/// the slide count is the part our TOC support is responsible for.
+fn slide_count(bytes: &[u8]) -> usize {
+    let archive = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    archive
+        .file_names()
+        .filter(|n| n.starts_with("ppt/slides/slide") && n.ends_with(".xml"))
+        .count()
+}
+
+#[tokio::test]
+async fn pandoc_pptx_ignores_toc_request() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_pptx_ignores_toc_request: `pandoc` not on PATH");
+        return;
+    }
+    // Slide decks don't get a TOC — our pandoc backend must never pass
+    // `--toc` for pptx, so requesting one shouldn't add an extra TOC slide.
+    let with_toc = toc_doc(Some(3));
+    let (_tmp, out) = render(Target::Pptx, &with_toc).await;
+    let with_toc_bytes = std::fs::read(&out).unwrap();
+
+    let without_toc = toc_doc(None);
+    let (_tmp2, out2) = render(Target::Pptx, &without_toc).await;
+    let without_toc_bytes = std::fs::read(&out2).unwrap();
+
+    assert_eq!(
+        slide_count(&with_toc_bytes),
+        slide_count(&without_toc_bytes),
+        "requesting a TOC should not add a slide to pptx output"
+    );
+}
+
+#[tokio::test]
 async fn pandoc_pptx_smoke() {
     if !pandoc_available() {
         eprintln!("skipping pandoc_pptx_smoke: `pandoc` not on PATH");
@@ -581,6 +734,24 @@ async fn pandoc_html_reveal_smoke() {
     );
 }
 
+#[tokio::test]
+async fn pandoc_html_reveal_ignores_toc_request() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_html_reveal_ignores_toc_request: `pandoc` not on PATH");
+        return;
+    }
+    // Slide decks don't get a TOC — our pandoc backend must never pass
+    // `--toc` for html-reveal, so requesting one shouldn't add pandoc's
+    // `id="TOC"` div to the output.
+    let doc = toc_doc(Some(3));
+    let (_tmp, out) = render(Target::HtmlReveal, &doc).await;
+    let html = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        !html.contains(r#"id="TOC""#),
+        "requesting a TOC should not add pandoc's TOC div to html-reveal output"
+    );
+}
+
 /// Shared in-memory sink for a scoped `tracing` subscriber, so a test can
 /// assert on log output without touching the process-global subscriber.
 #[derive(Clone, Default)]
@@ -620,6 +791,7 @@ async fn typst_unknown_class_falls_back_to_content_with_warning() {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        toc: None,
     };
 
     let buf = LogBuf::default();

@@ -195,6 +195,13 @@ Rust.
   error. Pandoc's equivalent is `--metadata` (`backends/pandoc.rs`); the two
   mechanisms are unrelated because pandoc metadata and typst's project-root
   file namespace are different plumbing.
+- `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
+  heading depth — see README's "Table of contents" section for the
+  per-target contract. Pandoc gets `--toc --toc-depth=<n>` (docx/odt only —
+  `pandoc.rs::toc_args`); typst's `pdf` target gets a leading
+  `#outline(depth: <n>)` page ahead of the first real page
+  (`typst/mod.rs::build_driver`). `pdf-presentation`/`pptx`/`html-reveal`
+  ignore the request outright — slide decks don't get a TOC.
 
 ## Conventions
 
