@@ -22,6 +22,11 @@ exclude = [
 default = ["pandoc", "typst", "rt-multi-thread"]
 pandoc = []
 typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
+# Experimental HTML export for `render_template` (issue #53). Off by default:
+# pulls in `typst-html` and flips `typst::Feature::Html` on for every
+# `TypstEngine` in the process (typst-as-lib's `typst-html` feature is a
+# compile-time toggle on the whole library, not a per-engine option).
+typst-html = ["typst", "dep:typst-html", "typst-as-lib/typst-html"]
 # Multi-threaded tokio runtime, needed by the `mdcast` binary's #[tokio::main].
 # Library-only consumers can disable default-features to drop it.
 rt-multi-thread = ["tokio/rt-multi-thread"]
@@ -43,6 +48,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 typst = { version = "0.14", optional = true }
 typst-pdf = { version = "0.14", optional = true }
+typst-html = { version = "0.14", optional = true }
 typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
 
 [dev-dependencies]

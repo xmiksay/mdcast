@@ -1,7 +1,7 @@
 export CARGO_BUILD_JOBS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check check-all fmt lint test test-unit test-integration coverage verify demo clean
+.PHONY: help build release check check-all fmt lint test test-unit test-integration test-typst-html coverage verify demo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -16,18 +16,20 @@ release: ## Release build
 check: ## Fast typecheck (default features)
 	cargo check
 
-check-all: ## Typecheck all four feature combinations (the CI contract)
+check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check --no-default-features
 	cargo check --no-default-features --features pandoc
 	cargo check --no-default-features --features typst
 	cargo check
+	cargo check --features typst-html
 
 fmt: ## Apply formatting
 	cargo fmt
 
-lint: ## fmt-check + clippy, warnings are errors (mirrors CI)
+lint: ## fmt-check + clippy (default + typst-html features), warnings are errors (mirrors CI)
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
+	cargo clippy --all-targets --features typst-html -- -D warnings
 
 test-unit: ## Unit tests (in-module #[cfg(test)])
 	cargo test --lib --bins
@@ -35,14 +37,17 @@ test-unit: ## Unit tests (in-module #[cfg(test)])
 test-integration: ## Integration tests (tests/ — incl. engine smoke tests; pandoc-backed ones skip if pandoc is absent)
 	cargo test --test '*'
 
-test: ## All tests
+test: ## All tests (default features)
 	cargo test
+
+test-typst-html: ## Tests for the off-by-default typst-html feature (issue #53's HTML export)
+	cargo test --features typst-html
 
 coverage: ## Test coverage: lcov.info + terminal summary (needs cargo-llvm-cov)
 	cargo llvm-cov --lcov --output-path lcov.info
 	cargo llvm-cov report --summary-only
 
-verify: lint check-all test ## Pre-"done" gate: lint + all feature combos + all tests
+verify: lint check-all test test-typst-html ## Pre-"done" gate: lint + all feature combos + all tests
 
 demo: build ## Render the golden fixture to target/demo/ (html-reveal + pdf)
 	./target/debug/mdcast render tests/golden/cover-deck.md --target html-reveal --out target/demo/cover-deck.html

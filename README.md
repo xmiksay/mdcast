@@ -369,17 +369,97 @@ string-dict projection, which doesn't scale to arbitrary nested JSON):
   missing sibling reference fails typst compilation with its own diagnostic
   (unlike a missing layout asset or brand font, which degrade silently —
   there's no sensible default for a template's own body content).
-- Scope: PDF only, same as the rest of the typst backend. Pandoc targets have
-  no equivalent notion of a user-supplied template.
+- Scope: PDF by default. Behind the off-by-default `typst-html` cargo
+  feature, the same template also exports to HTML — see below.
+
+### HTML export (`typst-html` feature, issue #53)
+
+A document rendered from a template often needs a **web representation**
+too — an invoice as a PDF attachment *and* as an HTML page in a customer
+portal. `render_template_html` is the same contract as `render_template`
+(same `TemplateDoc`, same `AssetProvider` resolution, same `/data.json`/
+`/context.typ` virtual files) with only the final export step swapped —
+`typst_pdf::pdf(...)` becomes `typst_html::html(...)`. One template, two
+outputs, no second source of truth to maintain:
+
+```rust
+# #[cfg(feature = "typst-html")]
+# {
+use mdcast::backends::typst::render_template_html;
+# async fn example(doc: &mdcast::backends::typst::TemplateDoc, provider: &impl mdcast::AssetProvider) -> anyhow::Result<()> {
+let artifact = render_template_html(doc, provider).await?;
+// artifact.primary: Bytes of the HTML page, artifact.filename: "output.html"
+# Ok(())
+# }
+# }
+```
+
+This is off by default: enable it with `--features typst-html`. It pulls in
+the `typst-html` crate and turns on `typst-as-lib`'s own `typst-html`
+feature, which flips `typst::Feature::Html` on for the whole process (every
+`TypstEngine` built anywhere in the crate, not just template renders) —
+that's what makes the `target()` function below available at all. With the
+feature off, the dependency tree and every other code path are unchanged.
+
+Typst's HTML export is **experimental** and semantic-first — it does not try
+to reproduce paged output in a browser:
+
+- `#set page(...)`, headers/footers, and `#place(...)` absolute positioning
+  are paged-only concepts with no HTML equivalent. Constructs like these are
+  silently skipped by the exporter *if evaluated* — see the `target()`
+  pattern below for keeping them out of the HTML path entirely, since
+  merely being unsupported doesn't stop them from executing.
+- Visual styling comes through only partially. A web-faithful rendering will
+  usually pair the exported HTML with the embedder's own CSS. `html.elem`
+  and `html.frame` (render a region to inline SVG) are available in HTML
+  mode for the places where typst's own semantics aren't enough — see
+  [typst's HTML export docs](https://typst.app/docs/reference/html/).
+- Compiler warnings from HTML-unsupported constructs (e.g. "place was
+  ignored during HTML export") surface through the same `tracing::warn!`
+  path as every other typst diagnostic in this crate — they are not
+  swallowed.
+- Output may shift across typst versions — expected for an experimental,
+  opt-in upstream feature.
+
+**Writing a dual-target template.** Branch on typst's `target()` function
+(itself part of the HTML feature) so one template body serves both exports;
+keep the branch coarse (chrome vs. no chrome) rather than sprinkling
+`target()` checks through the data-driven content itself:
+
+```typst
+#import "/context.typ": doc-meta
+#let invoice = json("/data.json")
+
+#context if target() == "html" [
+  // Semantic web chrome — no #set page, no #place. html.elem(...) is
+  // available here for anything typst's own tags don't cover.
+  = Invoice #invoice.number
+] else [
+  // Paged chrome — margins, running headers, absolute-positioned footers.
+  #set page(margin: 2cm)
+  #place(top, text(size: 9pt)[#doc-meta.title])
+  = Invoice #invoice.number
+]
+
+// Shared, target-agnostic body: headings, tables, text render the same
+// either way.
+#table(
+  columns: (1fr, auto, auto),
+  ..invoice.items.map(it => ([#it.description], [#str(it.qty)], [#it.total])).flatten(),
+)
+```
 
 ### CLI
 
 ```
-mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml]
+mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html]
 ```
 
 `--data` is a JSON file deserialized straight into `TemplateDoc.data`.
 `--assets DIR`/`--brand` work exactly as they do for `render` above.
+`--format` defaults to `pdf`; `html` is only a valid value when `mdcast` was
+built with the `typst-html` feature (`cargo build --features typst-html`) —
+otherwise clap rejects it as an unknown value.
 
 ## Library usage
 
@@ -481,9 +561,10 @@ Anything the provider returns `None` for falls through to the next layer.
 
 ```toml
 [features]
-default = ["pandoc", "typst"]
-pandoc  = []   # DOCX, ODT, PPTX, html-reveal
-typst   = []   # PDF, PDF-presentation
+default    = ["pandoc", "typst"]
+pandoc     = []   # DOCX, ODT, PPTX, html-reveal
+typst      = []   # PDF, PDF-presentation
+typst-html = []   # render_template_html — experimental HTML export (issue #53), off by default
 ```
 
 Build with only what you need:
@@ -491,6 +572,7 @@ Build with only what you need:
 ```sh
 cargo build --no-default-features --features pandoc   # no typst dep tree
 cargo build --no-default-features --features typst    # no pandoc backend
+cargo build --features typst-html                     # render_template_html + --format html
 ```
 
 ## Targets
@@ -509,7 +591,7 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ```
 mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]... [--layout-font KEY]...
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
-mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml]
+mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--format pdf|html]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
@@ -532,7 +614,8 @@ above). Ignored by pandoc targets.
 `render-template` (typst-only; absent when the crate is built without the
 `typst` feature) has no markdown involved — see "Data-driven template
 rendering" above. `TEMPLATE` is an `AssetProvider` key; `--data` is a JSON
-file deserialized into `TemplateDoc.data`.
+file deserialized into `TemplateDoc.data`. `--format` defaults to `pdf`;
+`html` needs the `typst-html` feature — see "HTML export" above.
 
 ## Development
 
@@ -543,13 +626,14 @@ list them:
 |-------------------------|-----------------------------------------------------------------|
 | `make build` / `release`| Debug / release build (default features = pandoc + typst)      |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | All four feature combinations (core, pandoc, typst, both)      |
-| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings`       |
-| `make test`             | Full suite (unit + integration)                                 |
+| `make check-all`        | All feature combinations (core, pandoc, typst, both, +typst-html) |
+| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html features) |
+| `make test`             | Full suite, default features (unit + integration)               |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
 | `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
+| `make test-typst-html`  | Tests for the off-by-default `typst-html` feature (HTML export, issue #53) |
 | `make coverage`         | Coverage report: `lcov.info` + terminal summary (needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)); CI runs it on every merge to `master` |
-| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` — what CI runs on every PR |
+| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` — what CI runs on every PR |
 | `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
 
 `CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.
@@ -573,6 +657,10 @@ change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://githu
 - Brand projection (one `brand.toml` colour change → propagated to all
   outputs).
 - Caching (content-hashed diagram + output cache).
+- HTML export for the markdown pipeline's `pdf` target (issue #53 only adds
+  it to `render_template` — the data-driven entry point). The markdown path
+  has per-class layouts and a `md_to_typst` conversion step neither of which
+  are html-aware yet; a separate question from this one.
 
 ## License
 

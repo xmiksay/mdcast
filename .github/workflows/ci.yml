@@ -34,6 +34,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Test typst-html feature (issue #53's HTML export)
+        run: make test-typst-html
+
   # Coverage on every merge to master. Runs the full suite under llvm-cov, so
   # master stays verified without duplicating the PR job.
   coverage:

@@ -33,6 +33,8 @@ use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
+#[cfg(feature = "typst-html")]
+pub use template::render_template_html;
 pub use template::{TemplateDoc, render_template};
 use virtual_files::{collect_images_for_typst, collect_layout_assets};
 
