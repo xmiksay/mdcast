@@ -125,23 +125,39 @@ Rust.
 
 - The md→Typst converter (`typst/markdown.rs::md_to_typst`) covers a v1
   subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
-  inline code, code blocks, and tables. Links, footnotes, and HTML blocks are
-  dropped (their text content still comes through). Literal `_` / `*` in prose
-  are not escaped. Layouts receive the converted body as a string and typeset
-  it via `#eval(body, mode: "markup")`. Code block text is passed through
-  verbatim (not escaped) inside the fence, with the fence language forwarded
-  from the markdown info string; inline code renders via `#raw(...)` (a
-  function call, not the backtick shorthand) so embedded backticks can't break
-  out of it. Tables project to a structural `#table(columns:, align:,
-  table.header(...), ...)` call — column count and per-column alignment come
-  from the GFM alignment row, header cells are wrapped in `table.header(...)`,
-  ragged rows are padded/truncated to the column count, and cell text runs
-  through the same inline conversion and escaping as paragraph text (`[`/`]`
-  are additionally escaped there, since a cell's content sits inside a
-  `[...]` literal). Styling is deliberately left to the layout: a `#show
-  table: ...` rule set before `#eval(...)` in the same layout scope applies to
-  the table content that call produces, since show rules attach at
-  realization time, not at content-construction time.
+  inline code, code blocks, tables, links (inline and reference-style),
+  autolinks (`<https://…>`, `<user@host>`), and footnotes. Raw HTML blocks are
+  dropped (their text content still comes through). Layouts receive the
+  converted body as a string and typeset it via `#eval(body, mode:
+  "markup")`. Code block text is passed through verbatim (not escaped) inside
+  the fence, with the fence language forwarded from the markdown info string;
+  inline code renders via `#raw(...)` (a function call, not the backtick
+  shorthand) so embedded backticks can't break out of it. Tables project to a
+  structural `#table(columns:, align:, table.header(...), ...)` call — column
+  count and per-column alignment come from the GFM alignment row, header
+  cells are wrapped in `table.header(...)`, ragged rows are padded/truncated
+  to the column count, and cell text runs through the same inline conversion
+  and escaping as paragraph text (`[`/`]` are additionally escaped there,
+  since a cell's content sits inside a `[...]` literal). Styling is
+  deliberately left to the layout: a `#show table: ...` rule set before
+  `#eval(...)` in the same layout scope applies to the table content that
+  call produces, since show rules attach at realization time, not at
+  content-construction time. Links (`Tag::Link`, any `LinkType` — inline,
+  reference, autolink, or email) render as `#link("<url>")[<inline text>]`;
+  email autolinks get a `mailto:` prefix added (pulldown-cmark's own HTML
+  writer does the same — the parser itself leaves the bare address in
+  `dest_url`). Footnotes need two passes over the same parsed event list: the
+  first only harvests `label -> rendered body` from each
+  `Tag::FootnoteDefinition` (definitions commonly follow their reference site
+  in document order, so they can't be resolved in one forward pass); the
+  second does the real render, expanding each `FootnoteReference` inline as
+  `#footnote[...]` and dropping the (now-redundant) definition sites.
+  Requires `Options::ENABLE_FOOTNOTES` on the pulldown parser. Prose text runs
+  escape `_` and `*` (along with `#`, `@`, `<`, `>`, `$`, `\`, `[`, `]`) so
+  literal identifiers like `snake_case_name` don't pick up phantom emphasis —
+  this is safe because the emphasis/strong markers the converter itself
+  emits go straight through `push_char`, never through the text-escaping
+  path.
 - DOCX/ODT honour a class as a paragraph-style name only (typographic
   projection). Spatial layout — multi-column, image positioning — would need a
   template-injection backend; documented in `PROJECT_PLAN.md` §10.
