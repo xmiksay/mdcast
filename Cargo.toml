@@ -30,6 +30,11 @@ typst-html = ["typst", "dep:typst-html", "typst-as-lib/typst-html"]
 # Multi-threaded tokio runtime, needed by the `mdcast` binary's #[tokio::main].
 # Library-only consumers can disable default-features to drop it.
 rt-multi-thread = ["tokio/rt-multi-thread"]
+# Fetch http(s) image URLs found in markdown through `images::collect_images`
+# instead of leaving them for pandoc to fetch on its own (or, on the typst
+# path, dropping them with a warning — see issue #54). Off by default: no new
+# dependency, byte-identical output for documents without remote images.
+remote-images = ["dep:reqwest"]
 
 [dependencies]
 anyhow = "1"
@@ -38,6 +43,9 @@ clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
 regex = "1"
+reqwest = { version = "0.12", optional = true, default-features = false, features = [
+    "rustls-tls",
+] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }

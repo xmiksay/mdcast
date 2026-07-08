@@ -1,7 +1,7 @@
 export CARGO_BUILD_JOBS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check check-all fmt lint test test-unit test-integration test-typst-html coverage verify demo clean
+.PHONY: help build release check check-all fmt lint test test-unit test-integration test-typst-html test-remote-images coverage verify demo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -22,14 +22,16 @@ check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check --no-default-features --features typst
 	cargo check
 	cargo check --features typst-html
+	cargo check --features remote-images
 
 fmt: ## Apply formatting
 	cargo fmt
 
-lint: ## fmt-check + clippy (default + typst-html features), warnings are errors (mirrors CI)
+lint: ## fmt-check + clippy (default + typst-html + remote-images features), warnings are errors (mirrors CI)
 	cargo fmt --check
 	cargo clippy --all-targets -- -D warnings
 	cargo clippy --all-targets --features typst-html -- -D warnings
+	cargo clippy --all-targets --features remote-images -- -D warnings
 
 test-unit: ## Unit tests (in-module #[cfg(test)])
 	cargo test --lib --bins
@@ -43,11 +45,14 @@ test: ## All tests (default features)
 test-typst-html: ## Tests for the off-by-default typst-html feature (issue #53's HTML export)
 	cargo test --features typst-html
 
+test-remote-images: ## Tests for the off-by-default remote-images feature (issue #54's http(s) image fetch)
+	cargo test --features remote-images
+
 coverage: ## Test coverage: lcov.info + terminal summary (needs cargo-llvm-cov)
 	cargo llvm-cov --lcov --output-path lcov.info
 	cargo llvm-cov report --summary-only
 
-verify: lint check-all test test-typst-html ## Pre-"done" gate: lint + all feature combos + all tests
+verify: lint check-all test test-typst-html test-remote-images ## Pre-"done" gate: lint + all feature combos + all tests
 
 demo: build ## Render the golden fixture to target/demo/ (html-reveal + pdf)
 	./target/debug/mdcast render tests/golden/cover-deck.md --target html-reveal --out target/demo/cover-deck.html

@@ -37,6 +37,9 @@ jobs:
       - name: Test typst-html feature (issue #53's HTML export)
         run: make test-typst-html
 
+      - name: Test remote-images feature (issue #54's http(s) image fetch)
+        run: make test-remote-images
+
   # Coverage on every merge to master. Runs the full suite under llvm-cov, so
   # master stays verified without duplicating the PR job.
   coverage:

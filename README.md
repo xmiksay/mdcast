@@ -263,6 +263,33 @@ let doc = ResolvedDoc {
   document format resolves (a DOCX/ODT/PPTX style, or the reveal.js theme
   CSS) and ignore `ResolvedDoc.fonts` entirely.
 
+## Remote images (`remote-images` feature, issue #54)
+
+A page-body `![alt](http://…)` / `![alt](https://…)` reference is never
+resolved through the `AssetProvider` — it isn't a provider key. What happens
+to it next depends on the target and this feature:
+
+| Target       | `remote-images` off (default)                              | `remote-images` on                                          |
+|--------------|--------------------------------------------------------------|---------------------------------------------------------------|
+| pandoc (docx/odt/pptx/html-reveal) | URL left in the markdown; pandoc fetches it itself at conversion time (needs network on the render host) | Fetched once by mdcast, materialised to a temp file, markdown rewritten to the local path — pandoc never touches the network |
+| typst (pdf/pdf-presentation) | Unresolved: `tracing::warn!` with the URL, image dropped from the render (no placeholder text leaks into the artifact) | Fetched once by mdcast and registered as a virtual file, same as any other image |
+
+Enable it with `cargo build --features remote-images` (pulls in `reqwest`,
+off by default — no new dependency, byte-identical output for documents
+without remote images). Once enabled, `images::collect_images` fetches every
+unique `http(s)` URL referenced across a page set exactly once (same dedup as
+provider-resolved images) and folds the bytes into the same map both engines
+already draw from — so a remote image renders identically in every target
+from one input, and an offline render sees the same input regardless of
+target. A fetch failure (DNS, 404, timeout, …) warns and is skipped; it never
+fails the render — one dead link shouldn't sink a 40-page document.
+
+**SSRF note for server embedders:** fetching a caller-controlled URL from your
+server is a request-forgery vector (it can probe internal network addresses).
+The feature is opt-in for that reason; if you enable it in a server context,
+front it with your own URL allow/deny-list policy before the markdown ever
+reaches mdcast.
+
 ## Table of contents
 
 `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
@@ -561,10 +588,11 @@ Anything the provider returns `None` for falls through to the next layer.
 
 ```toml
 [features]
-default    = ["pandoc", "typst"]
-pandoc     = []   # DOCX, ODT, PPTX, html-reveal
-typst      = []   # PDF, PDF-presentation
-typst-html = []   # render_template_html — experimental HTML export (issue #53), off by default
+default        = ["pandoc", "typst"]
+pandoc         = []   # DOCX, ODT, PPTX, html-reveal
+typst          = []   # PDF, PDF-presentation
+typst-html     = []   # render_template_html — experimental HTML export (issue #53), off by default
+remote-images  = []   # fetch http(s) page-body images through collect_images (issue #54), off by default
 ```
 
 Build with only what you need:
@@ -573,6 +601,7 @@ Build with only what you need:
 cargo build --no-default-features --features pandoc   # no typst dep tree
 cargo build --no-default-features --features typst    # no pandoc backend
 cargo build --features typst-html                     # render_template_html + --format html
+cargo build --features remote-images                   # fetch remote page-body images (pulls in reqwest)
 ```
 
 ## Targets
@@ -626,14 +655,15 @@ list them:
 |-------------------------|-----------------------------------------------------------------|
 | `make build` / `release`| Debug / release build (default features = pandoc + typst)      |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | All feature combinations (core, pandoc, typst, both, +typst-html) |
-| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html features) |
+| `make check-all`        | All feature combinations (core, pandoc, typst, both, +typst-html, +remote-images) |
+| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html + remote-images features) |
 | `make test`             | Full suite, default features (unit + integration)               |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
 | `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
 | `make test-typst-html`  | Tests for the off-by-default `typst-html` feature (HTML export, issue #53) |
+| `make test-remote-images` | Tests for the off-by-default `remote-images` feature (http(s) image fetch, issue #54) |
 | `make coverage`         | Coverage report: `lcov.info` + terminal summary (needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)); CI runs it on every merge to `master` |
-| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` — what CI runs on every PR |
+| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` + `test-remote-images` — what CI runs on every PR |
 | `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
 
 `CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.

@@ -78,11 +78,19 @@ fn render_events(
 
             Event::Start(Tag::Image { dest_url, .. }) => {
                 in_image += 1;
-                let s = match images.get(dest_url.as_ref()) {
-                    Some(vpath) => format!("#image({})", typst_string(vpath)),
-                    None => format!("[image unresolved: {dest_url}]"),
-                };
-                push_str(&mut out, &mut stack, &s);
+                match images.get(dest_url.as_ref()) {
+                    Some(vpath) => {
+                        let s = format!("#image({})", typst_string(vpath));
+                        push_str(&mut out, &mut stack, &s);
+                    }
+                    // No placeholder prose in the artifact — an unresolved
+                    // image (remote fetch skipped, missing provider key) is
+                    // dropped from the rendered output; the warning is the
+                    // only trace of it.
+                    None => {
+                        tracing::warn!(url = %dest_url, "image unresolved; dropping from render")
+                    }
+                }
             }
             Event::End(TagEnd::Image) => {
                 in_image -= 1;
@@ -378,5 +386,24 @@ mod tests {
         let md = "snake_case_name and a*b\n";
         let out = md_to_typst(md, &BTreeMap::new());
         assert!(out.contains(r"snake\_case\_name and a\*b"));
+    }
+
+    #[test]
+    fn resolved_image_renders_as_typst_image_call() {
+        let images = BTreeMap::from([("img/logo.png".to_string(), "/images/logo.png".to_string())]);
+        let out = md_to_typst("![alt](img/logo.png)", &images);
+        assert!(out.contains(r#"#image("/images/logo.png")"#));
+    }
+
+    /// Issue #54: an image the map has no entry for (missing provider key,
+    /// or a remote URL left unfetched) must not leak placeholder prose into
+    /// the rendered document — it's dropped, and a `tracing::warn!` is the
+    /// only trace (asserted end-to-end in
+    /// `tests/typst_unresolved_image.rs`, which can observe the log).
+    #[test]
+    fn unresolved_image_leaves_no_placeholder_text_in_output() {
+        let out = md_to_typst("![alt](https://example.com/missing.png)", &BTreeMap::new());
+        assert!(!out.contains("unresolved"));
+        assert!(!out.contains("https://example.com/missing.png"));
     }
 }

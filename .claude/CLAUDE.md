@@ -101,12 +101,14 @@ Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
 ```
-make build       # cargo build — default = pandoc + typst
-make check-all   # all four cargo check feature combos (core / pandoc / typst / both)
-make test        # cargo test — ~100 tests; unit suite runs in <1s
-make lint        # cargo fmt --check + cargo clippy --all-targets -- -D warnings
-make coverage    # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
-make verify      # lint + check-all + test — the pre-"done" gate
+make build              # cargo build — default = pandoc + typst
+make check-all          # all cargo check feature combos (core / pandoc / typst / both / +typst-html / +remote-images)
+make test                # cargo test — ~100 tests; unit suite runs in <1s
+make test-typst-html     # cargo test --features typst-html (off-by-default HTML export, issue #53)
+make test-remote-images  # cargo test --features remote-images (off-by-default http(s) image fetch, issue #54)
+make lint                # cargo fmt --check + cargo clippy --all-targets -- -D warnings (+ typst-html, + remote-images)
+make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
+make verify              # lint + check-all + test + test-typst-html + test-remote-images — the pre-"done" gate
 ```
 
 `tests/render_smoke.rs` drives the real engines (in-process typst, subprocess
@@ -116,11 +118,12 @@ gracefully (not `#[ignore]`) when `pandoc` isn't on `PATH`, so `cargo test`
 stays green with or without it installed locally.
 
 `.github/workflows/ci.yml` has two jobs: `test` runs `make lint`,
-`make check-all`, and `make test` on every pull request, with `pandoc`
-installed so the OOXML/revealjs smoke tests actually exercise pandoc in CI;
-`coverage` runs `make coverage` (cargo-llvm-cov) on every push/merge to
-`master`, writes the summary table to the Actions job summary, and uploads
-`lcov.info` + the HTML report as a `coverage-report` artifact.
+`make check-all`, `make test`, `make test-typst-html`, and
+`make test-remote-images` on every pull request, with `pandoc` installed so
+the OOXML/revealjs smoke tests actually exercise pandoc in CI; `coverage`
+runs `make coverage` (cargo-llvm-cov) on every push/merge to `master`, writes
+the summary table to the Actions job summary, and uploads `lcov.info` + the
+HTML report as a `coverage-report` artifact.
 
 `.github/workflows/release.yml` publishes to crates.io on every `v*` tag
 push: it checks the tag against the `Cargo.toml` version, re-runs
@@ -244,6 +247,23 @@ section. Only present when built with the `typst` feature.
   `![alt](local-path)` (or `(local-path "title")` if a title was present) —
   reference-style images collapse to inline once resolved, leaving their
   now-unused `[ref]: ...` definition line in place.
+- Unresolved images never leak into the artifact (issue #54). An `http(s)`
+  URL is never a provider key, and a missing key takes the same path: the
+  typst converter (`backends/typst/markdown/mod.rs`, `Tag::Image` arm) used
+  to emit literal `[image unresolved: ...]` text into the rendered document;
+  it now emits a `tracing::warn!` with the URL and drops the image instead.
+  With the off-by-default `remote-images` feature, `images.rs::collect_images`
+  additionally fetches every unique `http(s)` URL directly (not through the
+  `AssetProvider` — a remote URL isn't a provider key) via `reqwest`, deduped
+  the same way as provider keys, and folds the bytes into the same result map
+  — so a remote image resolves identically for both engines: the typst path
+  registers it as a virtual file same as any other image, and the pandoc path
+  (`resolve_images`) materialises it to a temp file and rewrites the markdown,
+  so pandoc's own subprocess never touches the network. A fetch failure (DNS,
+  404, timeout, …) warns and is dropped rather than failing the render. The
+  feature gates a new `reqwest` dependency (`rustls-tls`, no native-tls) —
+  off by default, no new dependency and byte-identical output for documents
+  without remote images.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
 - `DocMeta` / `BrandSpec` / `ResolvedDoc.assets` reach typst layouts via a
