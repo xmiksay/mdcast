@@ -5,9 +5,13 @@
 //! `register_virtual_files`, which turns a set of fetched `(key, bytes)`
 //! pairs into the `(key → virtual-path, virtual-path → bytes)` shape
 //! `backends/typst/mod.rs` registers with the engine, differing only in the
-//! path prefix and in whether a miss is worth a warning.
+//! path prefix and in whether a miss is worth a warning. `fetch_deduped` is
+//! also reused by `fonts.rs::collect_fonts`, which needs the same
+//! dedup-then-fetch-through-the-provider step but skips virtual-file
+//! registration entirely (font bytes go straight to the typst engine's font
+//! book, not through `register_virtual_files`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -22,6 +26,29 @@ use crate::pages::Page;
 /// paired with the `virtual-path → bytes` list the engine's static file
 /// resolver registers.
 type VirtualFileSet = (BTreeMap<String, String>, Vec<(String, Vec<u8>)>);
+
+/// Fetch each of `refs`' declared keys through the provider, deduped in
+/// declaration order (a repeated key shouldn't cost a second round-trip, and
+/// callers that care about ordering — e.g. font precedence on an exact tie —
+/// need the first declared occurrence to stay first), all concurrently.
+/// `bytes` is `None` for a key the provider has no data for; callers decide
+/// what a miss means (warn-and-skip, silent skip, ...).
+pub(super) async fn fetch_deduped(
+    refs: &[AssetRef],
+    provider: &dyn AssetProvider,
+) -> Result<Vec<(String, Option<Bytes>)>> {
+    let mut seen = HashSet::new();
+    let keys: Vec<&str> = refs
+        .iter()
+        .map(|r| r.key.as_str())
+        .filter(|key| seen.insert(*key))
+        .collect();
+    try_join_all(keys.into_iter().map(|key| async move {
+        let bytes = provider.get(key).await?;
+        Ok::<(String, Option<Bytes>), anyhow::Error>((key.to_string(), bytes))
+    }))
+    .await
+}
 
 /// Fold fetched `(key, bytes)` pairs into a `VirtualFileSet`. A key the
 /// provider had no bytes for is dropped — `warn_missing` controls whether
@@ -79,12 +106,7 @@ pub(super) async fn collect_layout_assets(
     refs: &[AssetRef],
     provider: &dyn AssetProvider,
 ) -> Result<VirtualFileSet> {
-    let keys: BTreeMap<&str, ()> = refs.iter().map(|r| (r.key.as_str(), ())).collect();
-    let fetched = try_join_all(keys.into_keys().map(|key| async move {
-        let bytes = provider.get(key).await?;
-        Ok::<(String, Option<Bytes>), anyhow::Error>((key.to_string(), bytes))
-    }))
-    .await?;
+    let fetched = fetch_deduped(refs, provider).await?;
     Ok(register_virtual_files(fetched, "assets", true))
 }
 

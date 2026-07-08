@@ -106,6 +106,7 @@ mod tests {
             meta: DocMeta::default(),
             brand: BrandHandle(std::sync::Arc::new(crate::BrandSpec::default())),
             assets: Vec::new(),
+            fonts: Vec::new(),
             toc: None,
         }
     }

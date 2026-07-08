@@ -19,6 +19,7 @@ fn doc() -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     }
 }

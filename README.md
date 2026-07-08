@@ -229,6 +229,40 @@ plain `layout(body)` signature keep working with no changes:
   resolution: an asset here isn't referenced from markdown, and pandoc
   targets ignore `ResolvedDoc.assets` entirely.
 
+## Brand fonts (self-contained PDFs)
+
+By default the typst backend resolves `#set text(font: "...")` against
+whatever fonts `typst-kit` finds on the render host, plus typst's own
+embedded defaults — so a branded PDF depends on the host having the brand
+font installed. `ResolvedDoc.fonts: Vec<AssetRef>` lets a consumer supply the
+font faces themselves, resolved through the same `AssetProvider` as
+everything else, so the PDF is reproducible regardless of the render host:
+
+```rust
+let doc = ResolvedDoc {
+    // Each entry is a `.ttf`/`.otf` asset key fetched through the provider
+    // and registered with the typst font book before compiling.
+    fonts: vec![AssetRef { key: "fonts/Montserrat-Regular.ttf".into() }],
+    /* .. */
+    # pages: vec![], meta: DocMeta::default(),
+    # brand: BrandHandle(std::sync::Arc::new(BrandSpec::default())), assets: vec![], toc: None,
+};
+```
+
+- Registered fonts take precedence over host-discovered/embedded fonts for an
+  exact family match — a layout's `#set text(font: "Montserrat")` resolves to
+  the supplied face even when "Montserrat" also happens to be installed on
+  the host.
+- A key the provider has no bytes for, or that isn't a font `ttf_parser` can
+  parse, is silently skipped — typst falls back to host/embedded search for
+  that family (and warns `unknown font family: ...` if nothing matches
+  anywhere), the same degrade-not-fail treatment as a missing layout asset.
+- `Vec::new()` (the default) is a no-op: identical to the pre-existing
+  host-plus-embedded-only behaviour.
+- Typst-only: pandoc backends render text with whatever font the target
+  document format resolves (a DOCX/ODT/PPTX style, or the reveal.js theme
+  CSS) and ignore `ResolvedDoc.fonts` entirely.
+
 ## Table of contents
 
 `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
@@ -280,6 +314,9 @@ async fn main() -> Result<()> {
         // Declare a brand logo typst layouts can reach via `asset-path("branding/logo.svg")`
         // (see "Typst layout context" above). `Vec::new()` if no layout needs one.
         assets: vec![AssetRef { key: "branding/logo.svg".into() }],
+        // Brand font faces to register with the typst font book (see "Brand
+        // fonts" above). `Vec::new()` for host/embedded font search only.
+        fonts: vec![AssetRef { key: "fonts/Montserrat-Regular.ttf".into() }],
         toc: None, // Some(3) to request a 3-level-deep table of contents
     };
 
@@ -373,7 +410,7 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]...
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]... [--layout-font KEY]...
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
 ```
 
@@ -388,6 +425,11 @@ both engines see real image nodes.
 resolved through `--assets`/the embedded provider and reachable from a typst
 layout via `asset-path(KEY)` (see "Typst layout context" above). Ignored by
 pandoc targets.
+
+`--layout-font KEY` (repeatable) declares a `ResolvedDoc.fonts` entry — a
+`.ttf`/`.otf` asset key resolved through `--assets`/the embedded provider and
+registered with the typst font book before compiling (see "Brand fonts"
+above). Ignored by pandoc targets.
 
 ## Development
 

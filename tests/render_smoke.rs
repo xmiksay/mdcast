@@ -9,7 +9,7 @@
 //! the two in sync if that section changes.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use bytes::Bytes;
 use mdcast::backends::Registry;
@@ -19,6 +19,9 @@ use mdcast::{
     EmbeddedAssets, LayeredAssets, Page, PageOrigin, PageSplitter, RenderRequest, ResolvedDoc,
     Target, sync_provider,
 };
+
+mod common;
+use common::LogBuf;
 
 const README_EXAMPLE: &str = include_str!("golden/readme-example.md");
 
@@ -30,6 +33,7 @@ fn resolved_doc(md: &str) -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     }
 }
@@ -182,6 +186,7 @@ fn table_doc() -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     }
 }
@@ -304,6 +309,7 @@ fn branded_doc() -> ResolvedDoc {
         meta,
         brand: BrandHandle(Arc::new(brand)),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     }
 }
@@ -343,6 +349,7 @@ fn toc_doc(toc: Option<u8>) -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc,
     }
 }
@@ -485,6 +492,7 @@ fn all_classes_doc() -> ResolvedDoc {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     }
 }
@@ -752,34 +760,6 @@ async fn pandoc_html_reveal_ignores_toc_request() {
     );
 }
 
-/// Shared in-memory sink for a scoped `tracing` subscriber, so a test can
-/// assert on log output without touching the process-global subscriber.
-#[derive(Clone, Default)]
-struct LogBuf(Arc<Mutex<Vec<u8>>>);
-
-impl LogBuf {
-    fn contents(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl std::io::Write for LogBuf {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuf {
-    type Writer = LogBuf;
-    fn make_writer(&'a self) -> Self::Writer {
-        self.clone()
-    }
-}
-
 #[tokio::test]
 async fn typst_unknown_class_falls_back_to_content_with_warning() {
     let doc = ResolvedDoc {
@@ -791,6 +771,7 @@ async fn typst_unknown_class_falls_back_to_content_with_warning() {
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
         assets: Vec::new(),
+        fonts: Vec::new(),
         toc: None,
     };
 
@@ -830,6 +811,7 @@ fn layout_asset_doc() -> ResolvedDoc {
         assets: vec![AssetRef {
             key: "branding/logo.svg".into(),
         }],
+        fonts: Vec::new(),
         toc: None,
     }
 }

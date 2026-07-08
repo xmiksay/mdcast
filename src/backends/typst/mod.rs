@@ -25,9 +25,11 @@ use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 mod context;
+mod fonts;
 mod markdown;
 mod virtual_files;
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
+use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
 use virtual_files::{collect_images_for_typst, collect_layout_assets};
@@ -99,9 +101,10 @@ impl Backend for TypstBackend {
             // layout-asset keys warn and are simply absent from `asset_map`,
             // so a layout's `asset-path(key)` degrades to its `default:`
             // instead of failing the whole compile.
-            let ((image_map, mut virtual_files), (asset_map, asset_files)) = try_join!(
+            let ((image_map, mut virtual_files), (asset_map, asset_files), fonts) = try_join!(
                 collect_images_for_typst(&doc.pages, assets),
                 collect_layout_assets(&doc.assets, assets),
+                collect_fonts(&doc.fonts, assets),
             )?;
             virtual_files.extend(asset_files);
 
@@ -126,9 +129,17 @@ impl Backend for TypstBackend {
 
             // Compile on a blocking thread — typst's compiler is sync and
             // CPU-bound. Produced entirely in memory: no temp file, nothing
-            // to clean up.
+            // to clean up. `spawn_blocking` runs on its own OS thread and
+            // does not inherit the calling task's `tracing` dispatcher, so
+            // it's captured here and re-installed inside the closure —
+            // otherwise `compile_pdf`'s warnings would only surface under a
+            // process-wide `set_global_default` subscriber, never a
+            // task-scoped one.
+            let dispatch = tracing::dispatcher::get_default(|d| d.clone());
             let pdf_bytes = tokio::task::spawn_blocking(move || {
-                compile_pdf(driver, context_source, layouts, virtual_files)
+                tracing::dispatcher::with_default(&dispatch, || {
+                    compile_pdf(driver, context_source, layouts, virtual_files, fonts)
+                })
             })
             .await
             .context("typst compile thread panicked")??;
@@ -209,6 +220,7 @@ fn compile_pdf(
     context_source: String,
     layouts: Vec<(String, Vec<u8>)>,
     virtual_files: Vec<(String, Vec<u8>)>,
+    fonts: Vec<Vec<u8>>,
 ) -> Result<Vec<u8>> {
     // Pre-build owned `Source` values so we don't fight lifetimes against the
     // `(&str, String)` IntoSource impl that requires the path to outlive the iterator.
@@ -233,14 +245,29 @@ fn compile_pdf(
         .map(|(p, b)| (p.as_str(), b.clone()))
         .collect();
 
+    // Registered before `search_fonts_with`: `TypstEngine::builder().build()`
+    // pushes explicit `.fonts(...)` faces into the font book first, so an
+    // exact family match resolves to the provider-supplied font even when
+    // the same family is also discoverable on the host (FontBook::select's
+    // tie-break keeps the first-inserted candidate).
     let engine = TypstEngine::builder()
         .main_file(driver)
         .with_static_source_file_resolver(sources)
         .with_static_file_resolver(image_refs)
+        .fonts(fonts)
         .search_fonts_with(typst_as_lib::typst_kit_options::TypstKitFontOptions::default())
         .build();
 
     let result = engine.compile();
+    // Typst warnings (e.g. "unknown font family: ...") arrive on a separate
+    // channel from the compile error path — surface them via `tracing` so a
+    // brand font that failed to resolve isn't silently dropped.
+    for w in &result.warnings {
+        tracing::warn!("typst: {}", w.message);
+        for hint in &w.hints {
+            tracing::warn!("typst: hint: {hint}");
+        }
+    }
     let doc = result.output.map_err(format_lib_error)?;
 
     let options = typst_pdf::PdfOptions::default();

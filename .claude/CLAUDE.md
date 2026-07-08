@@ -26,7 +26,8 @@ src/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, in-process compile
-│     ├─ virtual_files.rs  collect_images_for_typst() / collect_layout_assets()
+│     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
+│     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
@@ -234,18 +235,52 @@ the auto-classifier and both engines see real image nodes.
   is `--metadata` (`backends/pandoc.rs`); the two mechanisms are unrelated
   because pandoc metadata and typst's project-root file namespace are
   different plumbing.
+- `typst/virtual_files.rs::fetch_deduped` is the shared dedup-then-fetch
+  primitive both `collect_layout_assets` (below) and `typst/fonts.rs`'s
+  `collect_fonts` build on: given a `&[AssetRef]`, it dedups by key
+  *preserving first-declaration order* (not a `BTreeMap`'s key order — order
+  matters to at least one caller, see `collect_fonts` below) and fetches each
+  through the `AssetProvider` concurrently via `try_join_all`, returning
+  `(key, Option<Bytes>)` pairs. Callers decide what a miss means.
 - `ResolvedDoc.assets: Vec<AssetRef>` declares provider-resolved chrome a
   typst layout owns directly (a logo in a running header, a cover
   background) — distinct from page-body images, which `images.rs` resolves
-  by scanning markdown. `typst/virtual_files.rs::collect_layout_assets`
-  dedups and fetches each key through the same `AssetProvider` concurrently
-  with `collect_images_for_typst`, registers it under
-  `assets/<sanitized-key>` (reusing `images::sanitize_key` and the shared
-  `register_virtual_files` folding helper), and folds the key → virtual-path
-  mapping into `/context.typ`'s `asset-path` accessor. A key the provider
-  can't resolve is dropped with a `tracing::warn!` rather than failing the
-  render. Typst-only: pandoc backends ignore this field since they already
-  handle body images.
+  by scanning markdown. `typst/virtual_files.rs::collect_layout_assets` calls
+  `fetch_deduped` concurrently with `collect_images_for_typst`, registers each
+  found key under `assets/<sanitized-key>` (reusing `images::sanitize_key`
+  and the shared `register_virtual_files` folding helper), and folds the
+  key → virtual-path mapping into `/context.typ`'s `asset-path` accessor. A
+  key the provider can't resolve is dropped with a `tracing::warn!` rather
+  than failing the render. Typst-only: pandoc backends ignore this field
+  since they already handle body images.
+- `ResolvedDoc.fonts: Vec<AssetRef>` declares brand font faces
+  (`.ttf`/`.otf`) to register with the typst font book before compiling — see
+  README's "Brand fonts" section. `typst/fonts.rs::collect_fonts` calls
+  `fetch_deduped`, in parallel with `collect_images_for_typst`/
+  `collect_layout_assets` (`typst/mod.rs`'s `try_join!`), and hands the raw
+  bytes to `TypstEngine::builder().fonts(...)` — called *before*
+  `.search_fonts_with(...)`, so an exact family match resolves to the
+  provider-supplied font even when the same family is also
+  host/embedded-discoverable (`typst-as-lib`'s builder pushes explicit
+  `.fonts(...)` faces into the `FontBook` first, in `Vec` order, and
+  `FontBook::select`'s variant-distance tie-break keeps the first-inserted
+  candidate on an exact tie) — which is exactly why `collect_fonts` needs
+  `fetch_deduped`'s order-preserving dedup rather than a key-sorted one, a
+  bug the first version of this code had. A key the provider can't resolve,
+  or that isn't parseable font data, is dropped (the former warns via
+  `tracing::warn!`, matching `collect_layout_assets`; the latter is silently
+  skipped by typst's own `Font::iter`) — either way compilation still
+  succeeds and falls back to host/embedded search for that family.
+  `Vec::new()` (the default) is a no-op. Typst-only: pandoc backends render
+  text with whatever font the
+  target document format resolves and ignore this field. Typst's own
+  compile-time warnings (e.g. `unknown font family: ...`) are otherwise
+  discarded by `typst-as-lib`'s `Warned<T>` wrapper, so `typst/mod.rs`
+  forwards each one through `tracing::warn!` — since that happens inside the
+  `spawn_blocking` compile closure (a different OS thread than the calling
+  task), the closure explicitly re-installs the calling task's `tracing`
+  dispatcher rather than relying on thread-local inheritance, which doesn't
+  cross `spawn_blocking`.
 - `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
   heading depth — see README's "Table of contents" section for the
   per-target contract. Pandoc gets `--toc --toc-depth=<n>` (docx/odt only —
