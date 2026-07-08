@@ -158,6 +158,7 @@ mod tests {
             }
         });
         assert_eq!(p.get("k").await.unwrap(), Some(Bytes::from_static(b"v")));
+        assert!(p.list("").await.unwrap().is_empty());
     }
 
     #[tokio::test]
