@@ -195,13 +195,22 @@ the auto-classifier and both engines see real image nodes.
   angle-bracket URLs (`![alt](<url>)`), and reference-style images
   (`![alt][ref]`) all resolve through the `AssetProvider` — pulldown-cmark
   already resolves reference definitions and strips titles/angle-brackets into
-  `dest_url`/`title`. Shared by the pandoc rewrite path (`resolve_images`) and
-  the typst image collector (`collect_images_for_typst`), so both engines
-  recognise the same forms. Whatever the original syntax, a resolved
-  reference is rewritten to a plain `![alt](local-path)` (or `(local-path
-  "title")` if a title was present) — reference-style images collapse to
-  inline once resolved, leaving their now-unused `[ref]: ...` definition line
-  in place.
+  `dest_url`/`title`. `images.rs::collect_images` is the one shared
+  walk/dedup/fetch pipeline: it finds every non-remote image reference across
+  a page set and fetches each unique key once via `try_join_all`. The pandoc
+  path (`resolve_images`) writes the fetched bytes to a per-render temp
+  directory and rewrites page bodies to point at the materialised file; the
+  typst path (`backends/typst/mod.rs::collect_images_for_typst`) keeps the
+  bytes in memory and registers them as virtual files with the in-process
+  compiler — engine-specific code only handles that last step. Both paths
+  share one sanitizer, `images::sanitize_key` (`/`, `\` → `__`), for turning a
+  provider key into a safe path/virtual-path segment; typst's unrelated
+  `sanitize_class` (page/layout class name → import path segment, `/`, `\` →
+  `_`) is kept separate since it sanitizes a different input domain. Whatever
+  the original image syntax, a resolved reference is rewritten to a plain
+  `![alt](local-path)` (or `(local-path "title")` if a title was present) —
+  reference-style images collapse to inline once resolved, leaving their
+  now-unused `[ref]: ...` definition line in place.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
 - `DocMeta` / `BrandSpec` reach typst layouts via a synthetic `/context.typ`

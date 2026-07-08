@@ -16,7 +16,7 @@ use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
-use crate::images::{image_refs, looks_remote};
+use crate::images::{collect_images, sanitize_key};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
@@ -129,41 +129,24 @@ impl Backend for TypstBackend {
     }
 }
 
-/// Walk every page, find `![alt](key)` image references, fetch bytes via the
-/// provider, and produce (a) a `url → virtual_path` map for the md→typst
-/// converter, (b) the bytes to register with the typst engine.
+/// Fetch every image reference via the shared `collect_images` pipeline and
+/// produce (a) a `url → virtual_path` map for the md→typst converter, (b) the
+/// bytes to register with the typst engine.
 async fn collect_images_for_typst(
     pages: &[Page],
     provider: &dyn AssetProvider,
 ) -> Result<(BTreeMap<String, String>, Vec<(String, Vec<u8>)>)> {
-    let mut urls: BTreeMap<String, ()> = BTreeMap::new();
-    for page in pages {
-        for r in image_refs(&page.body) {
-            if looks_remote(&r.dest_url) {
-                continue;
-            }
-            urls.insert(r.dest_url, ());
-        }
-    }
-    let url_vec: Vec<String> = urls.into_keys().collect();
-    let fetched: Vec<(String, Option<Vec<u8>>)> =
-        try_join_all(url_vec.iter().map(|u| async move {
-            let bytes = provider.get(u).await?.map(|b| b.to_vec());
-            Ok::<_, anyhow::Error>((u.clone(), bytes))
-        }))
-        .await?;
+    let fetched = collect_images(pages, provider).await?;
 
     let mut map = BTreeMap::new();
     let mut files = Vec::new();
     for (url, bytes) in fetched {
-        if let Some(bytes) = bytes {
-            // Register under `images/...` but emit `/images/...` in #image() calls
-            // — the leading slash makes typst resolve relative to the project root
-            // instead of the layout file's directory.
-            let vpath = format!("images/{}", sanitize_path(&url));
-            map.insert(url, format!("/{vpath}"));
-            files.push((vpath, bytes));
-        }
+        // Register under `images/...` but emit `/images/...` in #image() calls
+        // — the leading slash makes typst resolve relative to the project root
+        // instead of the layout file's directory.
+        let vpath = format!("images/{}", sanitize_key(&url));
+        map.insert(url, format!("/{vpath}"));
+        files.push((vpath, bytes.to_vec()));
     }
     Ok((map, files))
 }
@@ -186,7 +169,7 @@ pub fn build_driver(pages: &[Page], typst_bodies: &[String], toc_depth: Option<u
     for class in &classes {
         s.push_str(&format!(
             "#import \"layouts/{}.typ\": layout as {}\n",
-            sanitize_path(class),
+            sanitize_class(class),
             alias_for(class),
         ));
     }
@@ -222,7 +205,10 @@ fn alias_for(class: &str) -> String {
     out
 }
 
-fn sanitize_path(class: &str) -> String {
+/// Flatten a page/layout class name into a safe typst import path segment.
+/// Distinct from `images::sanitize_key` (image provider keys) — different
+/// input domain, kept separate deliberately rather than reused.
+fn sanitize_class(class: &str) -> String {
     class.replace(['/', '\\'], "_")
 }
 
@@ -239,7 +225,7 @@ fn compile_pdf(
     let context_id = FileId::new(None, VirtualPath::new(CONTEXT_VIRTUAL_PATH));
     sources.push(Source::new(context_id, context_source));
     for (class, bytes) in layouts {
-        let path = format!("layouts/{}.typ", sanitize_path(&class));
+        let path = format!("layouts/{}.typ", sanitize_class(&class));
         let src = String::from_utf8(bytes)
             .with_context(|| format!("layout '{class}' is not valid UTF-8"))?;
         let id = FileId::new(None, VirtualPath::new(path));
