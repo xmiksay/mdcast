@@ -69,3 +69,99 @@ impl Registry {
         artifact.write_to(req.out).await
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assets::sync_provider;
+    use crate::{BrandHandle, DocMeta};
+
+    struct StubBackend {
+        target: Target,
+    }
+
+    impl Backend for StubBackend {
+        fn target(&self) -> Target {
+            self.target
+        }
+
+        fn render_to_bytes<'a>(
+            &'a self,
+            _doc: &'a ResolvedDoc,
+            _assets: &'a dyn AssetProvider,
+        ) -> crate::BoxFuture<'a, Result<RenderedArtifact>> {
+            Box::pin(async move {
+                Ok(RenderedArtifact {
+                    primary: bytes::Bytes::from_static(b"stub output"),
+                    filename: "stub.txt".to_string(),
+                    extras: Vec::new(),
+                })
+            })
+        }
+    }
+
+    fn doc() -> ResolvedDoc {
+        ResolvedDoc {
+            pages: Vec::new(),
+            meta: DocMeta::default(),
+            brand: BrandHandle(std::sync::Arc::new(crate::BrandSpec::default())),
+            assets: Vec::new(),
+            toc: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn render_to_bytes_dispatches_to_registered_backend() {
+        let mut registry = Registry::empty();
+        registry.register(Box::new(StubBackend {
+            target: Target::Docx,
+        }));
+        let assets = sync_provider(|_| Ok(None));
+
+        let artifact = registry
+            .render_to_bytes(Target::Docx, &doc(), &assets)
+            .await
+            .unwrap();
+
+        assert_eq!(artifact.primary, bytes::Bytes::from_static(b"stub output"));
+        assert_eq!(artifact.filename, "stub.txt");
+    }
+
+    #[tokio::test]
+    async fn render_to_bytes_unknown_target_errors() {
+        let registry = Registry::empty();
+        let assets = sync_provider(|_| Ok(None));
+
+        let err = registry
+            .render_to_bytes(Target::Pdf, &doc(), &assets)
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("no backend registered for target"));
+    }
+
+    #[tokio::test]
+    async fn render_writes_dispatched_bytes_to_disk() {
+        let mut registry = Registry::empty();
+        registry.register(Box::new(StubBackend {
+            target: Target::Docx,
+        }));
+        let assets = sync_provider(|_| Ok(None));
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out.docx");
+        let d = doc();
+        let req = RenderRequest {
+            doc: &d,
+            assets: &assets,
+            out: &out,
+        };
+
+        let artifact = registry.render(Target::Docx, &req).await.unwrap();
+
+        assert_eq!(artifact.primary, out);
+        assert_eq!(
+            tokio::fs::read(&out).await.unwrap(),
+            b"stub output".to_vec()
+        );
+    }
+}
