@@ -73,7 +73,13 @@ pub struct DocMeta {
 pub struct BrandHandle(pub std::sync::Arc<BrandSpec>);
 
 /// Reference to an external asset that the renderer should resolve via the
-/// `AssetProvider` (e.g. an SVG rendered from a Mermaid pre-step).
+/// `AssetProvider` (e.g. an SVG rendered from a Mermaid pre-step, or a brand
+/// logo a typst layout wants to place outside the page body). Consumed today
+/// by the typst backend only: each entry is fetched through the provider and
+/// registered as a virtual file layouts can reach via `#import
+/// "/context.typ": asset-path` (see README's "Typst layout context"). Pandoc
+/// backends ignore this field — they already resolve images referenced from
+/// markdown bodies via `images::resolve_images`.
 #[derive(Debug, Clone)]
 pub struct AssetRef {
     pub key: String,

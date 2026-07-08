@@ -164,17 +164,17 @@ A class name resolves to a *different template per target*. The same
 Missing template for some class? The renderer logs a warning and falls back
 to `content`. Authors are never blocked.
 
-## Typst layout context: `doc-meta` / `brand`
+## Typst layout context: `doc-meta` / `brand` / `asset-path`
 
 Every typst render (`pdf`, `pdf-presentation`) registers a synthetic
 `/context.typ` source alongside the per-class layouts, built from
-`ResolvedDoc.meta` (`DocMeta`) and `.brand` (`BrandSpec`). A layout opts in
-with an `#import` — layouts that don't import it are completely unaffected,
-so third-party `.typ` files with the plain `layout(body)` signature keep
-working with no changes:
+`ResolvedDoc.meta` (`DocMeta`), `.brand` (`BrandSpec`), and `.assets`
+(`Vec<AssetRef>`). A layout opts in with an `#import` — layouts that don't
+import it are completely unaffected, so third-party `.typ` files with the
+plain `layout(body)` signature keep working with no changes:
 
 ```typst
-#import "/context.typ": doc-meta, brand, doc-meta-get, brand-color, brand-font
+#import "/context.typ": doc-meta, brand, doc-meta-get, brand-color, brand-font, asset-path
 
 #let layout(body) = [
   #doc-meta.title           // "" if frontmatter set no title
@@ -191,6 +191,14 @@ working with no changes:
   #doc-meta-get("classification", default: "internal")
   #text(fill: brand-color("navy", default: black))[...]
   #set text(font: brand-font("sans", default: "New Computer Modern"))
+
+  // A provider-supplied asset (logo, background) the layout owns directly —
+  // not something referenced from the markdown body. `asset-path` degrades
+  // to `none` for a key that was never declared or that the provider
+  // couldn't resolve, so wrap it in an `if` rather than calling `#image`
+  // unconditionally.
+  #let logo = asset-path("branding/logo.svg")
+  #if logo != none [#image(logo, width: 3cm)]
 ]
 ```
 
@@ -209,6 +217,17 @@ working with no changes:
   when either is set. A document with no frontmatter and no `brand.toml`
   renders identically to before this existed — every accessor's default
   reproduces the prior hardcoded value.
+- `asset-path(key, default: none)` resolves a `ResolvedDoc.assets` entry —
+  each `AssetRef { key }` is fetched through the same `AssetProvider` as
+  everything else and registered as a virtual file, so a layout reaches it
+  by the exact key the document declared (`"branding/logo.svg"`, not a
+  sanitized internal path). Both SVG and raster images work — `#image(...)`
+  doesn't care which. A key the provider has no bytes for is dropped with a
+  `tracing::warn!` instead of failing the render, so a missing logo degrades
+  to whatever `default:` the layout passes rather than breaking the PDF.
+  This is layout chrome, distinct from `images.rs`'s page-body image
+  resolution: an asset here isn't referenced from markdown, and pandoc
+  targets ignore `ResolvedDoc.assets` entirely.
 
 ## Table of contents
 
@@ -258,7 +277,9 @@ async fn main() -> Result<()> {
         pages,
         meta: DocMeta { title: Some("Q3 Review".into()), ..Default::default() },
         brand: BrandHandle(Arc::new(brand)),
-        assets: Vec::<AssetRef>::new(),
+        // Declare a brand logo typst layouts can reach via `asset-path("branding/logo.svg")`
+        // (see "Typst layout context" above). `Vec::new()` if no layout needs one.
+        assets: vec![AssetRef { key: "branding/logo.svg".into() }],
         toc: None, // Some(3) to request a 3-level-deep table of contents
     };
 
@@ -352,7 +373,7 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]...
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
 ```
 
@@ -362,6 +383,11 @@ Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
 `<img src="X" alt="A">` / `<image path="X">` HTML tags are rewritten to
 standard `![A](X)` markdown before page splitting, so the auto-classifier and
 both engines see real image nodes.
+
+`--layout-asset KEY` (repeatable) declares a `ResolvedDoc.assets` entry —
+resolved through `--assets`/the embedded provider and reachable from a typst
+layout via `asset-path(KEY)` (see "Typst layout context" above). Ignored by
+pandoc targets.
 
 ## Development
 

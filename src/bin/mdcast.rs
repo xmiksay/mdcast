@@ -48,6 +48,11 @@ enum Cmd {
         /// `#outline(depth: N)` page); ignored by pdf-presentation/pptx/html-reveal.
         #[arg(long, value_parser = clap::value_parser!(u8).range(1..=6))]
         toc_depth: Option<u8>,
+        /// Asset key a typst layout may reach via `#import "/context.typ":
+        /// asset-path` (e.g. a brand logo). Repeatable. Resolved through the
+        /// same `--assets`/embedded provider; ignored by pandoc targets.
+        #[arg(long = "layout-asset")]
+        layout_assets: Vec<String>,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
     /// auto-classifier and explicit-wrapper parsing.
@@ -102,8 +107,16 @@ async fn main() -> Result<()> {
             assets,
             html_image_tags,
             toc_depth,
+            layout_assets,
         } => {
-            let doc = load_doc(&input, brand.as_deref(), html_image_tags, toc_depth).await?;
+            let doc = load_doc(
+                &input,
+                brand.as_deref(),
+                html_image_tags,
+                toc_depth,
+                layout_assets,
+            )
+            .await?;
             let registry = Registry::with_defaults();
             let artifact = match assets {
                 Some(dir) => {
@@ -134,7 +147,7 @@ async fn main() -> Result<()> {
             brand,
             html_image_tags,
         } => {
-            let doc = load_doc(&input, brand.as_deref(), html_image_tags, None).await?;
+            let doc = load_doc(&input, brand.as_deref(), html_image_tags, None, Vec::new()).await?;
             for (i, page) in doc.pages.iter().enumerate() {
                 println!(
                     "page {:>3}  class={:<20}  origin={:?}",
@@ -198,6 +211,7 @@ async fn load_doc(
     brand: Option<&std::path::Path>,
     html_image_tags: bool,
     toc_depth: Option<u8>,
+    layout_assets: Vec<String>,
 ) -> Result<ResolvedDoc> {
     let md = tokio::fs::read_to_string(input)
         .await
@@ -228,7 +242,10 @@ async fn load_doc(
         pages,
         meta,
         brand: BrandHandle(Arc::new(brand_spec)),
-        assets: Vec::<AssetRef>::new(),
+        assets: layout_assets
+            .into_iter()
+            .map(|key| AssetRef { key })
+            .collect(),
         toc: toc_depth,
     })
 }
@@ -236,6 +253,26 @@ async fn load_doc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn load_doc_turns_layout_asset_flags_into_asset_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.md");
+        tokio::fs::write(&input, "# Hi").await.unwrap();
+
+        let doc = load_doc(
+            &input,
+            None,
+            false,
+            None,
+            vec!["branding/logo.svg".to_string(), "bg.png".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let keys: Vec<&str> = doc.assets.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, vec!["branding/logo.svg", "bg.png"]);
+    }
 
     #[tokio::test]
     async fn list_walks_subdirectories_and_filters_by_prefix() {

@@ -15,9 +15,9 @@ use bytes::Bytes;
 use mdcast::backends::Registry;
 use mdcast::pages::auto::classify;
 use mdcast::{
-    AssetProvider, AutoLayout, BrandHandle, BrandSpec, DefaultSplitter, DocMeta, EmbeddedAssets,
-    LayeredAssets, Page, PageOrigin, PageSplitter, RenderRequest, ResolvedDoc, Target,
-    sync_provider,
+    AssetProvider, AssetRef, AutoLayout, BrandHandle, BrandSpec, DefaultSplitter, DocMeta,
+    EmbeddedAssets, LayeredAssets, Page, PageOrigin, PageSplitter, RenderRequest, ResolvedDoc,
+    Target, sync_provider,
 };
 
 const README_EXAMPLE: &str = include_str!("golden/readme-example.md");
@@ -813,5 +813,92 @@ async fn typst_unknown_class_falls_back_to_content_with_warning() {
     assert!(
         logs.contains("falling back to content"),
         "expected the documented fallback warning in logs, got:\n{logs}"
+    );
+}
+
+/// A document declaring one `ResolvedDoc.assets` entry — a logo a layout
+/// wants as chrome, not something referenced from the markdown body.
+fn layout_asset_doc() -> ResolvedDoc {
+    ResolvedDoc {
+        pages: vec![Page {
+            class: "content".into(),
+            body: "Body text.".into(),
+            origin: PageOrigin::Explicit,
+        }],
+        meta: DocMeta::default(),
+        brand: BrandHandle(Arc::new(BrandSpec::default())),
+        assets: vec![AssetRef {
+            key: "branding/logo.svg".into(),
+        }],
+        toc: None,
+    }
+}
+
+/// Layers a `content` layout that imports `asset-path` and places the
+/// resolved logo via `#image(...)`, plus (optionally) the logo bytes
+/// themselves, over the built-in catalog.
+fn assets_with_logo_layout(serve_logo: bool) -> impl AssetProvider {
+    const LOGO_LAYOUT: &str = r##"
+#import "/context.typ": asset-path
+#let layout(body) = [
+  #set page(margin: 2cm)
+  #let logo = asset-path("branding/logo.svg")
+  #if logo != none [#image(logo, width: 1cm)]
+  #eval(body, mode: "markup")
+]
+"##;
+    let over = sync_provider(move |key: &str| match key {
+        "typst/layouts/pdf/content.typ" => Ok(Some(Bytes::from_static(LOGO_LAYOUT.as_bytes()))),
+        "branding/logo.svg" if serve_logo => Ok(Some(Bytes::from_static(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#,
+        ))),
+        _ => Ok(None),
+    });
+    LayeredAssets {
+        over,
+        base: EmbeddedAssets,
+    }
+}
+
+/// End-to-end: a layout that imports `asset-path` and calls `#image(...)`
+/// against a `ResolvedDoc.assets` entry compiles for real against the typst
+/// engine — a unit test on `build_context_source`'s string output alone
+/// wouldn't catch a malformed `#image(...)` call or a bad virtual path.
+#[tokio::test]
+async fn typst_layout_embeds_declared_asset() {
+    let doc = layout_asset_doc();
+    let assets = assets_with_logo_layout(true);
+    let (_tmp, out) = render_with(Target::Pdf, &doc, assets).await;
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(bytes.starts_with(b"%PDF-"), "not a PDF");
+}
+
+/// A declared asset key the provider has no bytes for must warn and degrade
+/// to `asset-path`'s `default:` (here `none`, so the layout's `#if` just
+/// skips the image) rather than failing the whole compile.
+#[tokio::test]
+async fn typst_missing_layout_asset_warns_and_degrades() {
+    let doc = layout_asset_doc();
+    let assets = assets_with_logo_layout(false);
+
+    let buf = LogBuf::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(buf.clone())
+        .with_ansi(false)
+        .finish();
+    let bytes = {
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let (_tmp, out) = render_with(Target::Pdf, &doc, assets).await;
+        std::fs::read(&out).unwrap()
+    };
+    assert!(
+        bytes.starts_with(b"%PDF-"),
+        "missing asset should still produce a real PDF"
+    );
+
+    let logs = buf.contents();
+    assert!(
+        logs.contains("layout asset not found in provider; skipping"),
+        "expected the documented degrade warning in logs, got:\n{logs}"
     );
 }
