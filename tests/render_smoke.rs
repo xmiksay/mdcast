@@ -72,9 +72,16 @@ fn ext_for(target: Target) -> &'static str {
 }
 
 async fn render(target: Target, doc: &ResolvedDoc) -> (tempfile::TempDir, PathBuf) {
+    render_with(target, doc, assets_with_chart()).await
+}
+
+async fn render_with(
+    target: Target,
+    doc: &ResolvedDoc,
+    assets: impl AssetProvider,
+) -> (tempfile::TempDir, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let out = tmp.path().join(format!("out.{}", ext_for(target)));
-    let assets = assets_with_chart();
     let req = RenderRequest {
         doc,
         assets: &assets,
@@ -148,6 +155,110 @@ async fn typst_pdf_presentation_smoke() {
         bytes.len() > 500,
         "suspiciously small PDF: {} bytes",
         bytes.len()
+    );
+}
+
+/// A GFM table with mixed alignment, inline marks, and characters that could
+/// break out of Typst markup (`|`, `#`, `_`, `*`, `\`, `[`, `]`) if the cell
+/// escaping in `md_to_typst` were wrong. Exercises the real in-process typst
+/// compiler end to end — a compile error here would mean the emitted
+/// `#table(...)` literal is malformed, not just that a unit-test string
+/// assertion is satisfied.
+fn table_doc() -> ResolvedDoc {
+    let pages = vec![Page {
+        class: "content".into(),
+        body: "\
+| Left | Center | Right |
+|:-----|:------:|------:|
+| **bold** | _em_ and `code` | a\\|b #c [d] \\\\ |
+| short |
+"
+        .into(),
+        origin: PageOrigin::Explicit,
+    }];
+    ResolvedDoc {
+        pages,
+        meta: DocMeta::default(),
+        brand: BrandHandle(Arc::new(BrandSpec::default())),
+        assets: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn typst_pdf_table_smoke() {
+    let doc = table_doc();
+    let (_tmp, out) = render(Target::Pdf, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.starts_with(b"%PDF-"),
+        "not a PDF: {:?}",
+        &bytes[..bytes.len().min(16)]
+    );
+}
+
+#[tokio::test]
+async fn typst_pdf_presentation_table_smoke() {
+    let doc = table_doc();
+    let (_tmp, out) = render(Target::PdfPresentation, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    assert!(
+        bytes.starts_with(b"%PDF-"),
+        "not a PDF: {:?}",
+        &bytes[..bytes.len().min(16)]
+    );
+}
+
+/// The converter emits a *structural* `#table(...)` — styling is meant to
+/// come from a `#show table: ...` rule in the enclosing layout, not be
+/// hardcoded in `md_to_typst`. Since the body is spliced into the layout via
+/// `#eval(body, mode: "markup")`, this only works if a show rule set before
+/// the `#eval` call in the layout's own scope still applies to the table
+/// content that call produces. Prove it by overriding the `content` layout
+/// with one that fills table cells red before `#eval`, and asserting the
+/// rendered PDF actually differs from the unstyled default — a no-op show
+/// rule would make the two byte-identical modulo incidental metadata.
+fn assets_overriding_content_layout(typ_source: &'static str) -> impl AssetProvider {
+    let over = sync_provider(move |key: &str| {
+        if key == "typst/layouts/pdf/content.typ" {
+            Ok(Some(Bytes::from_static(typ_source.as_bytes())))
+        } else {
+            Ok(None)
+        }
+    });
+    LayeredAssets {
+        over,
+        base: EmbeddedAssets,
+    }
+}
+
+#[tokio::test]
+async fn show_table_rule_in_layout_applies_across_eval_boundary() {
+    let doc = table_doc();
+
+    let (_tmp, default_out) = render(Target::Pdf, &doc).await;
+    let default_bytes = std::fs::read(&default_out).unwrap();
+
+    const THEMED_LAYOUT: &str = r##"
+#let layout(body) = [
+  #set page(margin: 2cm)
+  #set text(font: "New Computer Modern", size: 11pt)
+  #show table: set table(fill: rgb("#ff0000"))
+  #eval(body, mode: "markup")
+]
+"##;
+    let themed_assets = assets_overriding_content_layout(THEMED_LAYOUT);
+    let (_tmp2, themed_out) = render_with(Target::Pdf, &doc, themed_assets).await;
+    let themed_bytes = std::fs::read(&themed_out).unwrap();
+
+    assert!(
+        themed_bytes.starts_with(b"%PDF-"),
+        "themed render is not a PDF"
+    );
+    assert_ne!(
+        default_bytes, themed_bytes,
+        "a #show table: rule set before #eval in the layout had no effect on \
+         the rendered table — the theming hook the layout is supposed to use \
+         isn't reaching content produced by #eval"
     );
 }
 

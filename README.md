@@ -320,7 +320,7 @@ change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://githu
   True per-class selection needs post-render patching of each slide's layout
   relationship.
 - Full markdown coverage in the md→Typst converter (v1 handles headings,
-  emphasis, lists, blockquotes, images, and code; links, footnotes, and tables
+  emphasis, lists, blockquotes, images, code, and tables; links and footnotes
   are not yet projected — their text comes through unstyled).
 - Mermaid → SVG pre-processing (a Rust renderer the team already owns will
   plug in as a pre-step).
