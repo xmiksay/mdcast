@@ -9,7 +9,9 @@ env:
   CARGO_BUILD_JOBS: 4
 
 jobs:
+  # Full verification gate on every PR: lint + all feature combos + all tests.
   test:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,20 +25,54 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: Lint (fmt + clippy)
+        run: make lint
 
-      - name: cargo clippy
-        run: cargo clippy --all-targets -- -D warnings
+      - name: Check all feature combinations
+        run: make check-all
 
-      - name: cargo check (no default features)
-        run: cargo check --no-default-features
+      - name: Test
+        run: make test
 
-      - name: cargo check (pandoc only)
-        run: cargo check --no-default-features --features pandoc
+  # Coverage on every merge to master. Runs the full suite under llvm-cov, so
+  # master stays verified without duplicating the PR job.
+  coverage:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      - name: cargo check (typst only)
-        run: cargo check --no-default-features --features typst
+      - name: Install pandoc
+        run: sudo apt-get update && sudo apt-get install -y pandoc
 
-      - name: cargo test
-        run: cargo test
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-llvm-cov
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # Coverage builds use different RUSTFLAGS — keep a separate cache.
+          prefix-key: coverage
+
+      - name: Coverage
+        run: make coverage
+
+      - name: Coverage summary
+        run: |
+          {
+            echo '## Coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: HTML report
+        run: cargo llvm-cov report --html
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            lcov.info
+            target/llvm-cov/html

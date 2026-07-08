@@ -352,11 +352,16 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N]
-mdcast explain INPUT.md [--brand brand.toml]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags]
+mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
+
+`--html-image-tags` enables the built-in `HtmlImageTags` preprocessor:
+`<img src="X" alt="A">` / `<image path="X">` HTML tags are rewritten to
+standard `![A](X)` markdown before page splitting, so the auto-classifier and
+both engines see real image nodes.
 
 ## Development
 
@@ -372,7 +377,8 @@ list them:
 | `make test`             | Full suite (unit + integration)                                 |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
 | `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
-| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` — what CI runs   |
+| `make coverage`         | Coverage report: `lcov.info` + terminal summary (needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)); CI runs it on every merge to `master` |
+| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` — what CI runs on every PR |
 | `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
 
 `CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.

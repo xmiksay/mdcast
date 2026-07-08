@@ -1,7 +1,7 @@
 export CARGO_BUILD_JOBS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check check-all fmt lint test test-unit test-integration verify demo clean
+.PHONY: help build release check check-all fmt lint test test-unit test-integration coverage verify demo clean
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -37,6 +37,10 @@ test-integration: ## Integration tests (tests/ — incl. engine smoke tests; pan
 
 test: ## All tests
 	cargo test
+
+coverage: ## Test coverage: lcov.info + terminal summary (needs cargo-llvm-cov)
+	cargo llvm-cov --lcov --output-path lcov.info
+	cargo llvm-cov report --summary-only
 
 verify: lint check-all test ## Pre-"done" gate: lint + all feature combos + all tests
 

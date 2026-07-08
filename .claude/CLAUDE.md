@@ -33,7 +33,7 @@ src/
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
 ├─ revealjs/{dist,plugin}/…  vendored reveal.js 4.6.1 (fonts stripped)
-└─ reference/         reference.odt (real, minimal); .docx/.pptx TBD
+└─ reference/         reference.{docx,odt,pptx} — real, named styles per class
 ```
 
 ## Architectural seams (don't violate)
@@ -78,12 +78,16 @@ happens to mirror them.
 
 ## Build / test
 
+Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
+all targets:
+
 ```
-cargo build                              # default = pandoc + typst
-cargo check --no-default-features        # core only — neither engine
-cargo check --no-default-features --features pandoc
-cargo check --no-default-features --features typst
-cargo test                               # 40 tests; unit suite runs in <1s
+make build       # cargo build — default = pandoc + typst
+make check-all   # all four cargo check feature combos (core / pandoc / typst / both)
+make test        # cargo test — ~100 tests; unit suite runs in <1s
+make lint        # cargo fmt --check + cargo clippy --all-targets -- -D warnings
+make coverage    # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
+make verify      # lint + check-all + test — the pre-"done" gate
 ```
 
 `tests/render_smoke.rs` drives the real engines (in-process typst, subprocess
@@ -92,21 +96,25 @@ tests and never invokes an engine. The pandoc-backed smoke tests skip
 gracefully (not `#[ignore]`) when `pandoc` isn't on `PATH`, so `cargo test`
 stays green with or without it installed locally.
 
-`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy --all-targets
--- -D warnings`, all four `cargo check` combinations, and `cargo test` on
-every push/PR to `master`, with `pandoc` installed in the job so the
-OOXML/revealjs smoke tests actually exercise pandoc in CI.
+`.github/workflows/ci.yml` has two jobs: `test` runs `make lint`,
+`make check-all`, and `make test` on every pull request, with `pandoc`
+installed so the OOXML/revealjs smoke tests actually exercise pandoc in CI;
+`coverage` runs `make coverage` (cargo-llvm-cov) on every push/merge to
+`master`, writes the summary table to the Actions job summary, and uploads
+`lcov.info` + the HTML report as a `coverage-report` artifact.
 
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml]
-./target/debug/mdcast explain INPUT.md  # prints per-page (class, origin)
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags]
+./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]  # prints per-page (class, origin)
 ```
 
 `--assets DIR` layers a filesystem-backed provider over `EmbeddedAssets`.
 That's the easy way to supply images referenced from markdown without writing
-Rust.
+Rust. `--html-image-tags` enables the built-in `HtmlImageTags` preprocessor:
+`<img src="X">` / `<image path="X">` become `![alt](X)` before splitting, so
+the auto-classifier and both engines see real image nodes.
 
 ## Adding a new layout class
 
