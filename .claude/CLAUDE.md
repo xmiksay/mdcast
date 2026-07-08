@@ -125,14 +125,23 @@ Rust.
 
 - The md→Typst converter (`typst/markdown.rs::md_to_typst`) covers a v1
   subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
-  inline code, and code blocks. Links, footnotes, tables, and HTML blocks are
+  inline code, code blocks, and tables. Links, footnotes, and HTML blocks are
   dropped (their text content still comes through). Literal `_` / `*` in prose
   are not escaped. Layouts receive the converted body as a string and typeset
   it via `#eval(body, mode: "markup")`. Code block text is passed through
   verbatim (not escaped) inside the fence, with the fence language forwarded
   from the markdown info string; inline code renders via `#raw(...)` (a
   function call, not the backtick shorthand) so embedded backticks can't break
-  out of it.
+  out of it. Tables project to a structural `#table(columns:, align:,
+  table.header(...), ...)` call — column count and per-column alignment come
+  from the GFM alignment row, header cells are wrapped in `table.header(...)`,
+  ragged rows are padded/truncated to the column count, and cell text runs
+  through the same inline conversion and escaping as paragraph text (`[`/`]`
+  are additionally escaped there, since a cell's content sits inside a
+  `[...]` literal). Styling is deliberately left to the layout: a `#show
+  table: ...` rule set before `#eval(...)` in the same layout scope applies to
+  the table content that call produces, since show rules attach at
+  realization time, not at content-construction time.
 - DOCX/ODT honour a class as a paragraph-style name only (typographic
   projection). Spatial layout — multi-column, image positioning — would need a
   template-injection backend; documented in `PROJECT_PLAN.md` §10.
