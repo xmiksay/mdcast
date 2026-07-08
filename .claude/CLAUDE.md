@@ -26,7 +26,9 @@ src/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs       TypstBackend, driver assembly, in-process compile
-│     ├─ markdown.rs  md_to_typst() — markdown → Typst-markup conversion
+│     ├─ markdown/    md_to_typst() — markdown → Typst-markup conversion
+│     │  ├─ mod.rs    render_events() state machine + inline helpers
+│     │  └─ table.rs  TableBuilder — `#table(...)` projection for GFM tables
 │     └─ context.rs   build_context_source() — DocMeta/BrandSpec → `/context.typ`
 └─ bin/mdcast.rs      CLI (render / explain)
 
@@ -135,7 +137,7 @@ the auto-classifier and both engines see real image nodes.
 
 ## Known limitations
 
-- The md→Typst converter (`typst/markdown.rs::md_to_typst`) covers a v1
+- The md→Typst converter (`typst/markdown/mod.rs::md_to_typst`) covers a v1
   subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
   inline code, code blocks, tables, links (inline and reference-style),
   autolinks (`<https://…>`, `<user@host>`), and footnotes. Raw HTML blocks are
