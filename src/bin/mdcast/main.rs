@@ -6,15 +6,20 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use mdcast::backends::Registry;
 use mdcast::pages::auto::classify;
 use mdcast::pages::splitter::DefaultSplitter;
 use mdcast::{
-    AssetProvider, AssetRef, BrandHandle, BrandSpec, EmbeddedAssets, HtmlImageTags, Identity,
-    LayeredAssets, MarkdownPreprocessor, PageSplitter, RenderRequest, ResolvedDoc, Target,
+    AssetRef, BrandHandle, BrandSpec, EmbeddedAssets, HtmlImageTags, Identity, LayeredAssets,
+    MarkdownPreprocessor, PageSplitter, RenderRequest, ResolvedDoc, Target,
 };
+
+mod fs_assets;
+#[cfg(feature = "typst")]
+mod render_template;
+
+use fs_assets::FsAssets;
 
 #[derive(Parser)]
 #[command(name = "mdcast", about = "Markdown → DOCX/PDF/PPTX/HTML")]
@@ -68,6 +73,26 @@ enum Cmd {
         brand: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         html_image_tags: bool,
+    },
+    /// Render a user-supplied typst template against structured data — no
+    /// markdown involved. `template` is an AssetProvider key (e.g.
+    /// "templates/invoice.typ"); its own directory is scanned for sibling
+    /// `#import`s/images (see `TemplateDoc`'s docs).
+    #[cfg(feature = "typst")]
+    RenderTemplate {
+        template: String,
+        /// JSON file read into the template as `json("/data.json")`.
+        #[arg(long)]
+        data: PathBuf,
+        #[arg(short, long)]
+        out: PathBuf,
+        #[arg(long)]
+        brand: Option<PathBuf>,
+        /// Directory layered over `EmbeddedAssets`. Provider keys map to
+        /// relative paths inside this dir — the same `--assets` flag `render`
+        /// uses.
+        #[arg(long)]
+        assets: Option<PathBuf>,
     },
 }
 
@@ -171,54 +196,32 @@ async fn main() -> Result<()> {
                 );
             }
         }
+        #[cfg(feature = "typst")]
+        Cmd::RenderTemplate {
+            template,
+            data,
+            out,
+            brand,
+            assets,
+        } => {
+            let artifact = render_template::run(template, data, out, brand, assets).await?;
+            println!("wrote {}", artifact.primary.display());
+        }
     }
     Ok(())
 }
 
-/// Minimal filesystem-backed provider. Keys map to relative paths inside `root`.
-/// Used by the CLI's `--assets` flag; libraries should impl `AssetProvider`
-/// themselves for real overrides (DB, S3, in-memory map …).
-struct FsAssets(PathBuf);
-
-impl AssetProvider for FsAssets {
-    fn get<'a>(&'a self, key: &'a str) -> mdcast::BoxFuture<'a, anyhow::Result<Option<Bytes>>> {
-        Box::pin(async move {
-            let path = self.0.join(key);
-            match tokio::fs::read(&path).await {
-                Ok(b) => Ok(Some(Bytes::from(b))),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-                Err(e) => Err(e.into()),
-            }
-        })
-    }
-
-    fn list<'a>(&'a self, prefix: &'a str) -> mdcast::BoxFuture<'a, anyhow::Result<Vec<String>>> {
-        Box::pin(async move {
-            let mut out = Vec::new();
-            let mut dirs = std::collections::VecDeque::from([self.0.clone()]);
-            while let Some(dir) = dirs.pop_front() {
-                let mut entries = match tokio::fs::read_dir(&dir).await {
-                    Ok(entries) => entries,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                    Err(e) => return Err(e.into()),
-                };
-                while let Some(entry) = entries.next_entry().await? {
-                    let path = entry.path();
-                    if entry.file_type().await?.is_dir() {
-                        dirs.push_back(path);
-                        continue;
-                    }
-                    let rel = path.strip_prefix(&self.0).expect("walked under root");
-                    let key = rel
-                        .to_string_lossy()
-                        .replace(std::path::MAIN_SEPARATOR, "/");
-                    if key.starts_with(prefix) {
-                        out.push(key);
-                    }
-                }
-            }
-            Ok(out)
-        })
+/// Shared by `load_doc` (markdown pipeline) and `render_template::run`
+/// (data-driven template pipeline) — both accept the same `--brand brand.toml`.
+async fn load_brand(brand: Option<&std::path::Path>) -> Result<BrandSpec> {
+    match brand {
+        Some(p) => {
+            let s = tokio::fs::read_to_string(p)
+                .await
+                .with_context(|| format!("read {}", p.display()))?;
+            BrandSpec::from_toml(&s).with_context(|| format!("parse {}", p.display()))
+        }
+        None => Ok(BrandSpec::default()),
     }
 }
 
@@ -234,15 +237,7 @@ async fn load_doc(
         .await
         .with_context(|| format!("read {}", input.display()))?;
     let (meta, md) = mdcast::frontmatter::extract(&md);
-    let brand_spec: BrandSpec = match brand {
-        Some(p) => {
-            let s = tokio::fs::read_to_string(p)
-                .await
-                .with_context(|| format!("read {}", p.display()))?;
-            BrandSpec::from_toml(&s).with_context(|| format!("parse {}", p.display()))?
-        }
-        None => BrandSpec::default(),
-    };
+    let brand_spec = load_brand(brand).await?;
     // Preprocessor stage: rewrites the whole document before any other pipeline
     // step sees it. The CLI exposes only the built-in HtmlImageTags via flag;
     // library callers compose their own MarkdownPreprocessor.
@@ -315,31 +310,5 @@ mod tests {
 
         let keys: Vec<&str> = doc.fonts.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, vec!["fonts/Brand-Regular.ttf"]);
-    }
-
-    #[tokio::test]
-    async fn list_walks_subdirectories_and_filters_by_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        tokio::fs::create_dir_all(dir.path().join("revealjs/dist"))
-            .await
-            .unwrap();
-        tokio::fs::write(dir.path().join("revealjs/dist/reveal.js"), b"js")
-            .await
-            .unwrap();
-        tokio::fs::write(dir.path().join("theme.css"), b"css")
-            .await
-            .unwrap();
-
-        let assets = FsAssets(dir.path().to_path_buf());
-        let mut keys = assets.list("revealjs/").await.unwrap();
-        keys.sort();
-        assert_eq!(keys, vec!["revealjs/dist/reveal.js".to_string()]);
-    }
-
-    #[tokio::test]
-    async fn list_on_missing_directory_returns_empty() {
-        let dir = tempfile::tempdir().unwrap();
-        let assets = FsAssets(dir.path().join("does-not-exist"));
-        assert!(assets.list("").await.unwrap().is_empty());
     }
 }

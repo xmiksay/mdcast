@@ -284,6 +284,103 @@ The typst `pdf` outline only lists headings that survive md→typst conversion
 (see `.claude/CLAUDE.md`'s Known limitations for the converter's coverage) —
 a document with no headings renders an empty outline page.
 
+## Data-driven template rendering (typst only)
+
+Everything above is the markdown pipeline: split into pages, classify,
+convert to typst markup, hand each page to a per-class layout. Some documents
+aren't markdown at all — an invoice, a certificate, a report — they're a
+user-authored typst template rendered over structured data (line items, a
+total, a customer address). `mdcast::backends::typst::render_template` is a
+parallel entry point into the same engine plumbing (in-process compile,
+`AssetProvider`-only file access, `/context.typ` for `DocMeta`/`BrandSpec`)
+that bypasses the splitter/classifier/`md_to_typst`/driver entirely — there
+are no pages and no `ResolvedDoc` involved:
+
+```rust
+use mdcast::backends::typst::{TemplateDoc, render_template};
+use mdcast::{BrandHandle, BrandSpec, DocMeta, EmbeddedAssets, LayeredAssets};
+# use std::sync::Arc;
+
+# async fn example() -> anyhow::Result<()> {
+let doc = TemplateDoc {
+    // AssetProvider key of the main .typ file. Its own directory is scanned
+    // for siblings it #imports/#images — see below.
+    template: "templates/invoice.typ".to_string(),
+    // Any serde-serializable value — your "data loader" (a DB row, an API
+    // response, …) produces this. mdcast's contract starts at
+    // (template, data, brand) → bytes; the data loader itself stays outside
+    // the crate.
+    data: serde_json::json!({
+        "number": "INV-2026-0042",
+        "total": "129.99",
+        "items": [{"description": "Consulting", "qty": 3, "total": "99.99"}],
+    }),
+    meta: DocMeta { title: Some("Q3 Services Invoice".into()), ..Default::default() },
+    brand: BrandHandle(Arc::new(BrandSpec::default())),
+};
+
+let provider = LayeredAssets { over: your_template_provider(), base: EmbeddedAssets };
+let artifact = render_template(&doc, &provider).await?;
+# Ok(())
+# }
+# fn your_template_provider() -> impl mdcast::AssetProvider {
+#     mdcast::sync_provider(|_| Ok(None))
+# }
+```
+
+The template itself reads the data with typst's own `json()` — no custom
+serialization dialect to design or escape (unlike `/context.typ`'s flat
+string-dict projection, which doesn't scale to arbitrary nested JSON):
+
+```typst
+#import "/context.typ": doc-meta, brand-color
+#let invoice = json("/data.json")
+
+= Invoice #invoice.number
+#doc-meta.title
+
+#table(
+  columns: (1fr, auto, auto),
+  ..invoice.items.map(it => (
+    [#it.description], [#str(it.qty)], [#it.total],
+  )).flatten(),
+)
+#text(fill: brand-color("accent"))[Total due: #invoice.total]
+```
+
+- `/context.typ` (`doc-meta`, `brand`, and the `doc-meta-get`/`brand-color`/
+  `brand-font` accessors) works identically to the markdown pipeline — see
+  "Typst layout context" above. `asset-path` always degrades to its
+  `default:` in template mode: there's no `ResolvedDoc.assets` here, since a
+  template has no per-class layout to declare chrome for. A template reaches
+  its own images/logos through sibling files instead (below).
+- **Sibling files resolve through the `AssetProvider`.** Anything the main
+  template `#import`s or `#image`s — a shared `partials/header.typ`, a
+  `logo.svg` — is discovered by listing the template's own directory
+  (`AssetProvider::list` scoped to everything up to the last `/` in
+  `template`) and registered at the same virtual path as its provider key, so
+  a relative reference resolves exactly as it would on a real filesystem.
+  `.typ` siblings register as typst sources; everything else registers as a
+  binary file. A template key with no `/` has no directory to scope
+  discovery to, so every provider key is listed — fine for a small
+  filesystem-backed provider, wasteful against a large embedded catalog, so
+  keep templates under their own subdirectory (`templates/`).
+- A missing `template` key fails with a clear error naming the key; a
+  missing sibling reference fails typst compilation with its own diagnostic
+  (unlike a missing layout asset or brand font, which degrade silently —
+  there's no sensible default for a template's own body content).
+- Scope: PDF only, same as the rest of the typst backend. Pandoc targets have
+  no equivalent notion of a user-supplied template.
+
+### CLI
+
+```
+mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml]
+```
+
+`--data` is a JSON file deserialized straight into `TemplateDoc.data`.
+`--assets DIR`/`--brand` work exactly as they do for `render` above.
+
 ## Library usage
 
 ```rust
@@ -412,6 +509,7 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ```
 mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]... [--layout-font KEY]...
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
+mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
@@ -430,6 +528,11 @@ pandoc targets.
 `.ttf`/`.otf` asset key resolved through `--assets`/the embedded provider and
 registered with the typst font book before compiling (see "Brand fonts"
 above). Ignored by pandoc targets.
+
+`render-template` (typst-only; absent when the crate is built without the
+`typst` feature) has no markdown involved — see "Data-driven template
+rendering" above. `TEMPLATE` is an `AssetProvider` key; `--data` is a JSON
+file deserialized into `TemplateDoc.data`.
 
 ## Development
 

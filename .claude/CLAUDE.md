@@ -31,8 +31,12 @@ src/
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
-│     └─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
-└─ bin/mdcast.rs      CLI (render / explain)
+│     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
+│     └─ template.rs    TemplateDoc + render_template() — user template + data → PDF, no markdown
+└─ bin/mdcast/
+   ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
+   ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
+   └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
@@ -67,6 +71,15 @@ embedded/             rust-embed source — keys mirror these paths
 - **Classifier rule order:** explicit class > content-shape > positional
   (first/last) > default. Content-shape predicates are a closed enum in v1
   (`SingleH1Only`, `SingleImageOnly`, `SingleBlockquoteOnly`, `Empty`).
+- **`render_template` is a parallel entry point, not a second IR.**
+  `backends/typst/template.rs`'s `TemplateDoc`/`render_template` bypass
+  `ResolvedDoc` entirely (no pages, no splitter, no classifier, no
+  `md_to_typst`) for the structured-data case (user typst template + JSON →
+  PDF). `Registry`/`Backend` stay untouched — they're `Target`-keyed and
+  markdown-shaped, and there is no `Target` variant this belongs under.
+  Reuses `/context.typ` and the in-process compile machinery; does not reuse
+  layouts, fonts, or `ResolvedDoc.assets` (no per-class layout to declare
+  chrome for — a template reaches its own images via sibling files instead).
 
 ## Asset key namespace
 
@@ -119,6 +132,7 @@ bump the version, merge, tag `vX.Y.Z`, push the tag.
 ```
 ./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags]
 ./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]  # prints per-page (class, origin)
+./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml]  # typst-only, no markdown
 ```
 
 `--assets DIR` layers a filesystem-backed provider over `EmbeddedAssets`.
@@ -126,6 +140,11 @@ That's the easy way to supply images referenced from markdown without writing
 Rust. `--html-image-tags` enables the built-in `HtmlImageTags` preprocessor:
 `<img src="X">` / `<image path="X">` become `![alt](X)` before splitting, so
 the auto-classifier and both engines see real image nodes.
+
+`render-template` is the data-driven entry point (issue #52): `TEMPLATE` is an
+`AssetProvider` key for the main `.typ` file, `--data` a JSON file deserialized
+into `TemplateDoc.data`. See README's "Data-driven template rendering"
+section. Only present when built with the `typst` feature.
 
 ## Adding a new layout class
 
@@ -288,6 +307,22 @@ the auto-classifier and both engines see real image nodes.
   `#outline(depth: <n>)` page ahead of the first real page
   (`typst/mod.rs::build_driver`). `pdf-presentation`/`pptx`/`html-reveal`
   ignore the request outright — slide decks don't get a TOC.
+- `backends/typst/template.rs::{TemplateDoc, render_template}` (issue #52) is
+  the data-driven entry point — see README's "Data-driven template
+  rendering" section for the full contract. `data` (any
+  `serde_json::Value`) is registered as a virtual `/data.json` a template
+  reads with typst's native `json()`, not through `/context.typ`'s
+  string-only dict (which doesn't scale to arbitrary nested JSON).
+  `render_template` discovers sibling files (partials the template
+  `#import`s, images it `#image`s) by calling `AssetProvider::list` scoped to
+  everything up to the last `/` in `template`, and registers each at the
+  same virtual path as its provider key — `.typ` siblings as typst sources,
+  everything else as a binary file — so a relative reference resolves
+  exactly as it would on a real filesystem. A template key with no `/` scopes
+  discovery to the whole provider, which is fine against a small
+  filesystem-backed one but wasteful against a large embedded catalog.
+  Typst-only, PDF-only, and deliberately does not reuse `ResolvedDoc`,
+  `Registry`, or `Backend` — see the architectural-seams bullet above.
 
 ## Conventions
 
