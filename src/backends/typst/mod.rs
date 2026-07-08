@@ -27,11 +27,13 @@ use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 mod context;
 mod fonts;
 mod markdown;
+mod template;
 mod virtual_files;
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
+pub use template::{TemplateDoc, render_template};
 use virtual_files::{collect_images_for_typst, collect_layout_assets};
 
 pub struct TypstBackend {
