@@ -20,7 +20,9 @@ use crate::images::{image_regex, looks_remote};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
+mod context;
 mod markdown;
+use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 pub use markdown::md_to_typst;
 use markdown::typst_string;
 
@@ -97,16 +99,19 @@ impl Backend for TypstBackend {
                 .map(|p| md_to_typst(&p.body, &image_map))
                 .collect();
 
-            // Build the driver source.
+            // Build the driver source and the doc-meta/brand context that
+            // layouts can optionally `#import "/context.typ": ...`.
             let driver = build_driver(&doc.pages, &typst_bodies);
+            let context_source = build_context_source(&doc.meta, &doc.brand.0);
 
             // Compile on a blocking thread — typst's compiler is sync and
             // CPU-bound. Produced entirely in memory: no temp file, nothing
             // to clean up.
-            let pdf_bytes =
-                tokio::task::spawn_blocking(move || compile_pdf(driver, layouts, image_files))
-                    .await
-                    .context("typst compile thread panicked")??;
+            let pdf_bytes = tokio::task::spawn_blocking(move || {
+                compile_pdf(driver, context_source, layouts, image_files)
+            })
+            .await
+            .context("typst compile thread panicked")??;
 
             Ok(RenderedArtifact {
                 primary: Bytes::from(pdf_bytes),
@@ -211,12 +216,15 @@ fn sanitize_path(class: &str) -> String {
 /// Synchronous: builds the engine, compiles, exports to PDF bytes.
 fn compile_pdf(
     driver: String,
+    context_source: String,
     layouts: Vec<(String, Vec<u8>)>,
     image_files: Vec<(String, Vec<u8>)>,
 ) -> Result<Vec<u8>> {
     // Pre-build owned `Source` values so we don't fight lifetimes against the
     // `(&str, String)` IntoSource impl that requires the path to outlive the iterator.
-    let mut sources: Vec<Source> = Vec::with_capacity(layouts.len());
+    let mut sources: Vec<Source> = Vec::with_capacity(layouts.len() + 1);
+    let context_id = FileId::new(None, VirtualPath::new(CONTEXT_VIRTUAL_PATH));
+    sources.push(Source::new(context_id, context_source));
     for (class, bytes) in layouts {
         let path = format!("layouts/{}.typ", sanitize_path(&class));
         let src = String::from_utf8(bytes)
