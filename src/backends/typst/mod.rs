@@ -6,25 +6,31 @@
 //! as static sources on the engine; the driver `main.typ` is built in memory
 //! and points at each layout via `#import`. Compilation runs on a blocking
 //! thread (`spawn_blocking`) so the executor stays responsive.
-
-use std::collections::BTreeMap;
+//!
+//! Three kinds of files reach the engine: the per-class layout sources, the
+//! synthetic `/context.typ`, and virtual files resolved by `virtual_files` —
+//! images found by scanning page bodies plus `ResolvedDoc.assets`, the latter
+//! for chrome a layout owns directly (a logo, a background) rather than
+//! something referenced from markdown.
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures::future::try_join_all;
+use futures::try_join;
 use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
-use crate::images::{collect_images, sanitize_key};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 mod context;
 mod markdown;
+mod virtual_files;
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 pub use markdown::md_to_typst;
 use markdown::typst_string;
+use virtual_files::{collect_images_for_typst, collect_layout_assets};
 
 pub struct TypstBackend {
     target: Target,
@@ -87,10 +93,17 @@ impl Backend for TypstBackend {
             )
             .await?;
 
-            // Resolve image refs through the provider. Returns the bytes to
-            // register with the typst engine and a (url → virtual-path) map for
-            // md→typst conversion.
-            let (image_map, image_files) = collect_images_for_typst(&doc.pages, assets).await?;
+            // Resolve page-body image refs and declared layout assets (logos,
+            // backgrounds — chrome the layout owns, not the page body)
+            // concurrently — both are independent provider fetches. Missing
+            // layout-asset keys warn and are simply absent from `asset_map`,
+            // so a layout's `asset-path(key)` degrades to its `default:`
+            // instead of failing the whole compile.
+            let ((image_map, mut virtual_files), (asset_map, asset_files)) = try_join!(
+                collect_images_for_typst(&doc.pages, assets),
+                collect_layout_assets(&doc.assets, assets),
+            )?;
+            virtual_files.extend(asset_files);
 
             // Convert each page body from markdown → typst markup.
             let typst_bodies: Vec<String> = doc
@@ -106,16 +119,16 @@ impl Backend for TypstBackend {
                 _ => None,
             };
 
-            // Build the driver source and the doc-meta/brand context that
-            // layouts can optionally `#import "/context.typ": ...`.
+            // Build the driver source and the doc-meta/brand/assets context
+            // that layouts can optionally `#import "/context.typ": ...`.
             let driver = build_driver(&doc.pages, &typst_bodies, toc_depth);
-            let context_source = build_context_source(&doc.meta, &doc.brand.0);
+            let context_source = build_context_source(&doc.meta, &doc.brand.0, &asset_map);
 
             // Compile on a blocking thread — typst's compiler is sync and
             // CPU-bound. Produced entirely in memory: no temp file, nothing
             // to clean up.
             let pdf_bytes = tokio::task::spawn_blocking(move || {
-                compile_pdf(driver, context_source, layouts, image_files)
+                compile_pdf(driver, context_source, layouts, virtual_files)
             })
             .await
             .context("typst compile thread panicked")??;
@@ -127,28 +140,6 @@ impl Backend for TypstBackend {
             })
         })
     }
-}
-
-/// Fetch every image reference via the shared `collect_images` pipeline and
-/// produce (a) a `url → virtual_path` map for the md→typst converter, (b) the
-/// bytes to register with the typst engine.
-async fn collect_images_for_typst(
-    pages: &[Page],
-    provider: &dyn AssetProvider,
-) -> Result<(BTreeMap<String, String>, Vec<(String, Vec<u8>)>)> {
-    let fetched = collect_images(pages, provider).await?;
-
-    let mut map = BTreeMap::new();
-    let mut files = Vec::new();
-    for (url, bytes) in fetched {
-        // Register under `images/...` but emit `/images/...` in #image() calls
-        // — the leading slash makes typst resolve relative to the project root
-        // instead of the layout file's directory.
-        let vpath = format!("images/{}", sanitize_key(&url));
-        map.insert(url, format!("/{vpath}"));
-        files.push((vpath, bytes.to_vec()));
-    }
-    Ok((map, files))
 }
 
 fn target_dir(target: Target) -> &'static str {
@@ -217,7 +208,7 @@ fn compile_pdf(
     driver: String,
     context_source: String,
     layouts: Vec<(String, Vec<u8>)>,
-    image_files: Vec<(String, Vec<u8>)>,
+    virtual_files: Vec<(String, Vec<u8>)>,
 ) -> Result<Vec<u8>> {
     // Pre-build owned `Source` values so we don't fight lifetimes against the
     // `(&str, String)` IntoSource impl that requires the path to outlive the iterator.
@@ -232,11 +223,12 @@ fn compile_pdf(
         sources.push(Source::new(id, src));
     }
 
-    // Materialise image bytes for the engine. Keys (virtual paths) and bytes
-    // are stored in `image_files`; we build (&str, Vec<u8>) tuples by leaking
-    // the path strings — they live for the duration of the compile, which is
-    // fine because the engine itself is dropped at the end of this function.
-    let image_refs: Vec<(&str, Vec<u8>)> = image_files
+    // Materialise image/asset bytes for the engine. Keys (virtual paths) and
+    // bytes are stored in `virtual_files`; we build (&str, Vec<u8>) tuples by
+    // leaking the path strings — they live for the duration of the compile,
+    // which is fine because the engine itself is dropped at the end of this
+    // function.
+    let image_refs: Vec<(&str, Vec<u8>)> = virtual_files
         .iter()
         .map(|(p, b)| (p.as_str(), b.clone()))
         .collect();

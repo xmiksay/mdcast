@@ -25,11 +25,12 @@ src/
 ├─ backends/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
-│     ├─ mod.rs       TypstBackend, driver assembly, in-process compile
-│     ├─ markdown/    md_to_typst() — markdown → Typst-markup conversion
-│     │  ├─ mod.rs    render_events() state machine + inline helpers
-│     │  └─ table.rs  TableBuilder — `#table(...)` projection for GFM tables
-│     └─ context.rs   build_context_source() — DocMeta/BrandSpec → `/context.typ`
+│     ├─ mod.rs         TypstBackend, driver assembly, in-process compile
+│     ├─ virtual_files.rs  collect_images_for_typst() / collect_layout_assets()
+│     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
+│     │  ├─ mod.rs      render_events() state machine + inline helpers
+│     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
+│     └─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 └─ bin/mdcast.rs      CLI (render / explain)
 
 embedded/             rust-embed source — keys mirror these paths
@@ -131,9 +132,10 @@ the auto-classifier and both engines see real image nodes.
 2. Add `embedded/typst/layouts/pdf/two-column.typ` and
    `embedded/typst/layouts/pdf-presentation/two-column.typ` (export
    `#let layout(body) = …`). Optionally `#import "/context.typ": doc-meta,
-   brand, ...` to read document title/author/date/extra and brand
-   palette/fonts — see README's "Typst layout context" section for the
-   contract. Layouts that skip the import are unaffected.
+   brand, asset-path, ...` to read document title/author/date/extra, brand
+   palette/fonts, and declared `ResolvedDoc.assets` (logos, backgrounds) — see
+   README's "Typst layout context" section for the contract. Layouts that
+   skip the import are unaffected.
 3. For pandoc: nothing for docx/odt/html-reveal — pandoc just emits the class
    onto the slide/div; the style is whatever the reference doc / theme CSS
    provides. For PPTX: pandoc's writer has no notion of arbitrary named
@@ -209,10 +211,10 @@ the auto-classifier and both engines see real image nodes.
   a page set and fetches each unique key once via `try_join_all`. The pandoc
   path (`resolve_images`) writes the fetched bytes to a per-render temp
   directory and rewrites page bodies to point at the materialised file; the
-  typst path (`backends/typst/mod.rs::collect_images_for_typst`) keeps the
-  bytes in memory and registers them as virtual files with the in-process
-  compiler — engine-specific code only handles that last step. Both paths
-  share one sanitizer, `images::sanitize_key` (`/`, `\` → `__`), for turning a
+  typst path (`backends/typst/virtual_files.rs::collect_images_for_typst`)
+  keeps the bytes in memory and registers them as virtual files with the
+  in-process compiler — engine-specific code only handles that last step. Both
+  paths share one sanitizer, `images::sanitize_key` (`/`, `\` → `__`), for turning a
   provider key into a safe path/virtual-path segment; typst's unrelated
   `sanitize_class` (page/layout class name → import path segment, `/`, `\` →
   `_`) is kept separate since it sanitizes a different input domain. Whatever
@@ -222,15 +224,28 @@ the auto-classifier and both engines see real image nodes.
   now-unused `[ref]: ...` definition line in place.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
-- `DocMeta` / `BrandSpec` reach typst layouts via a synthetic `/context.typ`
-  source (`typst/context.rs::build_context_source`), registered alongside the
-  per-class layouts and imported opt-in (`#import "/context.typ": doc-meta,
-  brand, ...`) — see README's "Typst layout context" section for the field
-  contract and the accessor helpers (`doc-meta-get`, `brand-color`,
-  `brand-font`) that degrade missing keys to a default instead of a compile
-  error. Pandoc's equivalent is `--metadata` (`backends/pandoc.rs`); the two
-  mechanisms are unrelated because pandoc metadata and typst's project-root
-  file namespace are different plumbing.
+- `DocMeta` / `BrandSpec` / `ResolvedDoc.assets` reach typst layouts via a
+  synthetic `/context.typ` source (`typst/context.rs::build_context_source`),
+  registered alongside the per-class layouts and imported opt-in (`#import
+  "/context.typ": doc-meta, brand, asset-path, ...`) — see README's "Typst
+  layout context" section for the field contract and the accessor helpers
+  (`doc-meta-get`, `brand-color`, `brand-font`, `asset-path`) that degrade
+  missing keys to a default instead of a compile error. Pandoc's equivalent
+  is `--metadata` (`backends/pandoc.rs`); the two mechanisms are unrelated
+  because pandoc metadata and typst's project-root file namespace are
+  different plumbing.
+- `ResolvedDoc.assets: Vec<AssetRef>` declares provider-resolved chrome a
+  typst layout owns directly (a logo in a running header, a cover
+  background) — distinct from page-body images, which `images.rs` resolves
+  by scanning markdown. `typst/virtual_files.rs::collect_layout_assets`
+  dedups and fetches each key through the same `AssetProvider` concurrently
+  with `collect_images_for_typst`, registers it under
+  `assets/<sanitized-key>` (reusing `images::sanitize_key` and the shared
+  `register_virtual_files` folding helper), and folds the key → virtual-path
+  mapping into `/context.typ`'s `asset-path` accessor. A key the provider
+  can't resolve is dropped with a `tracing::warn!` rather than failing the
+  render. Typst-only: pandoc backends ignore this field since they already
+  handle body images.
 - `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
   heading depth — see README's "Table of contents" section for the
   per-target contract. Pandoc gets `--toc --toc-depth=<n>` (docx/odt only —
