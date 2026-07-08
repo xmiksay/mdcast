@@ -16,7 +16,7 @@ use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
-use crate::images::{image_regex, looks_remote};
+use crate::images::{image_refs, looks_remote};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
@@ -136,15 +136,13 @@ async fn collect_images_for_typst(
     pages: &[Page],
     provider: &dyn AssetProvider,
 ) -> Result<(BTreeMap<String, String>, Vec<(String, Vec<u8>)>)> {
-    let re = image_regex();
     let mut urls: BTreeMap<String, ()> = BTreeMap::new();
     for page in pages {
-        for cap in re.captures_iter(&page.body) {
-            let url = cap.name("url").unwrap().as_str();
-            if looks_remote(url) {
+        for r in image_refs(&page.body) {
+            if looks_remote(&r.dest_url) {
                 continue;
             }
-            urls.insert(url.to_string(), ());
+            urls.insert(r.dest_url, ());
         }
     }
     let url_vec: Vec<String> = urls.into_keys().collect();

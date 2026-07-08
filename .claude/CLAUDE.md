@@ -182,8 +182,18 @@ Rust.
   pandoc's stock look, but true per-class layout selection would require
   post-render patching of each slide's layout relationship — out of scope for
   v1 (`PROJECT_PLAN.md` §10).
-- Image-ref rewriter uses a small regex; reference-style links, titles
-  (`![alt](url "title")`), and angle-bracket URLs are not recognised in v1.
+- Image-ref rewriter (`images.rs::image_refs`) parses `Tag::Image` via
+  pulldown-cmark instead of a regex, so titled images (`![alt](url "title")`),
+  angle-bracket URLs (`![alt](<url>)`), and reference-style images
+  (`![alt][ref]`) all resolve through the `AssetProvider` — pulldown-cmark
+  already resolves reference definitions and strips titles/angle-brackets into
+  `dest_url`/`title`. Shared by the pandoc rewrite path (`resolve_images`) and
+  the typst image collector (`collect_images_for_typst`), so both engines
+  recognise the same forms. Whatever the original syntax, a resolved
+  reference is rewritten to a plain `![alt](local-path)` (or `(local-path
+  "title")` if a title was present) — reference-style images collapse to
+  inline once resolved, leaving their now-unused `[ref]: ...` definition line
+  in place.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
 - `DocMeta` / `BrandSpec` reach typst layouts via a synthetic `/context.typ`
