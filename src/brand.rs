@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -21,7 +21,7 @@ pub struct BrandSpec {
 
 impl BrandSpec {
     pub fn from_toml(s: &str) -> Result<Self> {
-        Ok(toml::from_str(s)?)
+        toml::from_str(s).context("invalid brand.toml")
     }
 }
 

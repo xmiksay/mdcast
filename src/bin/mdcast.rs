@@ -46,7 +46,7 @@ enum Cmd {
         /// Request a table of contents at the given heading depth (1-6).
         /// Honoured by docx/odt (`--toc --toc-depth`) and by `pdf` (a leading
         /// `#outline(depth: N)` page); ignored by pdf-presentation/pptx/html-reveal.
-        #[arg(long)]
+        #[arg(long, value_parser = clap::value_parser!(u8).range(1..=6))]
         toc_depth: Option<u8>,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
@@ -205,8 +205,10 @@ async fn load_doc(
     let (meta, md) = mdcast::frontmatter::extract(&md);
     let brand_spec: BrandSpec = match brand {
         Some(p) => {
-            let s = tokio::fs::read_to_string(p).await?;
-            BrandSpec::from_toml(&s)?
+            let s = tokio::fs::read_to_string(p)
+                .await
+                .with_context(|| format!("read {}", p.display()))?;
+            BrandSpec::from_toml(&s).with_context(|| format!("parse {}", p.display()))?
         }
         None => BrandSpec::default(),
     };
