@@ -10,6 +10,8 @@
 //! cascade an await through the whole pipeline for zero benefit in the
 //! common (pure-string-rewrite) case.
 
+use std::sync::LazyLock;
+
 use regex::Regex;
 
 pub trait MarkdownPreprocessor: Send + Sync {
@@ -51,35 +53,37 @@ impl<A: MarkdownPreprocessor, B: MarkdownPreprocessor> MarkdownPreprocessor for 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HtmlImageTags;
 
+// <img …/> or <img …> (no closing — self-closing in practice).
+// Captured attrs: src or path → url, alt → alt text.
+static IMG_TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?i)<\s*(?:img|image)(?P<attrs>(?:\s+[a-zA-Z_:-]+\s*=\s*"[^"]*")*)\s*/?\s*>"#)
+        .unwrap()
+});
+static ATTR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?i)([a-zA-Z_:-]+)\s*=\s*"([^"]*)""#).unwrap());
+
 impl MarkdownPreprocessor for HtmlImageTags {
     fn preprocess(&self, markdown: &str) -> String {
-        // <img …/> or <img …> (no closing — self-closing in practice).
-        // Captured attrs: src or path → url, alt → alt text.
-        let re = Regex::new(
-            r#"(?i)<\s*(?:img|image)(?P<attrs>(?:\s+[a-zA-Z_:-]+\s*=\s*"[^"]*")*)\s*/?\s*>"#,
-        )
-        .unwrap();
-        let attr_re = Regex::new(r#"(?i)([a-zA-Z_:-]+)\s*=\s*"([^"]*)""#).unwrap();
-
-        re.replace_all(markdown, |caps: &regex::Captures<'_>| {
-            let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or("");
-            let mut src: Option<String> = None;
-            let mut alt: Option<String> = None;
-            for ac in attr_re.captures_iter(attrs) {
-                let name = ac.get(1).unwrap().as_str().to_ascii_lowercase();
-                let value = ac.get(2).unwrap().as_str();
-                match name.as_str() {
-                    "src" | "path" => src = Some(value.to_string()),
-                    "alt" => alt = Some(value.to_string()),
-                    _ => {}
+        IMG_TAG_RE
+            .replace_all(markdown, |caps: &regex::Captures<'_>| {
+                let attrs = caps.name("attrs").map(|m| m.as_str()).unwrap_or("");
+                let mut src: Option<String> = None;
+                let mut alt: Option<String> = None;
+                for ac in ATTR_RE.captures_iter(attrs) {
+                    let name = ac.get(1).unwrap().as_str().to_ascii_lowercase();
+                    let value = ac.get(2).unwrap().as_str();
+                    match name.as_str() {
+                        "src" | "path" => src = Some(value.to_string()),
+                        "alt" => alt = Some(value.to_string()),
+                        _ => {}
+                    }
                 }
-            }
-            match src {
-                Some(s) => format!("![{}]({})", alt.unwrap_or_default(), s),
-                None => caps[0].to_string(), // no src/path — leave unchanged
-            }
-        })
-        .into_owned()
+                match src {
+                    Some(s) => format!("![{}]({})", alt.unwrap_or_default(), s),
+                    None => caps[0].to_string(), // no src/path — leave unchanged
+                }
+            })
+            .into_owned()
     }
 }
 
