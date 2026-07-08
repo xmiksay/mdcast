@@ -1,6 +1,6 @@
 [package]
 name = "mdcast"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
 license = "MIT OR Apache-2.0"
