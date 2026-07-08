@@ -62,7 +62,7 @@ impl Default for AutoLayout {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutoRule {
     pub when: ShapePredicate,
     pub class: String,
@@ -77,4 +77,66 @@ pub enum ShapePredicate {
     SingleH1Only,
     SingleImageOnly,
     SingleBlockquoteOnly,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_toml_parses_valid_spec() {
+        let toml = r##"
+            name = "Acme"
+
+            [auto_layout]
+            first = "hero"
+            last = "thanks"
+            default = "content"
+
+            [palette]
+            primary = "#112233"
+
+            [fonts]
+            body = "Inter"
+        "##;
+
+        let spec = BrandSpec::from_toml(toml).unwrap();
+
+        assert_eq!(spec.name, "Acme");
+        assert_eq!(spec.auto_layout.first, Some("hero".to_string()));
+        assert_eq!(spec.palette.get("primary"), Some(&"#112233".to_string()));
+        assert_eq!(spec.fonts.get("body"), Some(&"Inter".to_string()));
+    }
+
+    #[test]
+    fn from_toml_rejects_invalid_syntax() {
+        let err = BrandSpec::from_toml("not = [valid toml").unwrap_err();
+        assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn auto_layout_default_rule_set() {
+        let auto = AutoLayout::default();
+
+        assert_eq!(auto.first, Some("hero".to_string()));
+        assert_eq!(auto.last, Some("thanks".to_string()));
+        assert_eq!(auto.default, "content");
+        assert_eq!(
+            auto.rules,
+            vec![
+                AutoRule {
+                    when: ShapePredicate::SingleH1Only,
+                    class: "section-divider".to_string(),
+                },
+                AutoRule {
+                    when: ShapePredicate::SingleImageOnly,
+                    class: "image-full".to_string(),
+                },
+                AutoRule {
+                    when: ShapePredicate::SingleBlockquoteOnly,
+                    class: "callout".to_string(),
+                },
+            ]
+        );
+    }
 }

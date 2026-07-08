@@ -164,3 +164,41 @@ pub trait Backend: Send + Sync {
         assets: &'a dyn AssetProvider,
     ) -> BoxFuture<'a, Result<RenderedArtifact>>;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_to_creates_parent_dirs_and_writes_primary_and_extras() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("nested").join("sub").join("out.html");
+        let artifact = RenderedArtifact {
+            primary: Bytes::from_static(b"<html></html>"),
+            filename: "out.html".to_string(),
+            extras: vec![
+                ("out.css".to_string(), Bytes::from_static(b"body{}")),
+                ("out.js".to_string(), Bytes::from_static(b"console.log(1)")),
+            ],
+        };
+
+        let written = artifact.write_to(&out).await.unwrap();
+
+        assert_eq!(written.primary, out);
+        assert_eq!(tokio::fs::read(&out).await.unwrap(), b"<html></html>");
+
+        let expected_extras = vec![
+            dir.path().join("nested").join("sub").join("out.css"),
+            dir.path().join("nested").join("sub").join("out.js"),
+        ];
+        assert_eq!(written.extras, expected_extras);
+        assert_eq!(
+            tokio::fs::read(&expected_extras[0]).await.unwrap(),
+            b"body{}"
+        );
+        assert_eq!(
+            tokio::fs::read(&expected_extras[1]).await.unwrap(),
+            b"console.log(1)"
+        );
+    }
+}
