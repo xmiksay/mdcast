@@ -32,11 +32,11 @@ src/
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
-│     └─ template.rs    TemplateDoc + render_template() — user template + data → PDF, no markdown
+│     └─ template.rs    TemplateDoc + render_template()/render_template_html() — user template + data → PDF/HTML, no markdown
 └─ bin/mdcast/
    ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
    ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
-   └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing
+   └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
@@ -71,15 +71,17 @@ embedded/             rust-embed source — keys mirror these paths
 - **Classifier rule order:** explicit class > content-shape > positional
   (first/last) > default. Content-shape predicates are a closed enum in v1
   (`SingleH1Only`, `SingleImageOnly`, `SingleBlockquoteOnly`, `Empty`).
-- **`render_template` is a parallel entry point, not a second IR.**
-  `backends/typst/template.rs`'s `TemplateDoc`/`render_template` bypass
-  `ResolvedDoc` entirely (no pages, no splitter, no classifier, no
-  `md_to_typst`) for the structured-data case (user typst template + JSON →
-  PDF). `Registry`/`Backend` stay untouched — they're `Target`-keyed and
-  markdown-shaped, and there is no `Target` variant this belongs under.
-  Reuses `/context.typ` and the in-process compile machinery; does not reuse
-  layouts, fonts, or `ResolvedDoc.assets` (no per-class layout to declare
-  chrome for — a template reaches its own images via sibling files instead).
+- **`render_template`/`render_template_html` are a parallel entry point, not
+  a second IR.** `backends/typst/template.rs`'s `TemplateDoc`/
+  `render_template`/`render_template_html` bypass `ResolvedDoc` entirely (no
+  pages, no splitter, no classifier, no `md_to_typst`) for the
+  structured-data case (user typst template + JSON → PDF, or HTML behind the
+  `typst-html` feature). `Registry`/`Backend` stay untouched — they're
+  `Target`-keyed and markdown-shaped, and there is no `Target` variant this
+  belongs under. Reuses `/context.typ` and the in-process compile machinery;
+  does not reuse layouts, fonts, or `ResolvedDoc.assets` (no per-class layout
+  to declare chrome for — a template reaches its own images via sibling
+  files instead).
 
 ## Asset key namespace
 
@@ -321,8 +323,31 @@ section. Only present when built with the `typst` feature.
   exactly as it would on a real filesystem. A template key with no `/` scopes
   discovery to the whole provider, which is fine against a small
   filesystem-backed one but wasteful against a large embedded catalog.
-  Typst-only, PDF-only, and deliberately does not reuse `ResolvedDoc`,
-  `Registry`, or `Backend` — see the architectural-seams bullet above.
+  Typst-only, deliberately does not reuse `ResolvedDoc`, `Registry`, or
+  `Backend` — see the architectural-seams bullet above.
+- `backends/typst/template.rs::render_template_html` (issue #53), behind the
+  off-by-default `typst-html` cargo feature, is `render_template`'s HTML
+  sibling — same `assemble()` (fetch template + siblings + build
+  `/data.json`/`/context.typ` sources), only the export step differs
+  (`typst_html::html(...)` instead of `typst_pdf::pdf(...)`). The
+  `typst-html` cargo feature enables `typst-as-lib`'s own `typst-html`
+  feature, which is a compile-time toggle on the whole library
+  (`typst::Feature::Html`) rather than a per-`TypstEngine` option — so
+  turning it on affects every `TypstEngine` built in the process, not just
+  template renders, though in practice `Feature::Html` only unlocks the
+  `target()` function and `html.elem`/`html.frame`, it doesn't change PDF
+  output. `target()` (itself part of the HTML feature) is how a single
+  template branches paged-only chrome (`#set page`, `#place`) away from
+  semantic web chrome — see README's "writing a dual-target template" note.
+  Warnings from HTML-unsupported constructs (e.g. `#place` — no HTML export
+  rule exists for it, so typst warns "... was ignored during HTML export"
+  and drops the content) surface through the same `tracing::warn!` path as
+  every other typst diagnostic in this crate, not swallowed by
+  `typst_html::html`'s own `SourceResult`. CLI: `mdcast render-template ...
+  --format html` (`bin/mdcast/render_template.rs::Format`; the `Html`
+  variant itself is `#[cfg(feature = "typst-html")]`, so clap simply
+  rejects `--format html` as an unknown value when the binary wasn't built
+  with the feature).
 
 ## Conventions
 

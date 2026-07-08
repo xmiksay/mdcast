@@ -93,6 +93,11 @@ enum Cmd {
         /// uses.
         #[arg(long)]
         assets: Option<PathBuf>,
+        /// Output format. `html` is only a valid value when the binary was
+        /// built with the `typst-html` feature (off by default — see
+        /// README's "Data-driven template rendering" section).
+        #[arg(long, value_enum, default_value_t = render_template::Format::Pdf)]
+        format: render_template::Format,
     },
 }
 
@@ -203,8 +208,9 @@ async fn main() -> Result<()> {
             out,
             brand,
             assets,
+            format,
         } => {
-            let artifact = render_template::run(template, data, out, brand, assets).await?;
+            let artifact = render_template::run(template, data, out, brand, assets, format).await?;
             println!("wrote {}", artifact.primary.display());
         }
     }
