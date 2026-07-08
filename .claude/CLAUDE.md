@@ -105,6 +105,13 @@ installed so the OOXML/revealjs smoke tests actually exercise pandoc in CI;
 `master`, writes the summary table to the Actions job summary, and uploads
 `lcov.info` + the HTML report as a `coverage-report` artifact.
 
+`.github/workflows/release.yml` publishes to crates.io on every `v*` tag
+push: it checks the tag against the `Cargo.toml` version, re-runs
+`make verify` (tag pushes skip the PR gate), then `cargo publish --locked`
+authenticated via crates.io Trusted Publishing (OIDC,
+`rust-lang/crates-io-auth-action`) — no registry token secret. Release flow:
+bump the version, merge, tag `vX.Y.Z`, push the tag.
+
 ## Run
 
 ```
