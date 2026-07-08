@@ -86,6 +86,13 @@ pub struct ResolvedDoc {
     pub meta: DocMeta,
     pub brand: BrandHandle,
     pub assets: Vec<AssetRef>,
+    /// Optional table-of-contents request (heading depth, 1-6). `None` (the
+    /// default) means no TOC — output is byte-identical to before this field
+    /// existed. Honoured by pandoc (docx/odt: `--toc --toc-depth=<n>`) and
+    /// typst (`pdf` only: a leading `#outline(depth: <n>)` page).
+    /// `pdf-presentation`/`pptx`/`html-reveal` ignore it — slide decks don't
+    /// get a TOC.
+    pub toc: Option<u8>,
 }
 
 /// Per-render input passed to the path-based render entry point. Holds the

@@ -99,9 +99,16 @@ impl Backend for TypstBackend {
                 .map(|p| md_to_typst(&p.body, &image_map))
                 .collect();
 
+            // TOC is a document-level concept — only the `pdf` target (not
+            // `pdf-presentation`) renders one, even if requested.
+            let toc_depth = match self.target {
+                Target::Pdf => doc.toc,
+                _ => None,
+            };
+
             // Build the driver source and the doc-meta/brand context that
             // layouts can optionally `#import "/context.typ": ...`.
-            let driver = build_driver(&doc.pages, &typst_bodies);
+            let driver = build_driver(&doc.pages, &typst_bodies, toc_depth);
             let context_source = build_context_source(&doc.meta, &doc.brand.0);
 
             // Compile on a blocking thread — typst's compiler is sync and
@@ -171,7 +178,7 @@ fn target_dir(target: Target) -> &'static str {
     }
 }
 
-pub fn build_driver(pages: &[Page], typst_bodies: &[String]) -> String {
+pub fn build_driver(pages: &[Page], typst_bodies: &[String], toc_depth: Option<u8>) -> String {
     let mut s = String::new();
 
     // Import every used layout once under a sanitized alias.
@@ -186,6 +193,14 @@ pub fn build_driver(pages: &[Page], typst_bodies: &[String]) -> String {
         ));
     }
     s.push('\n');
+
+    // Rendered as its own page ahead of the document body — a bare
+    // `#outline()` call would otherwise share the first page's flow (and
+    // that page's own `#set page(...)`) since none of the per-class layouts
+    // are wrapped in anything that starts a fresh page on their own.
+    if let Some(depth) = toc_depth {
+        s.push_str(&format!("#outline(depth: {depth})\n#pagebreak()\n\n"));
+    }
 
     // One call per page. The body is a typst-markup string; the layout calls
     // `eval(body, mode: "markup")` to actually parse and lay it out.
@@ -280,4 +295,41 @@ fn format_diagnostics(
         }
     }
     anyhow::anyhow!(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pages::PageOrigin;
+
+    fn p(class: &str, body: &str) -> Page {
+        Page {
+            class: class.into(),
+            body: body.into(),
+            origin: PageOrigin::Explicit,
+        }
+    }
+
+    #[test]
+    fn no_toc_request_omits_outline() {
+        let pages = vec![p("content", "# Hi")];
+        let bodies = vec!["= Hi".to_string()];
+        let driver = build_driver(&pages, &bodies, None);
+        assert!(!driver.contains("#outline"));
+    }
+
+    #[test]
+    fn toc_request_emits_outline_with_requested_depth_before_pages() {
+        let pages = vec![p("content", "# Hi")];
+        let bodies = vec!["= Hi".to_string()];
+        let driver = build_driver(&pages, &bodies, Some(2));
+        assert!(driver.contains("#outline(depth: 2)"), "{driver}");
+        assert!(driver.contains("#pagebreak()"), "{driver}");
+        let outline_pos = driver.find("#outline").unwrap();
+        let page_call_pos = driver.find("#layout_content").unwrap();
+        assert!(
+            outline_pos < page_call_pos,
+            "outline must precede the first page's layout call:\n{driver}"
+        );
+    }
 }

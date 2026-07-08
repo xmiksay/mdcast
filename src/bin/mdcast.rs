@@ -43,6 +43,11 @@ enum Cmd {
         /// `<image path="X">` become standard `![](X)` before splitting.
         #[arg(long, default_value_t = false)]
         html_image_tags: bool,
+        /// Request a table of contents at the given heading depth (1-6).
+        /// Honoured by docx/odt (`--toc --toc-depth`) and by `pdf` (a leading
+        /// `#outline(depth: N)` page); ignored by pdf-presentation/pptx/html-reveal.
+        #[arg(long)]
+        toc_depth: Option<u8>,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
     /// auto-classifier and explicit-wrapper parsing.
@@ -96,8 +101,9 @@ async fn main() -> Result<()> {
             brand,
             assets,
             html_image_tags,
+            toc_depth,
         } => {
-            let doc = load_doc(&input, brand.as_deref(), html_image_tags).await?;
+            let doc = load_doc(&input, brand.as_deref(), html_image_tags, toc_depth).await?;
             let registry = Registry::with_defaults();
             let artifact = match assets {
                 Some(dir) => {
@@ -128,7 +134,7 @@ async fn main() -> Result<()> {
             brand,
             html_image_tags,
         } => {
-            let doc = load_doc(&input, brand.as_deref(), html_image_tags).await?;
+            let doc = load_doc(&input, brand.as_deref(), html_image_tags, None).await?;
             for (i, page) in doc.pages.iter().enumerate() {
                 println!(
                     "page {:>3}  class={:<20}  origin={:?}",
@@ -191,6 +197,7 @@ async fn load_doc(
     input: &std::path::Path,
     brand: Option<&std::path::Path>,
     html_image_tags: bool,
+    toc_depth: Option<u8>,
 ) -> Result<ResolvedDoc> {
     let md = tokio::fs::read_to_string(input)
         .await
@@ -220,6 +227,7 @@ async fn load_doc(
         meta,
         brand: BrandHandle(Arc::new(brand_spec)),
         assets: Vec::<AssetRef>::new(),
+        toc: toc_depth,
     })
 }
 

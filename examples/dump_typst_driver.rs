@@ -25,6 +25,6 @@ fn main() {
         .map(|p| md_to_typst(&p.body, &images))
         .collect();
 
-    let driver = build_driver(&pages, &typst_bodies);
+    let driver = build_driver(&pages, &typst_bodies, None);
     println!("=== driver ===\n{driver}\n=== /driver ===");
 }

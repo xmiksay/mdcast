@@ -160,6 +160,7 @@ impl Backend for PandocBackend {
             if let Some(p) = &reference_path {
                 cmd.arg(format!("--reference-doc={}", p.display()));
             }
+            cmd.args(toc_args(self.target, doc.toc));
             // Plumb document metadata so revealjs has a real <title> and
             // docx/pptx get proper document properties. Only set fields the
             // caller actually provided — pandoc inserts a synthesised title
@@ -193,6 +194,18 @@ impl Backend for PandocBackend {
                 extras: vec![],
             })
         })
+    }
+}
+
+/// `--toc`/`--toc-depth` args, only for docx/odt — pandoc's page-based
+/// writers. Slide writers (pptx/html-reveal) never get a TOC (slide decks
+/// don't have one); `None` (no request) yields no args either way.
+fn toc_args(target: Target, toc: Option<u8>) -> Vec<String> {
+    match (target, toc) {
+        (Target::Docx | Target::Odt, Some(depth)) => {
+            vec!["--toc".to_string(), format!("--toc-depth={depth}")]
+        }
+        _ => vec![],
     }
 }
 
@@ -336,6 +349,30 @@ mod tests {
         assert!(!out.contains(r"\pagebreak"), "{out}");
         assert!(out.contains(r#"custom-style="hero""#));
         assert!(out.contains(r#"custom-style="content""#));
+    }
+
+    #[test]
+    fn toc_args_adds_toc_and_depth_for_docx_and_odt() {
+        assert_eq!(
+            toc_args(Target::Docx, Some(3)),
+            vec!["--toc".to_string(), "--toc-depth=3".to_string()]
+        );
+        assert_eq!(
+            toc_args(Target::Odt, Some(2)),
+            vec!["--toc".to_string(), "--toc-depth=2".to_string()]
+        );
+    }
+
+    #[test]
+    fn toc_args_empty_when_not_requested() {
+        assert!(toc_args(Target::Docx, None).is_empty());
+        assert!(toc_args(Target::Odt, None).is_empty());
+    }
+
+    #[test]
+    fn toc_args_ignored_for_slide_targets() {
+        assert!(toc_args(Target::Pptx, Some(3)).is_empty());
+        assert!(toc_args(Target::HtmlReveal, Some(3)).is_empty());
     }
 
     #[test]

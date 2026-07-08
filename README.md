@@ -210,6 +210,27 @@ working with no changes:
   renders identically to before this existed — every accessor's default
   reproduces the prior hardcoded value.
 
+## Table of contents
+
+`ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
+heading depth (1-6). `None` (the default) means no TOC — output is
+byte-identical to before this field existed. Each backend honours it in its
+own idiom:
+
+| Target                          | Behaviour with `toc: Some(n)`                          |
+|----------------------------------|--------------------------------------------------------|
+| `docx`, `odt`                    | `pandoc --toc --toc-depth=<n>` — a real TOC field/element |
+| `pdf`                            | A leading `#outline(depth: <n>)` page, before page 1    |
+| `pdf-presentation`, `pptx`, `html-reveal` | Ignored — slide decks don't get a TOC          |
+
+```rust
+let doc = ResolvedDoc { toc: Some(3), /* .. */ };
+```
+
+The typst `pdf` outline only lists headings that survive md→typst conversion
+(see `.claude/CLAUDE.md`'s Known limitations for the converter's coverage) —
+a document with no headings renders an empty outline page.
+
 ## Library usage
 
 ```rust
@@ -238,6 +259,7 @@ async fn main() -> Result<()> {
         meta: DocMeta { title: Some("Q3 Review".into()), ..Default::default() },
         brand: BrandHandle(Arc::new(brand)),
         assets: Vec::<AssetRef>::new(),
+        toc: None, // Some(3) to request a 3-level-deep table of contents
     };
 
     // 2. Compose an asset provider — fetch images from your app, fall back to
@@ -330,7 +352,7 @@ cargo build --no-default-features --features typst    # no pandoc backend
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N]
 mdcast explain INPUT.md [--brand brand.toml]
 ```
 
