@@ -53,6 +53,12 @@ enum Cmd {
         /// same `--assets`/embedded provider; ignored by pandoc targets.
         #[arg(long = "layout-asset")]
         layout_assets: Vec<String>,
+        /// Font asset key (`.ttf`/`.otf`) to register with the typst font
+        /// book before compiling, so `#set text(font: "...")` resolves it
+        /// with no host install. Repeatable. Resolved through the same
+        /// `--assets`/embedded provider; ignored by pandoc targets.
+        #[arg(long = "layout-font")]
+        layout_fonts: Vec<String>,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
     /// auto-classifier and explicit-wrapper parsing.
@@ -108,6 +114,7 @@ async fn main() -> Result<()> {
             html_image_tags,
             toc_depth,
             layout_assets,
+            layout_fonts,
         } => {
             let doc = load_doc(
                 &input,
@@ -115,6 +122,7 @@ async fn main() -> Result<()> {
                 html_image_tags,
                 toc_depth,
                 layout_assets,
+                layout_fonts,
             )
             .await?;
             let registry = Registry::with_defaults();
@@ -147,7 +155,15 @@ async fn main() -> Result<()> {
             brand,
             html_image_tags,
         } => {
-            let doc = load_doc(&input, brand.as_deref(), html_image_tags, None, Vec::new()).await?;
+            let doc = load_doc(
+                &input,
+                brand.as_deref(),
+                html_image_tags,
+                None,
+                Vec::new(),
+                Vec::new(),
+            )
+            .await?;
             for (i, page) in doc.pages.iter().enumerate() {
                 println!(
                     "page {:>3}  class={:<20}  origin={:?}",
@@ -212,6 +228,7 @@ async fn load_doc(
     html_image_tags: bool,
     toc_depth: Option<u8>,
     layout_assets: Vec<String>,
+    layout_fonts: Vec<String>,
 ) -> Result<ResolvedDoc> {
     let md = tokio::fs::read_to_string(input)
         .await
@@ -246,6 +263,10 @@ async fn load_doc(
             .into_iter()
             .map(|key| AssetRef { key })
             .collect(),
+        fonts: layout_fonts
+            .into_iter()
+            .map(|key| AssetRef { key })
+            .collect(),
         toc: toc_depth,
     })
 }
@@ -266,12 +287,34 @@ mod tests {
             false,
             None,
             vec!["branding/logo.svg".to_string(), "bg.png".to_string()],
+            Vec::new(),
         )
         .await
         .unwrap();
 
         let keys: Vec<&str> = doc.assets.iter().map(|a| a.key.as_str()).collect();
         assert_eq!(keys, vec!["branding/logo.svg", "bg.png"]);
+    }
+
+    #[tokio::test]
+    async fn load_doc_turns_layout_font_flags_into_font_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.md");
+        tokio::fs::write(&input, "# Hi").await.unwrap();
+
+        let doc = load_doc(
+            &input,
+            None,
+            false,
+            None,
+            Vec::new(),
+            vec!["fonts/Brand-Regular.ttf".to_string()],
+        )
+        .await
+        .unwrap();
+
+        let keys: Vec<&str> = doc.fonts.iter().map(|a| a.key.as_str()).collect();
+        assert_eq!(keys, vec!["fonts/Brand-Regular.ttf"]);
     }
 
     #[tokio::test]

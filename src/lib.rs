@@ -92,6 +92,16 @@ pub struct ResolvedDoc {
     pub meta: DocMeta,
     pub brand: BrandHandle,
     pub assets: Vec<AssetRef>,
+    /// Font faces (`.ttf`/`.otf`, keyed by `AssetRef`) to register with the
+    /// typst backend's font book before compiling, so a brand font resolves
+    /// via `#set text(font: "<family>")` with no host install. Registered
+    /// fonts take precedence over host-discovered/embedded fonts for an
+    /// exact family match (see README's "Brand fonts" section). `Vec::new()`
+    /// (the default) is a no-op — typst falls back to host + embedded font
+    /// search exactly as before this field existed. Typst-only: pandoc
+    /// backends render text with whatever font the target document format
+    /// resolves and ignore this field.
+    pub fonts: Vec<AssetRef>,
     /// Optional table-of-contents request (heading depth, 1-6). `None` (the
     /// default) means no TOC — output is byte-identical to before this field
     /// existed. Honoured by pandoc (docx/odt: `--toc --toc-depth=<n>`) and
