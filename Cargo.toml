@@ -19,8 +19,14 @@ exclude = [
 ]
 
 [features]
-default = ["pandoc", "typst", "rt-multi-thread"]
+default = ["pandoc", "typst", "rt-multi-thread", "mermaid"]
 pandoc = ["dep:zip", "dep:quick-xml"]
+# Render ```mermaid fenced code blocks to SVG (pure Rust, no Node/Chromium)
+# via `mermaid::render_diagrams` — a pre-step ahead of the page splitter.
+# In default features because the dependency is tiny; activation is still
+# opt-in per call (CLI `--mermaid` flag / explicit library call), so output
+# is byte-identical for anyone not asking for it.
+mermaid = ["dep:mermaid-svg"]
 typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
@@ -41,6 +47,7 @@ anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = { version = "0.41", optional = true }
 regex = "1"

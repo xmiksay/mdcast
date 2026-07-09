@@ -316,6 +316,46 @@ let doc = ResolvedDoc {
   document format resolves (a DOCX/ODT/PPTX style, or the reveal.js theme
   CSS) and ignore `ResolvedDoc.fonts` entirely.
 
+## Mermaid diagrams (`mermaid` feature)
+
+With the `mermaid` feature (on by default), mdcast can render
+```` ```mermaid ```` fenced code blocks to SVG diagrams via the pure-Rust
+[`mermaid-svg`](https://crates.io/crates/mermaid-svg) crate — no Node.js, no
+Chromium, no external binary. It's a pre-step ahead of the page splitter, so
+the auto-classifier sees a real image node (a diagram-only page classifies
+`image-full`) and both engines embed the SVG through the same asset pipeline
+as any other image, in every target.
+
+````markdown
+```mermaid
+pie
+"Rust" : 70
+"Everything else" : 30
+```
+````
+
+CLI: pass `--mermaid` to `render` / `explain` (opt-in per invocation — a
+document's fences are otherwise left as ordinary code blocks). Library:
+call `mermaid::render_diagrams(md)` before splitting; it returns the
+rewritten markdown plus `(key, bytes)` pairs (`mermaid/diagram-N.svg`, in
+document order) to serve from your provider stack:
+
+```rust
+let rendered = mdcast::mermaid::render_diagrams(&md);
+let svgs: std::collections::HashMap<_, _> = rendered.svgs.into_iter().collect();
+let provider = mdcast::LayeredAssets {
+    over: mdcast::sync_provider(move |k| Ok(svgs.get(k).cloned())),
+    base: mdcast::EmbeddedAssets,
+};
+// split/classify rendered.markdown as usual, then render with `provider`
+```
+
+A diagram that fails to parse/render logs a `tracing::warn!` and keeps its
+fence (it degrades to a plain code block in the output) — one bad diagram
+never fails the render. Supported diagram types (pie, sequence, flowchart,
+state, class, ER, gantt, …) are whatever the bundled `mermaid-svg` version
+supports — see its [gallery](https://docs.rs/mermaid-svg).
+
 ## Remote images (`remote-images` feature, issue #54)
 
 A page-body `![alt](http://…)` / `![alt](https://…)` reference is never
@@ -372,8 +412,9 @@ Two failure modes fall out of this:
 To catch the second failure mode before it reaches a viewer, `images::collect_images`
 sniffs each fetched image's magic bytes and emits one `tracing::warn!` (naming
 the image key, detected format, and target) whenever the combination is
-known-unsupported per the table above — WebP→docx/pptx, BMP/TIFF→pdf/
-pdf-presentation, AVIF/HEIC→everything but their one supported target. It
+known-unsupported per the table above — WebP→docx/pptx, PDF-as-image→
+everything but the typst targets, BMP/TIFF→pdf/pdf-presentation,
+AVIF/HEIC→everything but their one supported target. It
 warns rather than fails: the embed may be intentional (a document destined
 only for LibreOffice, say). Combinations the table leaves ambiguous
 (browser-dependent TIFF support in html-reveal, LibreOffice-version-gated
@@ -666,7 +707,7 @@ Anything the provider returns `None` for falls through to the next layer.
 
 - Built-in Typst layouts (`hero`, `content`, `thanks`, `image-full`,
   `section-divider`, `callout`) for `pdf` and `pdf-presentation`.
-- Minimal reveal.js 4.6.1 distribution (with stripped font imports — falls
+- Minimal reveal.js 4.6.0 distribution (with stripped font imports — falls
   back to system sans-serif).
 - Real, branded pandoc reference docs: `reference.docx`/`reference.odt`
   define named paragraph styles for the six built-in classes (`hero`,
@@ -679,11 +720,14 @@ Anything the provider returns `None` for falls through to the next layer.
 
 ```toml
 [features]
-default        = ["pandoc", "typst"]
-pandoc         = []   # DOCX, ODT, PPTX, html-reveal
-typst          = []   # PDF, PDF-presentation
-typst-html     = []   # render_template_html — experimental HTML export (issue #53), off by default
-remote-images  = []   # fetch http(s) page-body images through collect_images (issue #54), off by default
+default         = ["pandoc", "typst", "rt-multi-thread", "mermaid"]
+pandoc          = []   # DOCX, ODT, PPTX, html-reveal
+typst           = []   # PDF, PDF-presentation
+typst-html      = []   # render_template_html — experimental HTML export (issue #53), off by default
+remote-images   = []   # fetch http(s) page-body images through collect_images (issue #54), off by default
+mermaid         = []   # render ```mermaid fences to SVG via mermaid-svg (pure Rust)
+rt-multi-thread = []   # tokio multi-threaded runtime; required by the mdcast binary,
+                       # library-only consumers can drop it via default-features = false
 ```
 
 Build with only what you need:
@@ -692,7 +736,7 @@ Build with only what you need:
 cargo build --no-default-features --features pandoc   # no typst dep tree
 cargo build --no-default-features --features typst    # no pandoc backend
 cargo build --features typst-html                     # render_template_html + --format html
-cargo build --features remote-images                   # fetch remote page-body images (pulls in reqwest)
+cargo build --features remote-images                  # fetch remote page-body images (pulls in reqwest)
 ```
 
 ## Targets
@@ -717,8 +761,8 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--layout-asset KEY]... [--layout-font KEY]...
-mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]...
+mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]
 mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--format pdf|html]
 ```
 
@@ -728,6 +772,9 @@ Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
 `<img src="X" alt="A">` / `<image path="X">` HTML tags are rewritten to
 standard `![A](X)` markdown before page splitting, so the auto-classifier and
 both engines see real image nodes.
+
+`--mermaid` renders ```` ```mermaid ```` fenced code blocks to SVG diagrams —
+see "Mermaid diagrams" above.
 
 `--layout-asset KEY` (repeatable) declares a `ResolvedDoc.assets` entry —
 resolved through `--assets`/the embedded provider and reachable from a typst
@@ -752,9 +799,9 @@ list them:
 
 | Target                  | What it does                                                    |
 |-------------------------|-----------------------------------------------------------------|
-| `make build` / `release`| Debug / release build (default features = pandoc + typst)      |
+| `make build` / `release`| Debug / release build (default features = pandoc + typst + mermaid) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | All feature combinations (core, pandoc, typst, both, +typst-html, +remote-images) |
+| `make check-all`        | All feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images) |
 | `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html + remote-images features) |
 | `make test`             | Full suite, default features (unit + integration)               |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |

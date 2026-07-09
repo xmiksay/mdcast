@@ -29,14 +29,11 @@
 //! `reveal_brand::brand_css` and injected via `--include-in-header`; an
 //! optional `brand.logo` is fetched through the provider and overlaid on
 //! every slide as a data-URI `<img>` (`reveal_brand::logo_html`) via
-//! `--include-after-body`. See `brand_style_file`/`brand_logo_file` below and
-//! the README's "Branding reveal.js decks" section.
-
-use std::path::Path;
+//! `--include-after-body`. See `reveal_assets::brand_style_file`/
+//! `::brand_logo_file` and the README's "Branding reveal.js decks" section.
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use futures::future::try_join_all;
 use tempfile::TempDir;
 use tokio::process::Command;
 
@@ -46,87 +43,7 @@ use crate::images::resolve_images;
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
-use super::reveal_brand;
-
-/// Pull every key beginning with `prefix` from the provider and write the bytes
-/// to `dest/<key-without-prefix>`. Returns the number of files materialised.
-/// Used to lay out the reveal.js dist (and could later cover MathJax, etc.).
-async fn materialise_subtree(
-    provider: &dyn AssetProvider,
-    prefix: &str,
-    dest: &Path,
-) -> Result<usize> {
-    let keys = provider.list(prefix).await?;
-    let written = try_join_all(keys.iter().map(|key| async move {
-        let Some(bytes) = provider.get(key).await? else {
-            return Ok(0usize);
-        };
-        let rel = key.strip_prefix(prefix).unwrap_or(key);
-        let path = dest.join(rel);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        tokio::fs::write(&path, &bytes).await?;
-        Ok::<usize, anyhow::Error>(1)
-    }))
-    .await?;
-    Ok(written.into_iter().sum())
-}
-
-/// Write the brand CSS layer (issue #57) to `<root>/brand.css.html` — a
-/// `<style data-brand>` block combining `reveal_brand::brand_css`'s
-/// palette/font projection with the raw contents of the provider's
-/// `revealjs/brand.css` escape hatch, if present — and return its path.
-/// `None` when neither source has anything to say, so an unbranded doc adds
-/// no pandoc arg and no temp file.
-async fn brand_style_file(
-    root: &Path,
-    brand: &crate::BrandSpec,
-    assets: &dyn AssetProvider,
-) -> Result<Option<std::path::PathBuf>> {
-    let mut body = reveal_brand::brand_css(brand).unwrap_or_default();
-
-    if let Some(bytes) = assets.get("revealjs/brand.css").await? {
-        match std::str::from_utf8(&bytes) {
-            Ok(raw) => body.push_str(raw),
-            Err(_) => tracing::warn!("revealjs/brand.css is not valid UTF-8; skipping"),
-        }
-    }
-
-    if body.is_empty() {
-        return Ok(None);
-    }
-
-    let path = root.join("brand.css.html");
-    tokio::fs::write(&path, format!("<style data-brand>\n{body}</style>\n")).await?;
-    Ok(Some(path))
-}
-
-/// Fetch the brand logo (issue #57) via the provider and write its
-/// `<img>` overlay to `<root>/brand-logo.html`, returning its path. `None`
-/// when `brand.logo` is unset; a missing/unresolvable key warns and also
-/// returns `None` rather than failing the render.
-async fn brand_logo_file(
-    root: &Path,
-    brand: &crate::BrandSpec,
-    assets: &dyn AssetProvider,
-) -> Result<Option<std::path::PathBuf>> {
-    let Some(logo) = &brand.logo else {
-        return Ok(None);
-    };
-    let Some(bytes) = assets.get(&logo.key).await? else {
-        tracing::warn!(
-            key = logo.key.as_str(),
-            "brand logo not found in provider; skipping"
-        );
-        return Ok(None);
-    };
-    let mime = crate::image_format::mime_type(&bytes);
-    let html = reveal_brand::logo_html(logo, &bytes, mime);
-    let path = root.join("brand-logo.html");
-    tokio::fs::write(&path, html).await?;
-    Ok(Some(path))
-}
+use super::reveal_assets::{brand_logo_file, brand_style_file, materialise_subtree};
 
 pub struct PandocBackend {
     target: Target,
