@@ -27,6 +27,7 @@ src/
 │  └─ auto.rs         classify() — explicit > shape > positional > default
 ├─ backends/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
+│  ├─ pptx_autofit.rs #[cfg(feature = "pandoc")]  add_autofit() — post-render normAutofit patch (issue #56)
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, in-process compile
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
@@ -229,6 +230,26 @@ section. Only present when built with the `typst` feature.
   pandoc's stock look, but true per-class layout selection would require
   post-render patching of each slide's layout relationship — out of scope for
   v1 (`PROJECT_PLAN.md` §10).
+- pptx *does* get one post-render patch already (issue #56):
+  `backends/pptx_autofit.rs::add_autofit` reopens the pandoc-produced pptx as
+  a zip, and for every `ppt/slides/slide*.xml` streams a `quick-xml`
+  rewrite that inserts `<a:normAutofit/>` into each body placeholder's
+  `<a:bodyPr>` — pandoc's pptx writer never emits this, and the reference doc
+  can't express it either, since autofit lives on the slide's own shape
+  (`ppt/slides/slideN.xml`), not the layout/master `reference.pptx` supplies.
+  A placeholder is "body" if its `<p:ph>` has no `type` attribute or any
+  `type` other than `title`/`ctrTitle` (the schema default for a missing
+  `type` is `body`); title placeholders and non-placeholder shapes are left
+  untouched. An existing `a:noAutofit`/`a:normAutofit`/`a:spAutoFit` child is
+  replaced rather than duplicated. `<a:normAutofit/>` carries no precomputed
+  `fontScale` — PowerPoint/LibreOffice recompute the shrink amount on
+  open/load; estimating `fontScale`/`lnSpcReduction` ourselves for static
+  renderers is a possible follow-up, not done here. Every zip entry other
+  than the slide XMLs is copied through via `raw_copy_file` (still-compressed
+  bytes, untouched) so only the slides actually differ from pandoc's own
+  output. This is the smallest instance of the `zip` + `quick-xml`
+  template-injection seam `PROJECT_PLAN.md` §10 names for future OOXML
+  patching — including the per-class pptx layout selection two bullets up.
 - Image-ref rewriter (`images::image_refs`) parses `Tag::Image` via
   pulldown-cmark instead of a regex, so titled images (`![alt](url "title")`),
   angle-bracket URLs (`![alt](<url>)`), and reference-style images

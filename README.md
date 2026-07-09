@@ -648,10 +648,18 @@ cargo build --features remote-images                   # fetch remote page-body 
 |---------------------|------------|----------------------------------------------------------------|
 | `docx`              | pandoc     | Class = paragraph-style name in `reference.docx`               |
 | `odt`               | pandoc     | Class = paragraph-style name in `reference.odt`                |
-| `pptx`              | pandoc     | Class = slide-layout name in `reference.pptx`                  |
+| `pptx`              | pandoc     | Class = slide-layout name in `reference.pptx`; body placeholders auto-shrink overflowing text (see below) |
 | `html-reveal`       | pandoc     | Single self-contained file; reveal.js dist bundled & inlined   |
 | `pdf`               | typst      | Per-class typst template under `typst/layouts/pdf/`            |
 | `pdf-presentation`  | typst      | Per-class typst template under `typst/layouts/pdf-presentation/` |
+
+A slide with more content than fits its placeholder no longer just overflows
+past the slide edge in `pptx` output: after pandoc renders the deck, mdcast
+patches each `ppt/slides/slideN.xml`, inserting `<a:normAutofit/>` into every
+body placeholder's `<a:bodyPr>` (title placeholders are left alone). That's
+the same element PowerPoint's own "Shrink text on overflow" writes — without
+a precomputed `fontScale`, so PowerPoint/LibreOffice recompute the actual
+shrink amount when the deck is opened.
 
 ## CLI
 

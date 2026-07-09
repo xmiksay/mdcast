@@ -14,7 +14,12 @@
 //!     giving those seven built-in layouts real branding instead of pandoc's
 //!     stock look. True per-class layout selection would need post-render
 //!     patching of each slide's layout relationship — out of scope for the
-//!     reference-doc-only v1 (see `PROJECT_PLAN.md` §10).
+//!     reference-doc-only v1 (see `PROJECT_PLAN.md` §10). pptx output *does*
+//!     get one post-render patch already (issue #56): `pptx_autofit::add_autofit`
+//!     inserts `<a:normAutofit/>` into each body placeholder's `<a:bodyPr>` so
+//!     overflowing slide text shrinks instead of spilling off the slide —
+//!     autofit lives on the slide's own shape, not the layout/master, so the
+//!     reference doc can't express it.
 //!
 //! Reference docs (`reference.docx`, `reference.pptx`, `reference.odt`) live
 //! in the provider; we materialise them to a tempfile per invocation.
@@ -184,9 +189,14 @@ impl Backend for PandocBackend {
                 bail!("pandoc failed with status {status}");
             }
 
-            let bytes = tokio::fs::read(&out_path)
+            let mut bytes = tokio::fs::read(&out_path)
                 .await
                 .context("read pandoc output")?;
+
+            if matches!(self.target, Target::Pptx) {
+                bytes = super::pptx_autofit::add_autofit(&bytes)
+                    .context("patch pptx with normAutofit")?;
+            }
 
             Ok(RenderedArtifact {
                 primary: Bytes::from(bytes),

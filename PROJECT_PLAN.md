@@ -158,6 +158,14 @@ The point of the architecture is that none of these are forced now, and each has
 
 **Hard rule:** "replace pandoc" never means *all* of pandoc. Realistic end state = pandoc retained for DOCX/PPTX, own transformer for typst + html. Framing it as "remove pandoc entirely" recreates the OOXML problem for zero gain.
 
+The `zip` + `quick-xml` template-injection seam described above is no longer
+purely hypothetical: `src/backends/pptx_autofit.rs` (issue #56) already
+post-render-patches pandoc's pptx output, inserting `<a:normAutofit/>` into
+body placeholders so overflowing slide text shrinks instead of spilling off
+the slide — a targeted single-element patch, not full template injection, but
+the same seam future OOXML fine-grained control (e.g. per-class pptx layout
+selection, above) would build on.
+
 ### Rust OOXML ecosystem note (why DOCX/PPTX stays on pandoc)
 As of writing, no mature Rust crate does high-fidelity docx+pptx *generation*. `ooxmlsdk` (low-level, schema-generated types — you supply the semantics) and `litchi` (friendly API but pre-production, "not recommended for production") are the closest; PPTX generation specifically is the weakest spot. XLSX is the only well-served OOXML format (`rust_xlsxwriter`) — and it's the one not needed here. The moat isn't zip/XML plumbing; it's the accumulated knowledge of what XML makes Word/PowerPoint render correctly. File `ooxmlsdk` + the template-injection pattern away for the requirement-change trigger above.
 
