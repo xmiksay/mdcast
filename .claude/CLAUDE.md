@@ -29,13 +29,15 @@ src/
 ├─ backends/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  ├─ pptx_autofit.rs #[cfg(feature = "pandoc")]  add_autofit() — post-render normAutofit patch (issue #56)
-│  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57)
+│  ├─ reveal_assets.rs #[cfg(feature = "pandoc")] materialise_subtree()/brand_style_file()/brand_logo_file() — html-reveal temp-root materialisation
+│  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
-│     ├─ mod.rs         TypstBackend, driver assembly, in-process compile
+│     ├─ mod.rs         TypstBackend, driver assembly, in-process compile (spawn_compile/forward_warnings shared with template.rs)
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
 │     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
+│     │  ├─ tests.rs    unit tests for md_to_typst()
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() — user template + data → PDF/HTML, no markdown

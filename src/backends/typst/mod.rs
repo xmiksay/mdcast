@@ -131,22 +131,10 @@ impl Backend for TypstBackend {
             let driver = build_driver(&doc.pages, &typst_bodies, toc_depth);
             let context_source = build_context_source(&doc.meta, &doc.brand.0, &asset_map);
 
-            // Compile on a blocking thread — typst's compiler is sync and
-            // CPU-bound. Produced entirely in memory: no temp file, nothing
-            // to clean up. `spawn_blocking` runs on its own OS thread and
-            // does not inherit the calling task's `tracing` dispatcher, so
-            // it's captured here and re-installed inside the closure —
-            // otherwise `compile_pdf`'s warnings would only surface under a
-            // process-wide `set_global_default` subscriber, never a
-            // task-scoped one.
-            let dispatch = tracing::dispatcher::get_default(|d| d.clone());
-            let pdf_bytes = tokio::task::spawn_blocking(move || {
-                tracing::dispatcher::with_default(&dispatch, || {
-                    compile_pdf(driver, context_source, layouts, virtual_files, fonts)
-                })
+            let pdf_bytes = spawn_compile(move || {
+                compile_pdf(driver, context_source, layouts, virtual_files, fonts)
             })
-            .await
-            .context("typst compile thread panicked")??;
+            .await?;
 
             Ok(RenderedArtifact {
                 primary: Bytes::from(pdf_bytes),
@@ -154,6 +142,38 @@ impl Backend for TypstBackend {
                 extras: vec![],
             })
         })
+    }
+}
+
+/// Run a sync typst compile on a blocking thread. typst's compiler is sync
+/// and CPU-bound; everything is produced in memory — no temp file, nothing
+/// to clean up. `spawn_blocking` runs on its own OS thread and does not
+/// inherit the calling task's `tracing` dispatcher, so it's captured here
+/// and re-installed inside the closure — otherwise the compile's warnings
+/// would only surface under a process-wide `set_global_default` subscriber,
+/// never a task-scoped one. Shared by the markdown path (`compile_pdf`) and
+/// the template path (`template.rs`).
+async fn spawn_compile<T, F>(compile: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
+    tokio::task::spawn_blocking(move || tracing::dispatcher::with_default(&dispatch, compile))
+        .await
+        .context("typst compile thread panicked")?
+}
+
+/// Typst warnings (e.g. "unknown font family: ...") arrive on a separate
+/// channel from the compile error path — surface them via `tracing` so a
+/// brand font that failed to resolve isn't silently dropped. Shared by every
+/// compile site (markdown pdf, template pdf, template html).
+fn forward_warnings(warnings: &[typst::diag::SourceDiagnostic]) {
+    for w in warnings {
+        tracing::warn!("typst: {}", w.message);
+        for hint in &w.hints {
+            tracing::warn!("typst: hint: {hint}");
+        }
     }
 }
 
@@ -263,15 +283,7 @@ fn compile_pdf(
         .build();
 
     let result = engine.compile();
-    // Typst warnings (e.g. "unknown font family: ...") arrive on a separate
-    // channel from the compile error path — surface them via `tracing` so a
-    // brand font that failed to resolve isn't silently dropped.
-    for w in &result.warnings {
-        tracing::warn!("typst: {}", w.message);
-        for hint in &w.hints {
-            tracing::warn!("typst: hint: {hint}");
-        }
-    }
+    forward_warnings(&result.warnings);
     let doc = result.output.map_err(format_lib_error)?;
 
     let options = typst_pdf::PdfOptions::default();

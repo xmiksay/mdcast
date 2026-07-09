@@ -72,14 +72,8 @@ pub async fn render_template(
 ) -> Result<RenderedArtifact> {
     let (main_id, sources, binaries) = assemble(doc, assets).await?;
 
-    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
-    let pdf_bytes = tokio::task::spawn_blocking(move || {
-        tracing::dispatcher::with_default(&dispatch, || {
-            compile_template_pdf(&main_id, sources, binaries)
-        })
-    })
-    .await
-    .context("typst compile thread panicked")??;
+    let pdf_bytes =
+        super::spawn_compile(move || compile_template_pdf(&main_id, sources, binaries)).await?;
 
     Ok(RenderedArtifact {
         primary: Bytes::from(pdf_bytes),
@@ -102,14 +96,8 @@ pub async fn render_template_html(
 ) -> Result<RenderedArtifact> {
     let (main_id, sources, binaries) = assemble(doc, assets).await?;
 
-    let dispatch = tracing::dispatcher::get_default(|d| d.clone());
-    let html_bytes = tokio::task::spawn_blocking(move || {
-        tracing::dispatcher::with_default(&dispatch, || {
-            compile_template_html(&main_id, sources, binaries)
-        })
-    })
-    .await
-    .context("typst compile thread panicked")??;
+    let html_bytes =
+        super::spawn_compile(move || compile_template_html(&main_id, sources, binaries)).await?;
 
     Ok(RenderedArtifact {
         primary: Bytes::from(html_bytes),
@@ -215,12 +203,7 @@ fn compile_template_pdf(
     let engine = build_engine(sources, binaries);
 
     let result = engine.compile(main_id);
-    for w in &result.warnings {
-        tracing::warn!("typst: {}", w.message);
-        for hint in &w.hints {
-            tracing::warn!("typst: hint: {hint}");
-        }
-    }
+    super::forward_warnings(&result.warnings);
     let compiled = result.output.map_err(super::format_lib_error)?;
 
     let options = typst_pdf::PdfOptions::default();
@@ -243,12 +226,7 @@ fn compile_template_html(
     let engine = build_engine(sources, binaries);
 
     let result: typst::diag::Warned<Result<typst_html::HtmlDocument, _>> = engine.compile(main_id);
-    for w in &result.warnings {
-        tracing::warn!("typst: {}", w.message);
-        for hint in &w.hints {
-            tracing::warn!("typst: hint: {hint}");
-        }
-    }
+    super::forward_warnings(&result.warnings);
     let compiled = result.output.map_err(super::format_lib_error)?;
 
     let html = typst_html::html(&compiled).map_err(super::format_diagnostics)?;
