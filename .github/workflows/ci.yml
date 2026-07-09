@@ -9,9 +9,11 @@ env:
   CARGO_BUILD_JOBS: 4
 
 jobs:
-  # Full verification gate on every PR: lint + all feature combos + all tests.
+  # Full verification gate: lint + all feature combos + all tests. Runs on
+  # every PR and again on merge to master (cheap insurance against merge
+  # skew) — but never a third time, since coverage below no longer repeats
+  # this on every push.
   test:
-    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -40,10 +42,15 @@ jobs:
       - name: Test remote-images feature (issue #54's http(s) image fetch)
         run: make test-remote-images
 
-  # Coverage on every merge to master. Runs the full suite under llvm-cov, so
-  # master stays verified without duplicating the PR job.
+  # Coverage on release PRs only (release-vX.Y.Z branch, or a
+  # chore(release) title) — produced once per release instead of on every
+  # merge, since the version-bump PR is the one commit worth a coverage
+  # snapshot.
   coverage:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'pull_request' &&
+      (startsWith(github.head_ref, 'release-v') ||
+       startsWith(github.event.pull_request.title, 'chore(release)'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
