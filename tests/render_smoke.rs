@@ -722,6 +722,41 @@ async fn pandoc_pptx_smoke() {
 }
 
 #[tokio::test]
+async fn pandoc_pptx_autofit_smoke() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_pptx_autofit_smoke: `pandoc` not on PATH");
+        return;
+    }
+    // A deliberately long bullet list overflows a single slide — the
+    // rendered pptx must carry `<a:normAutofit/>` on the body placeholder
+    // (issue #56) so PowerPoint/LibreOffice shrink the text instead of
+    // letting it spill off the slide.
+    let bullets: String = (1..=30)
+        .map(|n| format!("- bullet {n}\n"))
+        .collect::<String>();
+    let doc = ResolvedDoc {
+        pages: vec![Page {
+            class: "content".into(),
+            body: format!("# Long slide\n\n{bullets}"),
+            origin: PageOrigin::Explicit,
+        }],
+        meta: DocMeta::default(),
+        brand: BrandHandle(Arc::new(BrandSpec::default())),
+        assets: Vec::new(),
+        fonts: Vec::new(),
+        toc: None,
+    };
+
+    let (_tmp, out) = render(Target::Pptx, &doc).await;
+    let bytes = std::fs::read(&out).unwrap();
+    let slide_xml = zip_entry_to_string(&bytes, "ppt/slides/slide1.xml");
+    assert!(
+        slide_xml.contains("<a:normAutofit"),
+        "expected <a:normAutofit/> in ppt/slides/slide1.xml:\n{slide_xml}"
+    );
+}
+
+#[tokio::test]
 async fn pandoc_html_reveal_smoke() {
     if !pandoc_available() {
         eprintln!("skipping pandoc_html_reveal_smoke: `pandoc` not on PATH");

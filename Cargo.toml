@@ -20,7 +20,7 @@ exclude = [
 
 [features]
 default = ["pandoc", "typst", "rt-multi-thread"]
-pandoc = []
+pandoc = ["dep:zip", "dep:quick-xml"]
 typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
@@ -42,6 +42,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 pulldown-cmark = { version = "0.13", default-features = false }
+quick-xml = { version = "0.41", optional = true }
 regex = "1"
 reqwest = { version = "0.12", optional = true, default-features = false, features = [
     "rustls-tls",
@@ -58,10 +59,10 @@ typst = { version = "0.14", optional = true }
 typst-pdf = { version = "0.14", optional = true }
 typst-html = { version = "0.14", optional = true }
 typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "mdcast"

@@ -11,6 +11,8 @@ use crate::{
 
 #[cfg(feature = "pandoc")]
 pub mod pandoc;
+#[cfg(feature = "pandoc")]
+mod pptx_autofit;
 #[cfg(feature = "typst")]
 pub mod typst;
 
