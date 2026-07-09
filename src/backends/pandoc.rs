@@ -96,7 +96,7 @@ impl Backend for PandocBackend {
             let mut pages = doc.pages.clone();
             let assets_dir = root.join("assets");
             tokio::fs::create_dir_all(&assets_dir).await?;
-            resolve_images(&mut pages, assets, &assets_dir).await?;
+            resolve_images(&mut pages, assets, &assets_dir, self.target).await?;
 
             let input = build_input(&pages, self.target);
             let input_path = root.join("input.md");

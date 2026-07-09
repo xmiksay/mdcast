@@ -290,6 +290,44 @@ The feature is opt-in for that reason; if you enable it in a server context,
 front it with your own URL allow/deny-list policy before the markdown ever
 reaches mdcast.
 
+## Image formats
+
+mdcast never validates or transcodes image bytes — they flow from the
+`AssetProvider` straight to the target engine, so what "attaching an image"
+supports is whatever that engine/viewer accepts. Verified against typst
+0.14's format table and pandoc's pass-through behaviour:
+
+| Format | pdf / pdf-presentation (typst) | docx (Word) | odt (LibreOffice) | pptx | html-reveal |
+|---|---|---|---|---|---|
+| PNG, JPEG, GIF | ✓ | ✓ | ✓ | ✓ | ✓ |
+| SVG (+svgz on typst) | ✓ | ✓ modern Word | ✓ | ✓ modern PowerPoint | ✓ |
+| WebP | ✓ | ✗ broken image icon | ✓ LO ≥ 7.4 | ✗ | ✓ |
+| PDF-as-image | ✓ | ✗ | ✗ | ✗ | ✗ |
+| BMP, TIFF | ✗ compile error | ✓ | ✓ | ✓ | browser-dependent |
+| AVIF / HEIC | ✗ compile error | ✗ | ✗ | ✗ | AVIF ✓, HEIC ✗ |
+
+Two failure modes fall out of this:
+
+- **Unsupported format on typst** → a compile error, `unknown image format`,
+  naming no file. Typst detects format by extension, falling back to magic
+  bytes — `images::sanitize_key` preserves the original extension, so
+  detection itself isn't the gap, support is.
+- **WebP into docx/pptx** → renders fine to PDF, embeds without complaint,
+  shows a broken-image icon in Word/PowerPoint. A silent per-target
+  degradation from one source document.
+
+To catch the second failure mode before it reaches a viewer, `images::collect_images`
+sniffs each fetched image's magic bytes and emits one `tracing::warn!` (naming
+the image key, detected format, and target) whenever the combination is
+known-unsupported per the table above — WebP→docx/pptx, BMP/TIFF→pdf/
+pdf-presentation, AVIF/HEIC→everything but their one supported target. It
+warns rather than fails: the embed may be intentional (a document destined
+only for LibreOffice, say). Combinations the table leaves ambiguous
+(browser-dependent TIFF support in html-reveal, LibreOffice-version-gated
+WebP) are left un-warned rather than guessed at. This is a detection sniff
+only — no transcoding (e.g. WebP → PNG re-encode) is performed; fix the
+source image if a warning fires.
+
 ## Table of contents
 
 `ResolvedDoc.toc: Option<u8>` requests a table of contents at the given
