@@ -137,6 +137,12 @@ Build the Typst + touying template and the slide-boundary mapping. Treat as a sm
 Generate all four style assets *from* `brand.toml` (one color change, one edit). Integrate the **existing Rust Mermaid→SVG renderer** as a pre-processing stage. Add content-hash diagram cache + output cache (skip targets whose resolved input + brand + engine versions hash unchanged).
 **Done when:** rebranding is a single-file edit; diagrams flow to all five formats; unchanged inputs are skipped.
 
+> **Status:** the diagram leg landed — `mermaid-svg` 0.7.0 (the in-house
+> pure-Rust renderer, now on crates.io) is integrated as the `mermaid`
+> feature's pre-splitter step (`src/mermaid.rs::render_diagrams`), flowing
+> SVGs to every target through the existing `AssetProvider` pipeline. The
+> content-hash diagram/output cache remains open.
+
 ### Phase 5 — Composition + integration (deferred / optional)
 Fragment transclusion with cycle detection (only if genuinely needed). `mdcast-mcp` skin so KB/blog/platform can call "render this page as branded PDF."
 **Done when:** the platform can drive exports programmatically.

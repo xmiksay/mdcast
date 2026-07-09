@@ -21,6 +21,7 @@ src/
 ├─ images/
 │  ├─ mod.rs           resolve_images() — async per-page image rewriter
 │  └─ tests.rs         unit tests for image_refs()/collect_images()/resolve_images()
+├─ mermaid.rs         #[cfg(feature = "mermaid")] render_diagrams() — ```mermaid fences → SVG via mermaid-svg (pure Rust), pre-splitter
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
@@ -45,7 +46,7 @@ src/
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
-├─ revealjs/{dist,plugin}/…  vendored reveal.js 4.6.1 (fonts stripped)
+├─ revealjs/{dist,plugin}/…  vendored reveal.js 4.6.0 (fonts stripped)
 └─ reference/         reference.{docx,odt,pptx} — real, named styles per class
 ```
 
@@ -99,6 +100,7 @@ happens to mirror them.
 | `revealjs/dist/...`, `revealjs/plugin/...` | pandoc html-reveal |
 | `revealjs/brand.css`                  | pandoc html-reveal — raw per-class CSS escape hatch, appended to the generated brand `<style>` block (issue #57) |
 | `reference/reference.{docx,odt,pptx}` | pandoc (matching target) |
+| `mermaid/diagram-{N}.svg`             | mermaid pre-step output (`mermaid::render_diagrams`, `mermaid` feature) — the caller layers these over their provider |
 | anything else (e.g. `img/...`)        | image refs in markdown |
 
 ## Build / test
@@ -107,9 +109,9 @@ Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
 ```
-make build              # cargo build — default = pandoc + typst
-make check-all          # all cargo check feature combos (core / pandoc / typst / both / +typst-html / +remote-images)
-make test                # cargo test — ~100 tests; unit suite runs in <1s
+make build              # cargo build — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
+make check-all          # all cargo check feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images)
+make test                # cargo test — ~200 tests; unit suite runs in <1s
 make test-typst-html     # cargo test --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test --features remote-images (off-by-default http(s) image fetch, issue #54)
 make lint                # cargo fmt --check + cargo clippy --all-targets -- -D warnings (+ typst-html, + remote-images)
@@ -141,16 +143,22 @@ bump the version, merge, tag `vX.Y.Z`, push the tag.
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags]
-./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags]  # prints per-page (class, origin)
-./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml]  # typst-only, no markdown
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]...
+./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]  # prints per-page (class, origin)
+./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html]  # typst-only, no markdown
 ```
 
 `--assets DIR` layers a filesystem-backed provider over `EmbeddedAssets`.
 That's the easy way to supply images referenced from markdown without writing
 Rust. `--html-image-tags` enables the built-in `HtmlImageTags` preprocessor:
 `<img src="X">` / `<image path="X">` become `![alt](X)` before splitting, so
-the auto-classifier and both engines see real image nodes.
+the auto-classifier and both engines see real image nodes. `--mermaid` runs
+the mermaid pre-step (`mermaid::render_diagrams`, `mermaid` feature): every
+```` ```mermaid ```` fence renders to SVG (pure Rust, no Node/Chromium) and
+is rewritten to `![](mermaid/diagram-N.svg)`, served from an in-memory layer
+over the provider stack; a diagram that fails to render warns and stays a
+code block. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
+`.fonts` entries for typst layouts (see README).
 
 `render-template` is the data-driven entry point (issue #52): `TEMPLATE` is an
 `AssetProvider` key for the main `.typ` file, `--data` a JSON file deserialized

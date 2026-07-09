@@ -20,6 +20,7 @@ check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check --no-default-features
 	cargo check --no-default-features --features pandoc
 	cargo check --no-default-features --features typst
+	cargo check --no-default-features --features pandoc,typst,rt-multi-thread
 	cargo check
 	cargo check --features typst-html
 	cargo check --features remote-images

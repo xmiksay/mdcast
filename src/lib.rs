@@ -6,6 +6,8 @@ pub mod brand;
 pub mod frontmatter;
 mod image_format;
 pub mod images;
+#[cfg(feature = "mermaid")]
+pub mod mermaid;
 pub mod pages;
 pub mod preprocessor;
 

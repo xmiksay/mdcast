@@ -48,6 +48,13 @@ enum Cmd {
         /// `<image path="X">` become standard `![](X)` before splitting.
         #[arg(long, default_value_t = false)]
         html_image_tags: bool,
+        /// Render ```mermaid fenced code blocks to SVG diagrams (pure Rust,
+        /// no Node/Chromium) before splitting; the SVGs resolve through the
+        /// asset pipeline like any other image. Needs the `mermaid` feature
+        /// (on by default). A diagram that fails to render warns and stays a
+        /// code block.
+        #[arg(long, default_value_t = false)]
+        mermaid: bool,
         /// Request a table of contents at the given heading depth (1-6).
         /// Honoured by docx/odt (`--toc --toc-depth`) and by `pdf` (a leading
         /// `#outline(depth: N)` page); ignored by pdf-presentation/pptx/html-reveal.
@@ -73,6 +80,10 @@ enum Cmd {
         brand: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         html_image_tags: bool,
+        /// Same as `render --mermaid` — lets the auto-classifier see the
+        /// diagram as an image (e.g. a diagram-only page classifies image-full).
+        #[arg(long, default_value_t = false)]
+        mermaid: bool,
     },
     /// Render a user-supplied typst template against structured data — no
     /// markdown involved. `template` is an AssetProvider key (e.g.
@@ -142,53 +153,59 @@ async fn main() -> Result<()> {
             brand,
             assets,
             html_image_tags,
+            mermaid,
             toc_depth,
             layout_assets,
             layout_fonts,
         } => {
-            let doc = load_doc(
+            let (doc, mermaid_svgs) = load_doc(
                 &input,
                 brand.as_deref(),
                 html_image_tags,
+                mermaid,
                 toc_depth,
                 layout_assets,
                 layout_fonts,
             )
             .await?;
             let registry = Registry::with_defaults();
-            let artifact = match assets {
-                Some(dir) => {
-                    let provider = LayeredAssets {
-                        over: FsAssets(dir),
-                        base: EmbeddedAssets,
-                    };
-                    let req = RenderRequest {
-                        doc: &doc,
-                        assets: &provider,
-                        out: &out,
-                    };
-                    registry.render(target.into(), &req).await?
-                }
-                None => {
-                    let req = RenderRequest {
-                        doc: &doc,
-                        assets: &EmbeddedAssets,
-                        out: &out,
-                    };
-                    registry.render(target.into(), &req).await?
-                }
+            // Provider stack, innermost first: embedded catalog, `--assets`
+            // dir override, rendered mermaid SVGs. Boxed because each layer
+            // is optional.
+            let mut provider: Box<dyn mdcast::AssetProvider> = Box::new(EmbeddedAssets);
+            if let Some(dir) = assets {
+                provider = Box::new(LayeredAssets {
+                    over: FsAssets(dir),
+                    base: provider,
+                });
+            }
+            if !mermaid_svgs.is_empty() {
+                let svgs: std::collections::HashMap<String, bytes::Bytes> =
+                    mermaid_svgs.into_iter().collect();
+                provider = Box::new(LayeredAssets {
+                    over: mdcast::sync_provider(move |k| Ok(svgs.get(k).cloned())),
+                    base: provider,
+                });
+            }
+            let req = RenderRequest {
+                doc: &doc,
+                assets: &provider,
+                out: &out,
             };
+            let artifact = registry.render(target.into(), &req).await?;
             println!("wrote {}", artifact.primary.display());
         }
         Cmd::Explain {
             input,
             brand,
             html_image_tags,
+            mermaid,
         } => {
-            let doc = load_doc(
+            let (doc, _) = load_doc(
                 &input,
                 brand.as_deref(),
                 html_image_tags,
+                mermaid,
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -235,10 +252,11 @@ async fn load_doc(
     input: &std::path::Path,
     brand: Option<&std::path::Path>,
     html_image_tags: bool,
+    mermaid: bool,
     toc_depth: Option<u8>,
     layout_assets: Vec<String>,
     layout_fonts: Vec<String>,
-) -> Result<ResolvedDoc> {
+) -> Result<(ResolvedDoc, Vec<(String, bytes::Bytes)>)> {
     let md = tokio::fs::read_to_string(input)
         .await
         .with_context(|| format!("read {}", input.display()))?;
@@ -254,9 +272,28 @@ async fn load_doc(
     };
     let md = preprocessor.preprocess(&md);
 
+    // Mermaid pre-step: after the plain-string preprocessors (an <img> tag
+    // rewrite can't affect a fence), before splitting, so the classifier and
+    // both engines see the diagram as a real image node.
+    #[cfg(feature = "mermaid")]
+    let (md, mermaid_svgs) = if mermaid {
+        let rendered = mdcast::mermaid::render_diagrams(&md);
+        (rendered.markdown, rendered.svgs)
+    } else {
+        (md, Vec::new())
+    };
+    #[cfg(not(feature = "mermaid"))]
+    let mermaid_svgs = {
+        anyhow::ensure!(
+            !mermaid,
+            "this mdcast build does not include the `mermaid` feature"
+        );
+        Vec::new()
+    };
+
     let raw = DefaultSplitter.split(&md);
     let pages = classify(raw, &brand_spec.auto_layout);
-    Ok(ResolvedDoc {
+    let doc = ResolvedDoc {
         pages,
         meta,
         brand: BrandHandle(Arc::new(brand_spec)),
@@ -269,7 +306,8 @@ async fn load_doc(
             .map(|key| AssetRef { key })
             .collect(),
         toc: toc_depth,
-    })
+    };
+    Ok((doc, mermaid_svgs))
 }
 
 #[cfg(test)]
@@ -282,9 +320,10 @@ mod tests {
         let input = dir.path().join("in.md");
         tokio::fs::write(&input, "# Hi").await.unwrap();
 
-        let doc = load_doc(
+        let (doc, _) = load_doc(
             &input,
             None,
+            false,
             false,
             None,
             vec!["branding/logo.svg".to_string(), "bg.png".to_string()],
@@ -303,9 +342,10 @@ mod tests {
         let input = dir.path().join("in.md");
         tokio::fs::write(&input, "# Hi").await.unwrap();
 
-        let doc = load_doc(
+        let (doc, _) = load_doc(
             &input,
             None,
+            false,
             false,
             None,
             Vec::new(),

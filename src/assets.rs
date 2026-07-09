@@ -41,6 +41,18 @@ impl AssetProvider for EmbeddedAssets {
     }
 }
 
+/// Delegate through a `Box` so provider stacks can be built up dynamically
+/// (e.g. the CLI layering mermaid SVGs and `--assets` over `EmbeddedAssets`).
+impl<T: AssetProvider + ?Sized> AssetProvider for Box<T> {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
+        (**self).get(key)
+    }
+
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        (**self).list(prefix)
+    }
+}
+
 /// Try `over` first, fall back to `base`. Lets a consumer ship a small override
 /// set on top of `EmbeddedAssets` without re-implementing the whole trait.
 #[derive(Debug, Clone, Copy)]
