@@ -112,6 +112,26 @@ fn unsupported_targets(format: ImageFormat) -> &'static [Target] {
     }
 }
 
+/// Best-effort MIME type for a sniffed format — used by the reveal.js brand
+/// logo overlay (`backends/reveal_brand.rs`, issue #57) to embed a data URI.
+/// `Unknown`/`Pdf` fall back to `application/octet-stream`; a data URI needs
+/// *some* MIME token even when sniffing comes up empty, and a PDF embedded as
+/// an `<img>` isn't going to render as one anyway.
+pub(crate) fn mime_type(bytes: &[u8]) -> &'static str {
+    match sniff(bytes) {
+        ImageFormat::Png => "image/png",
+        ImageFormat::Jpeg => "image/jpeg",
+        ImageFormat::Gif => "image/gif",
+        ImageFormat::Svg => "image/svg+xml",
+        ImageFormat::Webp => "image/webp",
+        ImageFormat::Bmp => "image/bmp",
+        ImageFormat::Tiff => "image/tiff",
+        ImageFormat::Avif => "image/avif",
+        ImageFormat::Heic => "image/heic",
+        ImageFormat::Pdf | ImageFormat::Unknown => "application/octet-stream",
+    }
+}
+
 /// Sniff `bytes` and, if the detected format is known-unsupported on
 /// `target`, emit one `tracing::warn!` naming the image key, the detected
 /// format, and the target. Never fails the render — the embed may still be
@@ -211,6 +231,22 @@ mod tests {
             assert!(!unsupported_targets(format).contains(&Target::Odt));
             assert!(!unsupported_targets(format).contains(&Target::Pptx));
         }
+    }
+
+    #[test]
+    fn mime_type_maps_known_formats() {
+        assert_eq!(mime_type(b"\x89PNG\r\n\x1a\nrest"), "image/png");
+        assert_eq!(mime_type(b"<svg xmlns=\"...\"></svg>"), "image/svg+xml");
+        assert_eq!(mime_type(b"RIFF\0\0\0\0WEBPVP8 rest"), "image/webp");
+    }
+
+    #[test]
+    fn mime_type_falls_back_to_octet_stream() {
+        assert_eq!(
+            mime_type(b"not an image at all"),
+            "application/octet-stream"
+        );
+        assert_eq!(mime_type(b"%PDF-1.7\nrest"), "application/octet-stream");
     }
 
     #[test]

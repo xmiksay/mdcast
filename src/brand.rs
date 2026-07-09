@@ -17,12 +17,43 @@ pub struct BrandSpec {
     pub palette: BTreeMap<String, String>,
     #[serde(default)]
     pub fonts: BTreeMap<String, String>,
+    /// Optional logo overlaid on every reveal.js slide (issue #57). `None`
+    /// (the default, and what an existing `brand.toml` with no `[logo]`
+    /// table parses to) means no overlay — pandoc's html-reveal arm skips
+    /// the fetch/embed entirely, so output stays byte-identical to before
+    /// this field existed.
+    #[serde(default)]
+    pub logo: Option<LogoSpec>,
 }
 
 impl BrandSpec {
     pub fn from_toml(s: &str) -> Result<Self> {
         toml::from_str(s).context("invalid brand.toml")
     }
+}
+
+/// A brand logo to overlay on every reveal.js slide. `key` is an
+/// `AssetProvider` key — the same namespace page-body image refs use — fetched
+/// by the pandoc backend and embedded as a data URI (see
+/// `backends/reveal_brand.rs`). Typst layouts have their own logo mechanism
+/// (`ResolvedDoc.assets` + `asset-path`) and ignore this field.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogoSpec {
+    pub key: String,
+    #[serde(default)]
+    pub position: LogoPosition,
+    pub width: Option<String>,
+}
+
+/// Which corner of the slide a logo overlay anchors to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LogoPosition {
+    #[default]
+    TopRight,
+    TopLeft,
+    BottomRight,
+    BottomLeft,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +143,45 @@ mod tests {
     fn from_toml_rejects_invalid_syntax() {
         let err = BrandSpec::from_toml("not = [valid toml").unwrap_err();
         assert!(!err.to_string().is_empty());
+    }
+
+    #[test]
+    fn from_toml_without_logo_table_defaults_to_none() {
+        let spec = BrandSpec::from_toml("name = \"Acme\"").unwrap();
+        assert!(spec.logo.is_none());
+    }
+
+    #[test]
+    fn from_toml_parses_logo_table_with_explicit_position() {
+        let toml = r##"
+            name = "Acme"
+
+            [logo]
+            key = "img/logo.svg"
+            position = "bottom-left"
+            width = "120px"
+        "##;
+
+        let spec = BrandSpec::from_toml(toml).unwrap();
+        let logo = spec.logo.expect("logo table should parse");
+
+        assert_eq!(logo.key, "img/logo.svg");
+        assert_eq!(logo.position, LogoPosition::BottomLeft);
+        assert_eq!(logo.width.as_deref(), Some("120px"));
+    }
+
+    #[test]
+    fn logo_position_defaults_to_top_right() {
+        let toml = r##"
+            [logo]
+            key = "img/logo.svg"
+        "##;
+
+        let spec = BrandSpec::from_toml(toml).unwrap();
+        let logo = spec.logo.expect("logo table should parse");
+
+        assert_eq!(logo.position, LogoPosition::TopRight);
+        assert_eq!(logo.width, None);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use mdcast::backends::Registry;
+use mdcast::brand::{LogoPosition, LogoSpec};
 use mdcast::pages::auto::classify;
 use mdcast::{
     AssetProvider, AssetRef, AutoLayout, BrandHandle, BrandSpec, DefaultSplitter, DocMeta,
@@ -792,6 +793,105 @@ async fn pandoc_html_reveal_ignores_toc_request() {
     assert!(
         !html.contains(r#"id="TOC""#),
         "requesting a TOC should not add pandoc's TOC div to html-reveal output"
+    );
+}
+
+/// `branded_doc()` (line 279, typst-focused) plus a `[logo]` entry — the
+/// html-reveal-side sibling exercising palette/font/logo projection
+/// end-to-end against the real pandoc subprocess.
+fn html_reveal_branded_doc() -> ResolvedDoc {
+    let mut doc = branded_doc();
+    let mut brand = (*doc.brand.0).clone();
+    brand.logo = Some(LogoSpec {
+        key: "branding/logo.svg".into(),
+        position: LogoPosition::TopRight,
+        width: Some("120px".into()),
+    });
+    doc.brand = BrandHandle(Arc::new(brand));
+    doc
+}
+
+/// Layers a fake `branding/logo.svg` over the built-in catalog, so the
+/// html-reveal brand smoke test exercises the logo fetch-and-embed path for
+/// real instead of leaving the reference dangling.
+fn assets_with_logo() -> impl AssetProvider {
+    let logo = sync_provider(|key: &str| {
+        if key == "branding/logo.svg" {
+            Ok(Some(Bytes::from_static(
+                br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#,
+            )))
+        } else {
+            Ok(None)
+        }
+    });
+    LayeredAssets {
+        over: logo,
+        base: EmbeddedAssets,
+    }
+}
+
+#[tokio::test]
+async fn pandoc_html_reveal_brand_smoke() {
+    if !pandoc_available() {
+        eprintln!("skipping pandoc_html_reveal_brand_smoke: `pandoc` not on PATH");
+        return;
+    }
+    let doc = html_reveal_branded_doc();
+    let (_tmp, out) = render_with(Target::HtmlReveal, &doc, assets_with_logo()).await;
+    let html = std::fs::read_to_string(&out).unwrap();
+
+    assert!(
+        html.contains("<style data-brand>"),
+        "expected an injected brand <style> block:\n{html}"
+    );
+    // branded_doc()'s palette sets `accent` — mapped to
+    // --r-selection-background-color, and also passed through as
+    // --brand-accent.
+    assert!(
+        html.contains("--r-selection-background-color: #243752;"),
+        "expected the mapped accent custom property:\n{html}"
+    );
+    assert!(
+        html.contains("--brand-accent: #243752;"),
+        "expected the --brand-<key> passthrough:\n{html}"
+    );
+    // branded_doc()'s fonts set `sans` — not a recognised key (only
+    // body/heading/code map to reveal custom properties), so it should NOT
+    // appear as a mapped --r-*-font property.
+    assert!(
+        !html.contains("--r-main-font: Arial;"),
+        "unrecognised font key should not map to --r-main-font:\n{html}"
+    );
+    // Logo overlay: embedded as a data URI, not a dangling reference.
+    assert!(
+        html.contains("data:image/svg+xml;base64,"),
+        "expected the logo embedded as a data URI:\n{html}"
+    );
+    assert!(
+        html.contains("width: 120px;"),
+        "expected the configured logo width:\n{html}"
+    );
+
+    assert!(
+        !has_external_resource_ref(&html),
+        "branding must not break self-containment — found an external resource reference"
+    );
+}
+
+#[tokio::test]
+async fn pandoc_html_reveal_unbranded_has_no_brand_style_block() {
+    if !pandoc_available() {
+        eprintln!(
+            "skipping pandoc_html_reveal_unbranded_has_no_brand_style_block: `pandoc` not on PATH"
+        );
+        return;
+    }
+    let doc = resolved_doc(README_EXAMPLE);
+    let (_tmp, out) = render(Target::HtmlReveal, &doc).await;
+    let html = std::fs::read_to_string(&out).unwrap();
+    assert!(
+        !html.contains("data-brand"),
+        "an unbranded doc should not inject a brand <style> block:\n{html}"
     );
 }
 
