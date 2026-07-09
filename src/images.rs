@@ -82,14 +82,32 @@ pub(crate) fn image_refs(body: &str) -> Vec<ImageRef> {
 /// only difference between the two engines is what they do with the bytes
 /// once fetched. Keys the provider returns `None` for are simply absent from
 /// the result.
+///
+/// With the `remote-images` feature enabled, `http(s)://` URLs are fetched
+/// too (deduped the same way, direct via `reqwest` rather than through
+/// `provider` — a remote URL isn't a provider key) and folded into the same
+/// result map, so a page-body `![alt](https://…)` resolves identically for
+/// both engines: the typst path registers it as a virtual file same as any
+/// other image, and the pandoc path (`resolve_images`) materialises it to
+/// disk and rewrites the markdown to the local copy, so pandoc never touches
+/// the network itself. A fetch failure (DNS, 404, timeout, …) warns and is
+/// dropped rather than failing the render — one dead link shouldn't sink a
+/// whole document.
 pub(crate) async fn collect_images(
     pages: &[Page],
     provider: &dyn AssetProvider,
 ) -> Result<BTreeMap<String, Bytes>> {
     let mut keys: BTreeMap<String, ()> = BTreeMap::new();
+    #[cfg(feature = "remote-images")]
+    let mut remote_keys: BTreeMap<String, ()> = BTreeMap::new();
     for page in pages {
         for r in image_refs(&page.body) {
-            if !looks_remote(&r.dest_url) {
+            if looks_remote(&r.dest_url) {
+                #[cfg(feature = "remote-images")]
+                if r.dest_url.starts_with("http://") || r.dest_url.starts_with("https://") {
+                    remote_keys.insert(r.dest_url, ());
+                }
+            } else {
                 keys.insert(r.dest_url, ());
             }
         }
@@ -102,10 +120,57 @@ pub(crate) async fn collect_images(
     }))
     .await?;
 
-    Ok(fetched
+    #[cfg_attr(not(feature = "remote-images"), allow(unused_mut))]
+    let mut result: BTreeMap<String, Bytes> = fetched
         .into_iter()
         .filter_map(|(k, bytes)| bytes.map(|b| (k, b)))
-        .collect())
+        .collect();
+
+    #[cfg(feature = "remote-images")]
+    {
+        let remote_fetched =
+            futures::future::join_all(remote_keys.into_keys().map(|url| async move {
+                let bytes = fetch_remote(&url).await;
+                (url, bytes)
+            }))
+            .await;
+        result.extend(
+            remote_fetched
+                .into_iter()
+                .filter_map(|(k, bytes)| bytes.map(|b| (k, b))),
+        );
+    }
+
+    Ok(result)
+}
+
+/// Fetch one `http(s)` URL's bytes directly (not through the `AssetProvider`
+/// — a remote URL isn't a provider key). Any failure — connection, non-2xx
+/// status, body read — warns with the URL and returns `None` so the caller
+/// treats it exactly like a provider miss.
+#[cfg(feature = "remote-images")]
+async fn fetch_remote(url: &str) -> Option<Bytes> {
+    let resp = match reqwest::get(url).await {
+        Ok(r) => r,
+        Err(error) => {
+            tracing::warn!(url, %error, "failed to fetch remote image; skipping");
+            return None;
+        }
+    };
+    let resp = match resp.error_for_status() {
+        Ok(r) => r,
+        Err(error) => {
+            tracing::warn!(url, %error, "remote image fetch returned an error status; skipping");
+            return None;
+        }
+    };
+    match resp.bytes().await {
+        Ok(b) => Some(b),
+        Err(error) => {
+            tracing::warn!(url, %error, "failed to read remote image body; skipping");
+            None
+        }
+    }
 }
 
 /// Resolve every image reference in `pages` through `provider`. Mutates the
@@ -220,7 +285,7 @@ mod tests {
         });
         let tmp = tempfile::tempdir().unwrap();
         let mut pages = vec![page(
-            "![d](img/diagram.svg) and ![x](img/missing.png) and ![ext](https://e.com/p.png)",
+            "![d](img/diagram.svg) and ![x](img/missing.png) and ![ext](https://img.invalid/p.png)",
         )];
         let resolved = resolve_images(&mut pages, &provider, tmp.path())
             .await
@@ -233,8 +298,8 @@ mod tests {
             "missing keys preserved"
         );
         assert!(
-            pages[0].body.contains("https://e.com/p.png"),
-            "remote URLs preserved"
+            pages[0].body.contains("https://img.invalid/p.png"),
+            "remote URLs preserved when remote-images feature is off (and unresolvable when on — `.invalid` never resolves per RFC 2606)"
         );
     }
 
@@ -311,5 +376,117 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    /// Binds a local one-shot HTTP server, replies with the given status
+    /// line/body to the first request, and returns its URL — lets
+    /// `remote-images` tests exercise `reqwest` against something real
+    /// without reaching the network.
+    #[cfg(feature = "remote-images")]
+    async fn serve_once(status_line: &'static str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{addr}/image.png")
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "remote-images")]
+    async fn remote_images_feature_fetches_http_url() {
+        let url = serve_once("200 OK", b"PNGDATA").await;
+        let provider = sync_provider(|_| Ok(None));
+        let tmp = tempfile::tempdir().unwrap();
+        let mut pages = vec![page(&format!("![r]({url})"))];
+
+        let resolved = resolve_images(&mut pages, &provider, tmp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(resolved, vec![url.clone()]);
+        assert!(
+            !pages[0].body.contains(&url),
+            "remote url should be rewritten to a local path: {}",
+            pages[0].body
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "remote-images")]
+    async fn remote_images_feature_warns_and_skips_on_error_status() {
+        let url = serve_once("404 Not Found", b"").await;
+        let provider = sync_provider(|_| Ok(None));
+        let tmp = tempfile::tempdir().unwrap();
+        let mut pages = vec![page(&format!("![r]({url})"))];
+
+        let resolved = resolve_images(&mut pages, &provider, tmp.path())
+            .await
+            .unwrap();
+
+        assert!(resolved.is_empty());
+        assert!(
+            pages[0].body.contains(&url),
+            "unresolved remote url left in place: {}",
+            pages[0].body
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "remote-images")]
+    async fn remote_images_feature_dedups_same_url_across_pages() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_c = hits.clone();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    break;
+                };
+                hits_c.fetch_add(1, Ordering::SeqCst);
+                let mut buf = [0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                let body = b"PNGDATA";
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let url = format!("http://{addr}/shared.png");
+
+        let provider = sync_provider(|_| Ok(None));
+        let tmp = tempfile::tempdir().unwrap();
+        let mut pages = vec![page(&format!("![a]({url})")), page(&format!("![b]({url})"))];
+
+        resolve_images(&mut pages, &provider, tmp.path())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "expected a single fetch for a repeated remote url"
+        );
     }
 }
