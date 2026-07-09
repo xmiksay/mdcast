@@ -106,7 +106,7 @@ impl Backend for TypstBackend {
             // so a layout's `asset-path(key)` degrades to its `default:`
             // instead of failing the whole compile.
             let ((image_map, mut virtual_files), (asset_map, asset_files), fonts) = try_join!(
-                collect_images_for_typst(&doc.pages, assets),
+                collect_images_for_typst(&doc.pages, assets, self.target),
                 collect_layout_assets(&doc.assets, assets),
                 collect_fonts(&doc.fonts, assets),
             )?;

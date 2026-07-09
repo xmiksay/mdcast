@@ -17,7 +17,10 @@ src/
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
 ├─ brand.rs           BrandSpec + AutoLayout config
 ├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
-├─ images.rs          resolve_images() — async per-page image rewriter
+├─ image_format.rs    sniff() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
+├─ images/
+│  ├─ mod.rs           resolve_images() — async per-page image rewriter
+│  └─ tests.rs         unit tests for image_refs()/collect_images()/resolve_images()
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
@@ -226,12 +229,12 @@ section. Only present when built with the `typst` feature.
   pandoc's stock look, but true per-class layout selection would require
   post-render patching of each slide's layout relationship — out of scope for
   v1 (`PROJECT_PLAN.md` §10).
-- Image-ref rewriter (`images.rs::image_refs`) parses `Tag::Image` via
+- Image-ref rewriter (`images::image_refs`) parses `Tag::Image` via
   pulldown-cmark instead of a regex, so titled images (`![alt](url "title")`),
   angle-bracket URLs (`![alt](<url>)`), and reference-style images
   (`![alt][ref]`) all resolve through the `AssetProvider` — pulldown-cmark
   already resolves reference definitions and strips titles/angle-brackets into
-  `dest_url`/`title`. `images.rs::collect_images` is the one shared
+  `dest_url`/`title`. `images::collect_images` is the one shared
   walk/dedup/fetch pipeline: it finds every non-remote image reference across
   a page set and fetches each unique key once via `try_join_all`. The pandoc
   path (`resolve_images`) writes the fetched bytes to a per-render temp
@@ -252,7 +255,7 @@ section. Only present when built with the `typst` feature.
   typst converter (`backends/typst/markdown/mod.rs`, `Tag::Image` arm) used
   to emit literal `[image unresolved: ...]` text into the rendered document;
   it now emits a `tracing::warn!` with the URL and drops the image instead.
-  With the off-by-default `remote-images` feature, `images.rs::collect_images`
+  With the off-by-default `remote-images` feature, `images::collect_images`
   additionally fetches every unique `http(s)` URL directly (not through the
   `AssetProvider` — a remote URL isn't a provider key) via `reqwest`, deduped
   the same way as provider keys, and folds the bytes into the same result map
@@ -264,6 +267,21 @@ section. Only present when built with the `typst` feature.
   feature gates a new `reqwest` dependency (`rustls-tls`, no native-tls) —
   off by default, no new dependency and byte-identical output for documents
   without remote images.
+- mdcast never validates or transcodes image bytes — the per-target format
+  support matrix (issue #55, documented in README's "Image formats" section)
+  is whatever the target engine/viewer accepts. `image_format.rs::sniff`
+  detects a format from magic bytes only (no `image`-crate dependency — a
+  ~15-arm match on binary prefixes, plus a text sniff for SVG since it's XML
+  with no fixed prefix); `image_format.rs::warn_if_unsupported` is called
+  from `images::collect_images` for every fetched `(key, bytes)` pair (after
+  the `remote-images` fold, so a fetched remote image is checked too) and
+  emits one `tracing::warn!` naming the key, detected format, and target when
+  the pair is a known-bad combination (WebP→docx/pptx, BMP/TIFF/AVIF/HEIC→
+  typst, AVIF/HEIC→pandoc targets, PDF-as-image→anything but typst) — never
+  fails the render, since the embed may be intentional (e.g. WebP in a
+  document destined only for LibreOffice). Combinations the matrix leaves
+  ambiguous (TIFF in html-reveal is browser-dependent, WebP in odt needs
+  LibreOffice ≥ 7.4) are deliberately left un-warned rather than guessed at.
 - Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
   render PDF targets. Only pandoc is an external binary dependency.
 - `DocMeta` / `BrandSpec` / `ResolvedDoc.assets` reach typst layouts via a

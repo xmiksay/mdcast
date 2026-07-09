@@ -18,6 +18,7 @@ use bytes::Bytes;
 use futures::future::try_join_all;
 
 use crate::AssetRef;
+use crate::Target;
 use crate::assets::AssetProvider;
 use crate::images::{collect_images, sanitize_key};
 use crate::pages::Page;
@@ -88,8 +89,9 @@ fn register_virtual_files(
 pub(super) async fn collect_images_for_typst(
     pages: &[Page],
     provider: &dyn AssetProvider,
+    target: Target,
 ) -> Result<VirtualFileSet> {
-    let fetched = collect_images(pages, provider).await?;
+    let fetched = collect_images(pages, provider, target).await?;
     let fetched = fetched.into_iter().map(|(k, b)| (k, Some(b))).collect();
     Ok(register_virtual_files(fetched, "images", false))
 }
