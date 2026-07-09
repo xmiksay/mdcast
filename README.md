@@ -164,6 +164,59 @@ A class name resolves to a *different template per target*. The same
 Missing template for some class? The renderer logs a warning and falls back
 to `content`. Authors are never blocked.
 
+## Branding reveal.js decks (issue #57)
+
+`html-reveal` projects `BrandSpec` (the same `brand.toml` that drives
+page-classification rules) into a generated CSS layer plus an optional logo
+overlay — no new pandoc invocation, no template changes. A document with no
+`--brand` (or a `brand.toml` with no `palette`/`fonts`/`logo`) renders
+byte-identical to before this existed.
+
+**Palette/font mapping.** Recognised `[palette]`/`[fonts]` keys map onto
+reveal.js 4.x's own theme CSS custom properties, scoped to `.reveal`:
+
+| `brand.toml` key      | reveal.js custom property         |
+|------------------------|-----------------------------------|
+| `palette.background`   | `--r-background-color`            |
+| `palette.heading` (falls back to `palette.primary`) | `--r-heading-color` |
+| `palette.text`         | `--r-main-color`                  |
+| `palette.link`         | `--r-link-color` / `--r-link-color-hover` |
+| `palette.accent`       | `--r-selection-background-color`  |
+| `fonts.body`            | `--r-main-font`                   |
+| `fonts.heading`         | `--r-heading-font`                |
+| `fonts.code`            | `--r-code-font`                   |
+
+Every `[palette]` key is *also* emitted as `--brand-<key>`, so per-class CSS
+can reach a color the table above doesn't know about (see below).
+
+**Logo overlay.** An optional `[logo]` table in `brand.toml`:
+
+```toml
+[logo]
+key = "img/logo.svg"     # an AssetProvider key — same namespace image refs use
+position = "top-right"   # top-right (default) | top-left | bottom-right | bottom-left
+width = "120px"          # optional
+```
+
+The backend fetches `key` through the `AssetProvider`, embeds it as a data
+URI, and overlays it on every slide via `position: fixed`. A key missing from
+the provider logs a `tracing::warn!` and the render proceeds without a logo —
+never a hard failure.
+
+**Per-class CSS escape hatch.** Slides already carry `{.<class>}` from the
+page's class (`<section class="hero">` etc.), so hand-written CSS can target
+it directly:
+
+```css
+.reveal section.hero { text-align: left; }
+.reveal section.callout { background: var(--brand-accent); }
+```
+
+Provide such CSS by giving the `AssetProvider` a `revealjs/brand.css` key —
+its contents are appended verbatim to the generated `<style data-brand>`
+block. This is the only per-class hook for reveal.js; there is no per-class
+template like typst's layouts.
+
 ## Typst layout context: `doc-meta` / `brand` / `asset-path`
 
 Every typst render (`pdf`, `pdf-presentation`) registers a synthetic

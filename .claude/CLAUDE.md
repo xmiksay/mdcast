@@ -15,9 +15,9 @@ sub-crates).
 src/
 ├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
-├─ brand.rs           BrandSpec + AutoLayout config
+├─ brand.rs           BrandSpec + AutoLayout config + LogoSpec/LogoPosition (issue #57)
 ├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
-├─ image_format.rs    sniff() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
+├─ image_format.rs    sniff() + mime_type() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
 ├─ images/
 │  ├─ mod.rs           resolve_images() — async per-page image rewriter
 │  └─ tests.rs         unit tests for image_refs()/collect_images()/resolve_images()
@@ -28,6 +28,7 @@ src/
 ├─ backends/
 │  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
 │  ├─ pptx_autofit.rs #[cfg(feature = "pandoc")]  add_autofit() — post-render normAutofit patch (issue #56)
+│  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57)
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, in-process compile
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
@@ -96,6 +97,7 @@ happens to mirror them.
 |---------------------------------------|-----------------|
 | `typst/layouts/{target}/{class}.typ`  | typst backend   |
 | `revealjs/dist/...`, `revealjs/plugin/...` | pandoc html-reveal |
+| `revealjs/brand.css`                  | pandoc html-reveal — raw per-class CSS escape hatch, appended to the generated brand `<style>` block (issue #57) |
 | `reference/reference.{docx,odt,pptx}` | pandoc (matching target) |
 | anything else (e.g. `img/...`)        | image refs in markdown |
 
@@ -250,6 +252,28 @@ section. Only present when built with the `typst` feature.
   output. This is the smallest instance of the `zip` + `quick-xml`
   template-injection seam `PROJECT_PLAN.md` §10 names for future OOXML
   patching — including the per-class pptx layout selection two bullets up.
+- html-reveal gets its own brand projection (issue #57):
+  `backends/reveal_brand.rs::brand_css` maps known `BrandSpec.palette`/
+  `.fonts` keys onto reveal.js 4.x's `--r-*` theme CSS custom properties
+  (scoped to `.reveal`), plus a `--brand-<key>` passthrough for every
+  palette key; `logo_html` renders a `position: fixed` `<img>` data-URI
+  overlay from an optional `BrandSpec.logo` (`LogoSpec`: provider key,
+  corner `position`, optional `width`). `pandoc.rs`'s html-reveal arm calls
+  both, writing the results into the render's temp root and wiring them in
+  via `--include-in-header` (a `<style data-brand>` block — also carries the
+  raw contents of the provider's `revealjs/brand.css` key, if present, as an
+  escape hatch for per-class rules like `.reveal section.hero { ... }`) and
+  `--include-after-body` (the logo `<img>`); both are `None`/no-op for an
+  unbranded doc, so output stays byte-identical to before this existed. Base64
+  encoding is hand-rolled in `reveal_brand.rs` rather than pulling in a
+  crate — CSS/HTML generation here is deliberately just string building.
+  Brand fonts are **name-only** for reveal.js (`--r-main-font: <family>`
+  assumes the family is available to the browser) — unlike typst's
+  `ResolvedDoc.fonts` (see below), there's no webfont-file packaging yet;
+  that pairs with #50 if it lands. A `revealjs/brand.css` value that isn't
+  valid UTF-8, or a `logo.key` the provider has no bytes for, each warn via
+  `tracing::warn!` and degrade (skip that piece) rather than failing the
+  render — same treatment as a missing typst layout asset/font.
 - Image-ref rewriter (`images::image_refs`) parses `Tag::Image` via
   pulldown-cmark instead of a regex, so titled images (`![alt](url "title")`),
   angle-bracket URLs (`![alt](<url>)`), and reference-style images
