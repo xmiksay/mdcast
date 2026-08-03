@@ -27,6 +27,14 @@ impl ErrorResponse {
 pub enum ErrorCode {
     /// The body did not parse, or a field is out of range.
     BadRequest,
+    /// No bearer token, a malformed `Authorization` header, or the wrong
+    /// token. Distinct from [`ErrorCode::BadRequest`] because the client's
+    /// remedy is to fix its credentials, not its payload.
+    Unauthorized,
+    /// The request body is larger than the server accepts. Distinct from
+    /// [`ErrorCode::BadRequest`] because retrying the identical request is
+    /// hopeless — the client has to split or shrink the upload.
+    PayloadTooLarge,
     /// The server was built without the feature this target/format needs
     /// (e.g. `html` without `typst-html`), or lacks the `pandoc` binary.
     UnsupportedTarget,
@@ -57,6 +65,8 @@ mod tests {
     fn error_codes_serialize_snake_case() {
         for (code, expected) in [
             (ErrorCode::BadRequest, "\"bad_request\""),
+            (ErrorCode::Unauthorized, "\"unauthorized\""),
+            (ErrorCode::PayloadTooLarge, "\"payload_too_large\""),
             (ErrorCode::UnsupportedTarget, "\"unsupported_target\""),
             (ErrorCode::RenderFailed, "\"render_failed\""),
             (ErrorCode::Internal, "\"internal\""),

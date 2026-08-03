@@ -156,6 +156,51 @@ Backends are still feature-gated modules, never crates. The `Backend` trait
 is still the load-bearing boundary. Both crates share one version, bumped and
 published together (`mdcast-api` first).
 
+### 7.2 The service: `mdcast-server`
+
+Landed as a **binary inside `mdcast`** (`src/bin/mdcast-server/`, `server`
+feature), not a crate — it composes `Registry::render_to_bytes`,
+`AssetProvider` and the `mdcast-api` wire types and adds nothing the library
+needs to know about. Deliberate shape, decided up front:
+
+| Decision | Choice | Why |
+|---|---|---|
+| Trust boundary | Internal / trusted callers | One shared bearer token from `MDCAST_TOKEN`, no user model, no per-caller quota |
+| Request model | **Synchronous** | `POST` blocks, the response body *is* the artifact. No queue, no polling, no `202` — a render is seconds, and a job store is a second source of truth |
+| Assets | Content-addressed, negotiated | Manifest of `key → sha256`; missing blobs come back as one `409`, the caller uploads those and retries |
+| Deployment | Single instance, node-local blob cache | LRU on disk, mtime-ordered — no shared store, no cache coherency problem |
+| Compile limits | **None (deferred)** | See below |
+
+Endpoints — all under `/v1` and bearer-gated except health:
+
+| Method + path | Body → response |
+|---|---|
+| `GET /health` | liveness, unauthenticated |
+| `POST /v1/blobs/check` | `BlobCheckRequest` → `BlobCheckResponse` (skip a doomed render round-trip) |
+| `POST /v1/blobs` | `multipart/form-data`, part name = claimed digest → `204`; server re-hashes every byte |
+| `POST /v1/render` | `RenderMarkdownRequest` → artifact bytes, or `409 MissingBlobsError` |
+| `POST /v1/render/template` | `RenderTemplateRequest` → artifact bytes (`501` for `html` without `typst-html`) |
+
+The whole manifest is checked before any work starts, so a `409` lists *every*
+missing blob — a client that had to discover them one failed render at a time
+is exactly the failure mode this protocol exists to avoid. Content addressing
+carries the rest: a stored blob can never be stale, so there is no
+invalidation protocol and eviction needs no client-visible signal.
+
+**Deferred: no compile time or memory limit.** A caller-supplied typst
+template that loops forever wedges one `spawn_blocking` thread for the life of
+the process — `spawn_blocking` cannot be cancelled, so a `tokio::time::timeout`
+would free the request while leaking the thread, which is worse than nothing
+because it hides the problem. Accepted because the trust boundary is internal
+callers. The trigger to take it: untrusted templates become a requirement, or
+a wedged thread is observed in production. The scope when taken: a `Compiler`
+trait with the compile behind it, and a subprocess implementation that can be
+killed, with `RLIMIT_CPU`/`RLIMIT_AS` set — an additive change at a new seam,
+in keeping with §10.
+
+`mdcast-client` (next) depends on `mdcast-api` plus an HTTP client, speaks
+exactly this protocol, and never links an engine.
+
 ## 8. Delivery plan (ordered by dependency, not calendar)
 
 ### Phase 0 — Skeleton
@@ -187,6 +232,11 @@ Generate all four style assets *from* `brand.toml` (one color change, one edit).
 ### Phase 5 — Composition + integration (deferred / optional)
 Fragment transclusion with cycle detection (only if genuinely needed). `mdcast-mcp` skin so KB/blog/platform can call "render this page as branded PDF."
 **Done when:** the platform can drive exports programmatically.
+
+> **Status:** the integration leg landed early — `mdcast-server` (§7.2) is the
+> "platform can drive exports programmatically" half, over HTTP rather than
+> MCP. `mdcast-client` and any MCP skin sit on top of the same wire protocol.
+> Fragment transclusion remains open and still optional.
 
 ## 9. Sequencing logic
 

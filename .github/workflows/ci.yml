@@ -42,6 +42,12 @@ jobs:
       - name: Test remote-images feature (issue #54's http(s) image fetch)
         run: make test-remote-images
 
+      # Exercises mdcast-server end to end: blob store, auth layer, and both
+      # render routes through the real router (pandoc is installed above, so
+      # the docx route test does not take its skip path).
+      - name: Test server feature (mdcast-server)
+        run: make test-server
+
   # Coverage on release PRs only (release-vX.Y.Z branch, or a
   # chore(release) title) — produced once per release instead of on every
   # merge, since the version-bump PR is the one commit worth a coverage

@@ -55,6 +55,23 @@ typst-html = ["typst", "dep:typst-html", "typst-as-lib/typst-html"]
 # Multi-threaded tokio runtime, needed by the `mdcast` binary's #[tokio::main].
 # Library-only consumers can disable default-features to drop it.
 rt-multi-thread = ["tokio/rt-multi-thread"]
+# The `mdcast-server` binary: an HTTP service speaking `mdcast_api::wire` over
+# the same render pipeline the CLI drives. Off by default — a library consumer
+# should not compile axum. It pulls in the engine features itself because a
+# render service without engines is useless; the bin's `required-features`
+# spells the whole set out again so the manifest reads as the deployment
+# contract it is.
+server = [
+    "pandoc",
+    "typst",
+    "mermaid",
+    "rt-multi-thread",
+    "dep:axum",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:serde_json",
+    "tokio/net",
+]
 # Fetch http(s) image URLs found in markdown through `images::collect_images`
 # instead of leaving them for pandoc to fetch on its own (or, on the typst
 # path, dropping them with a warning — see issue #54). Off by default: no new
@@ -63,6 +80,7 @@ remote-images = ["dep:reqwest"]
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.8", optional = true, features = ["multipart"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
@@ -77,6 +95,8 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
 rust-embed = "8"
 serde = { workspace = true }
 serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+subtle = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "process", "rt", "macros", "time", "io-util"] }
 toml = "0.9"
@@ -90,11 +110,19 @@ zip = { version = "2", optional = true, default-features = false, features = ["d
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Router-level tests drive `mdcast-server`'s axum `Router` through
+# `tower::ServiceExt::oneshot` — no socket, no live server.
+tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "mdcast"
 path = "src/bin/mdcast/main.rs"
 required-features = ["rt-multi-thread"]
+
+[[bin]]
+name = "mdcast-server"
+path = "src/bin/mdcast-server/main.rs"
+required-features = ["server", "pandoc", "typst", "mermaid", "rt-multi-thread"]
 
 [package.metadata.docs.rs]
 all-features = true
