@@ -10,6 +10,17 @@ env:
 jobs:
   # Publish to crates.io on every version tag. Authenticates via crates.io
   # Trusted Publishing (OIDC) — no long-lived registry token in secrets.
+  # (`mdcast-api` and `mdcast-client` each need their *own* trusted publisher
+  # configured on crates.io — a pending publisher per crate, since neither
+  # exists there until its first tagged release. One publisher does not cover
+  # a whole workspace.)
+  #
+  # Three crates, published in dependency order: both `mdcast` and
+  # `mdcast-client` depend on `mdcast-api` by version, so the API crate must
+  # be on the registry first. `cargo publish` blocks until each upload is
+  # available in the index, so every command can rely on the ones before it.
+  # `mdcast-client` deliberately does **not** depend on `mdcast` (see
+  # PROJECT_PLAN.md §7.1) — it goes last only to keep the order stable.
   #
   # No `make verify` re-run here: the tagged commit is a just-merged,
   # CI-green master commit (ci.yml's `test` job already ran on its PR and
@@ -28,14 +39,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify tag matches Cargo.toml version
+      # All three crates inherit `version` from [workspace.package], so this
+      # also proves they are in lockstep.
+      - name: Verify tag matches the workspace version
         run: |
           tag="${GITHUB_REF_NAME#v}"
-          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "mdcast") | .version')"
-          if [ "$tag" != "$version" ]; then
-            echo "Tag v$tag does not match Cargo.toml version $version" >&2
-            exit 1
-          fi
+          for crate in mdcast-api mdcast mdcast-client; do
+            version="$(cargo metadata --no-deps --format-version 1 | jq -r --arg c "$crate" '.packages[] | select(.name == $c) | .version')"
+            if [ "$tag" != "$version" ]; then
+              echo "Tag v$tag does not match $crate version $version" >&2
+              exit 1
+            fi
+          done
 
       - name: Verify tag commit passed CI
         env:
@@ -52,7 +67,17 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish
-        run: cargo publish --locked
+      - name: Publish mdcast-api
+        run: cargo publish --locked -p mdcast-api
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Publish mdcast
+        run: cargo publish --locked -p mdcast
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+
+      - name: Publish mdcast-client
+        run: cargo publish --locked -p mdcast-client
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}

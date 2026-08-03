@@ -716,6 +716,31 @@ Anything the provider returns `None` for falls through to the next layer.
   seven built-in content-shape layouts (pptx has no per-class layout
   selection — see `.claude/CLAUDE.md`'s Known limitations).
 
+## Crates
+
+The repo is a Cargo workspace with three published crates:
+
+| Crate | What it is | Dependencies |
+|---|---|---|
+| `mdcast` | The library, the CLI, and the `mdcast-server` binary (`server` feature) — engines, backends, asset pipeline. The repo root *is* this package. | pandoc/typst engines, tokio, axum, … (feature-gated) |
+| `mdcast-api` | Shared data types (`Target`, `DocMeta`, `BrandSpec`, …) and the HTTP wire protocol the service speaks. | **serde only** |
+| `mdcast-client` | Async client for `mdcast-server`, with the asset negotiation folded in. | `mdcast-api` + `reqwest` — **never `mdcast`** |
+
+`mdcast` depends on `mdcast-api` and re-exports everything it moved there
+from the original paths, so `mdcast::Target`, `mdcast::BrandSpec` and
+`mdcast::DocMeta` keep working — you never need to name `mdcast-api` unless
+you are writing a client that must not compile the engines.
+
+`mdcast-client` is that client. It depends on `mdcast-api` and an HTTP client
+and **never on `mdcast`**, not even with `default-features = false`: calling
+the service should not compile `rust-embed` (which pulls the whole vendored
+reveal.js tree and the reference OOXML documents in through a proc macro),
+`clap`, `typst`, `pulldown-cmark` or pandoc's zip/xml stack into a process
+whose job is to POST some JSON. That is ~100 crates instead of ~330.
+
+All three crates share one version and are published together, `mdcast-api`
+first.
+
 ## Cargo features
 
 ```toml
@@ -728,6 +753,7 @@ remote-images   = []   # fetch http(s) page-body images through collect_images (
 mermaid         = []   # render ```mermaid fences to SVG via mermaid-svg (pure Rust)
 rt-multi-thread = []   # tokio multi-threaded runtime; required by the mdcast binary,
                        # library-only consumers can drop it via default-features = false
+server          = []   # the mdcast-server binary (axum); implies pandoc + typst + mermaid
 ```
 
 Build with only what you need:
@@ -737,6 +763,7 @@ cargo build --no-default-features --features pandoc   # no typst dep tree
 cargo build --no-default-features --features typst    # no pandoc backend
 cargo build --features typst-html                     # render_template_html + --format html
 cargo build --features remote-images                  # fetch remote page-body images (pulls in reqwest)
+cargo build --features server                         # + the mdcast-server binary (see "HTTP service")
 ```
 
 ## Targets
@@ -792,6 +819,198 @@ rendering" above. `TEMPLATE` is an `AssetProvider` key; `--data` is a JSON
 file deserialized into `TemplateDoc.data`. `--format` defaults to `pdf`;
 `html` needs the `typst-html` feature — see "HTML export" above.
 
+## HTTP service (`server` feature)
+
+`mdcast-server` puts the same pipeline behind an HTTP API, so one host owns
+pandoc, typst and the fonts, and everything else just posts markdown. It is
+built for **internal, trusted callers**: a single shared bearer token, a
+single instance, a node-local cache.
+
+```sh
+cargo build --release --features server
+MDCAST_TOKEN=$(openssl rand -hex 32) \
+MDCAST_BLOB_DIR=/var/lib/mdcast/blobs \
+  ./target/release/mdcast-server
+```
+
+The API is **synchronous**: `POST /v1/render` blocks until the artifact exists
+and the response body *is* the artifact. No job ids, no polling.
+
+### Environment
+
+| Variable                  | Default                  | Meaning |
+|---------------------------|--------------------------|---------|
+| `MDCAST_TOKEN`            | **none — startup fails** | Shared bearer token required by every `/v1` route |
+| `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
+| `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Blob cache root (created if missing) |
+| `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget — least-recently-used blobs are evicted past it |
+| `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
+| `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
+
+There is no default token on purpose: a render service that silently accepts
+every request because an env var was forgotten is worse than one that refuses
+to boot.
+
+### Endpoints
+
+| Method + path              | Auth | Request → response |
+|----------------------------|------|--------------------|
+| `GET /health`              | no   | → `ok` (for load balancers and container health checks) |
+| `POST /v1/blobs/check`     | yes  | `BlobCheckRequest` → `BlobCheckResponse` — which digests am I missing? |
+| `POST /v1/blobs`           | yes  | `multipart/form-data`, one part per blob → `204` |
+| `POST /v1/render`          | yes  | `RenderMarkdownRequest` → artifact bytes |
+| `POST /v1/render/template` | yes  | `RenderTemplateRequest` → artifact bytes |
+
+Status codes: `400` malformed request, `401` missing/wrong token, `409`
+missing blobs (see below), `413` body over the limit, `422` the render itself
+failed, `501` this build has no engine/feature for what was asked, `500`
+anything else. Every one of them carries `{"code": …, "message": …}`
+(`ErrorCode` in `mdcast-api`) — except `409`, which has its own shape because
+a client *acts* on it. Internal error text never reaches the client: it is
+logged with an incident id that the response quotes.
+
+### Assets: content-addressed, negotiated
+
+A render request never carries asset bytes. It carries a manifest of
+`asset key → sha256`, using exactly the same asset keys the library uses
+(`img/chart.svg`, `reference/reference.docx`, `typst/layouts/pdf/hero.typ`).
+Keys the manifest does not mention resolve against the server's built-in
+catalog as usual, so overriding one layout does not mean uploading all of
+them.
+
+If the server is missing anything, it answers `409` with **every** missing
+entry at once — never one at a time:
+
+```sh
+TOKEN=…
+DIGEST=$(sha256sum chart.svg | cut -d' ' -f1)
+
+# 1. Render. The server has never seen this chart.
+curl -sS -X POST localhost:8080/v1/render \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"markdown\":\"# Q3\n\n![](img/chart.svg)\",\"target\":\"pdf\",
+       \"assets\":{\"img/chart.svg\":\"$DIGEST\"}}"
+# → 409
+# {"message":"1 asset(s) referenced by the manifest are not on the server; upload them and retry",
+#  "missing":[{"key":"img/chart.svg","digest":"…"}]}
+
+# 2. Upload exactly what was missing. The part name is the claimed digest.
+curl -sS -X POST localhost:8080/v1/blobs \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "$DIGEST=@chart.svg"
+# → 204
+
+# 3. Retry the identical request.
+curl -sS -X POST localhost:8080/v1/render -o q3.pdf \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"markdown\":\"# Q3\n\n![](img/chart.svg)\",\"target\":\"pdf\",
+       \"assets\":{\"img/chart.svg\":\"$DIGEST\"}}"
+# → 200, application/pdf, Content-Disposition: attachment; filename="output.pdf"
+```
+
+`POST /v1/blobs/check` lets a client skip step 1's doomed round-trip when it
+already knows what a render will need.
+
+The server **re-hashes every uploaded byte** and rejects a part whose content
+does not match the digest it was sent under — a caller's hash is never taken
+on trust. Uploads are idempotent (sending a blob twice is a no-op), written
+atomically (temp file + rename, so a crashed upload cannot leave a corrupt
+blob addressable), and evicted least-recently-used past the cache budget.
+Because a blob's name is its content hash, a cached blob can never be stale:
+there is no invalidation protocol, and eviction is invisible — a `409` for
+something uploaded last week just means uploading it again.
+
+`POST /v1/render` takes the same options the CLI's `render` does
+(`html_image_tags`, `mermaid`, `toc_depth`, `layout_assets`, `layout_fonts`),
+and frontmatter in the submitted markdown wins over the request's `meta`
+field. `POST /v1/render/template` is the `render-template` path: the template
+arrives as inline typst source, `data` is raw JSON text that becomes the
+virtual `/data.json`, and sibling files it `#import`s or `#image`s come from
+the manifest. `"format": "html"` needs a server built with `--features
+server,typst-html`; without it the request gets a `501` saying so, never a PDF
+with the wrong content type.
+
+### Known limitations
+
+- **No compile time or memory limit.** A template that loops forever wedges
+  one `spawn_blocking` thread for the life of the process — `spawn_blocking`
+  cannot be cancelled, so a timeout would free the request but not the thread.
+  This is a deliberate deferral given the internal trust boundary; the fix, if
+  it is ever needed, is to put the compile behind a `Compiler` trait and run
+  it in a killable subprocess with rlimits, not to wrap it in a timeout.
+- One instance, one node-local cache. Two instances behind a load balancer
+  would each negotiate their own blobs (correct, just wasteful).
+- The response carries the primary artifact only. No current backend produces
+  extras — html-reveal embeds its resources — but a future one that did would
+  need a container format here.
+
+## HTTP client (`mdcast-client`)
+
+The three `curl` calls above — render, `409`, upload exactly what was missing,
+render again — are what the client does for you. In Rust that whole exchange
+is one `await`:
+
+```toml
+[dependencies]
+mdcast-client = "0.3"
+```
+
+```rust
+use mdcast_client::{AssetBundle, Client, request};
+use mdcast_client::mdcast_api::Target;
+
+let client = Client::builder("http://localhost:8080").token(token).build()?;
+let bundle = AssetBundle::new().with("img/chart.svg", std::fs::read("chart.svg")?);
+let artifact = client
+    .render(request::markdown("# Q3\n\n![](img/chart.svg)", Target::Pdf), &bundle)
+    .await?;
+
+std::fs::write(&artifact.filename, &artifact.bytes)?; // output.pdf
+```
+
+You never compute a sha256, never build an `AssetManifest`, and never write a
+retry loop. Fill an `AssetBundle` with the same asset keys the library uses
+(`img/chart.svg`, `reference/reference.docx`, `typst/layouts/pdf/hero.typ`),
+and the client hashes them, sends the manifest, and — if the server answers
+`409` — uploads **only** the blobs it named before posting the identical
+request again. Warm cache: one request. Cold: three.
+
+The retry happens **exactly once**. A second `409` for the same digests means
+eviction is racing the retry or the server is misbehaving, so it surfaces as
+`Error::BlobsStillMissing` rather than spinning.
+
+### The pessimistic path
+
+If you would rather never discover a large upload mid-render, ask first:
+
+```rust
+client.preflight(&bundle).await?;  // POST /v1/blobs/check, upload what's missing
+let artifact = client.render(request, &bundle).await?;  // cannot 409
+```
+
+`preflight` returns the digests it uploaded. `check` and `upload` are exposed
+separately if you want to drive the two halves yourself.
+
+### Errors
+
+`mdcast_client::Error` is a `thiserror` enum you can match on, not a string:
+
+| Variant | When |
+|---|---|
+| `Transport` | DNS, connect, TLS, timeout — the request never completed |
+| `Unauthorized` | `401` — fix the token, not the payload |
+| `PayloadTooLarge` | `413` — over `MDCAST_MAX_UPLOAD_BYTES`; retrying as-is is hopeless |
+| `BlobsStillMissing` | a `409` that survived the upload and the retry |
+| `Server { status, code, message }` | the server's own `ErrorResponse` — the `ErrorCode` (`render_failed`, `unsupported_target`, `internal`, …) is carried through, not flattened |
+| `UnexpectedStatus` / `InvalidResponse` | something other than mdcast answered, or its body did not decode |
+| `MissingAsset` / `UnknownDigest` / `DigestMismatch` | the bundle cannot satisfy its own manifest — caught locally, before a round trip, while the asset *key* is still known |
+
+Other notes: the client is async only (no blocking wrapper), a
+`reqwest::Client` can be injected via `.http_client(…)` so it uses your own
+connection pool and timeouts, `render_template` is the `render-template`
+equivalent, and `Artifact` carries `bytes`, `filename` and `content_type` from
+the response headers.
+
 ## Development
 
 All day-to-day commands are wrapped in the `Makefile` — run a bare `make` to
@@ -799,18 +1018,20 @@ list them:
 
 | Target                  | What it does                                                    |
 |-------------------------|-----------------------------------------------------------------|
-| `make build` / `release`| Debug / release build (default features = pandoc + typst + mermaid) |
+| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | All feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images) |
-| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html + remote-images features) |
-| `make test`             | Full suite, default features (unit + integration)               |
+| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images, +server, +server/typst-html) |
+| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images + server features) |
+| `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
-| `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
+| `make test-integration` | `tests/` suites: engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) + `mdcast-client`'s HTTP flow against a `wiremock` socket |
 | `make test-typst-html`  | Tests for the off-by-default `typst-html` feature (HTML export, issue #53) |
 | `make test-remote-images` | Tests for the off-by-default `remote-images` feature (http(s) image fetch, issue #54) |
+| `make test-server`      | Tests for the off-by-default `server` feature — blob store, auth, and router-level tests of every endpoint |
 | `make coverage`         | Coverage report: `lcov.info` + terminal summary (needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)); CI runs it only on release PRs |
-| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` + `test-remote-images` — what CI's `test` job runs on every PR and again on merge to `master` |
+| `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` + `test-remote-images` + `test-server` — what CI's `test` job runs on every PR and again on merge to `master` |
 | `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
+| `make run-server`       | Run `mdcast-server` locally (`MDCAST_TOKEN=dev-token`, blobs under `target/`) |
 
 `CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.
 
@@ -833,6 +1054,8 @@ change at a seam that already exists (see [`PROJECT_PLAN.md` §10](https://githu
 - Brand projection (one `brand.toml` colour change → propagated to all
   outputs).
 - Caching (content-hashed diagram + output cache).
+- Compile time/memory limits in `mdcast-server` — see "HTTP service → Known
+  limitations" above for why a timeout is not the fix.
 - HTML export for the markdown pipeline's `pdf` target (issue #53 only adds
   it to `render_template` — the data-driven entry point). The markdown path
   has per-class layouts and a `md_to_typst` conversion step neither of which

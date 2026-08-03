@@ -8,14 +8,48 @@ that first if you need the *why*. This file is the operational summary.
 
 ## Layout
 
-Single crate. Engine dependencies are gated behind Cargo features (no
-sub-crates).
+Cargo workspace with three members. The root `Cargo.toml` is **both** the
+`[workspace]` root and the `mdcast` `[package]` — `src/`, `tests/`,
+`embedded/` and `examples/` never moved. Shared metadata (version, edition,
+license, authors, repository, homepage) lives in `[workspace.package]` and
+all three crates inherit it, so they release in lockstep.
+
+Engine dependencies stay gated behind Cargo features inside `mdcast` — the
+split is drawn at *data*, not at engines. `mdcast-api` exists so
+`mdcast-client` can speak the HTTP protocol without compiling `rust-embed`
+(the whole vendored `embedded/` tree via proc macro), `clap`, `toml`,
+`pulldown-cmark`, `tempfile` and a fat `tokio` for a few structs. See
+`PROJECT_PLAN.md` §7.1.
 
 ```
+mdcast-api/           serde-only shared types + wire protocol; no anyhow/tokio/IO
+├─ src/lib.rs         module wiring + flat re-exports
+├─ src/doc.rs         Target, DocMeta
+├─ src/brand.rs       BrandSpec, LogoSpec, LogoPosition, AutoLayout, AutoRule, ShapePredicate
+├─ src/digest.rs      Digest (validated lowercase-hex sha256) + DigestError
+├─ src/manifest.rs    AssetManifest — asset key → Digest
+└─ src/wire/
+   ├─ mod.rs          protocol overview (manifest → 409 → upload → retry)
+   ├─ render.rs       RenderMarkdownRequest/RenderOptions, RenderTemplateRequest/TemplateFormat
+   ├─ blob.rs         BlobCheckRequest/Response, MissingBlob, MissingBlobsError (the 409 body)
+   └─ error.rs        ErrorResponse + ErrorCode (every other 4xx/5xx: bad_request,
+                      unauthorized, payload_too_large, unsupported_target,
+                      render_failed, internal)
+
+mdcast-client/        async client for mdcast-server; mdcast-api + reqwest, NEVER mdcast
+├─ src/lib.rs         crate docs + module wiring + flat re-exports
+├─ src/client.rs      Client/ClientBuilder, render()/render_template(), the 409→upload→retry-once flow
+├─ src/blobs.rs       check()/upload()/preflight() + upload-set selection (impl Client, split for file size)
+├─ src/bundle.rs      AssetBundle (key → bytes) + sha256() + manifest()/bind()
+├─ src/artifact.rs    Artifact (bytes/filename/content_type) + Content-Disposition parsing
+├─ src/request.rs     request::markdown()/template() — constructors for the wire bodies
+├─ src/error.rs       Error (thiserror) + from_status() status/body → typed error
+└─ tests/negotiation.rs  wiremock-backed HTTP flow tests (dev-dependency only)
+
 src/
-├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports
+├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports (incl. mdcast_api's Target/DocMeta)
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
-├─ brand.rs           BrandSpec + AutoLayout config + LogoSpec/LogoPosition (issue #57)
+├─ brand.rs           re-export of mdcast_api::brand + from_toml() (the anyhow/toml loader)
 ├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
 ├─ image_format.rs    sniff() + mime_type() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
 ├─ images/
@@ -41,10 +75,23 @@ src/
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() — user template + data → PDF/HTML, no markdown
-└─ bin/mdcast/
-   ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
-   ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
-   └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
+├─ bin/mdcast/
+│  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
+│  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
+│  └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
+└─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
+   ├─ main.rs           wiring only: config → blob store → Registry → router → axum::serve
+   ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
+   ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
+   ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
+   ├─ blobs/
+   │  ├─ store.rs       BlobStore/BlobWriter — sharded, atomic (tmp+rename), mtime LRU, sha256-verified
+   │  └─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
+   └─ routes/
+      ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
+      ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
+      ├─ render.rs      POST /v1/render — resolve_doc()/provider_stack(), the CLI pipeline minus the filesystem
+      └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest, `typst-html` gated Html arm
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
@@ -54,6 +101,17 @@ embedded/             rust-embed source — keys mirror these paths
 
 ## Architectural seams (don't violate)
 
+- **Pure data lives in `mdcast-api`, behaviour stays in `mdcast`.** A type
+  that is just fields (`Target`, `DocMeta`, `BrandSpec` & co.) belongs in
+  `mdcast-api`; anything that touches IO, `anyhow`, `toml` or `tokio` stays
+  here and operates on the re-exported type — that is why the `brand.toml`
+  loader is a free function `brand::from_toml` instead of
+  `BrandSpec::from_toml`, and why `frontmatter::extract` did not move.
+  `mdcast` re-exports every moved type from its original path
+  (`mdcast::Target`, `mdcast::BrandSpec`, `mdcast::DocMeta`, …) and also
+  `pub use mdcast_api;`, so nothing downstream has to name the new crate.
+  Adding a dependency to `mdcast-api` other than `serde` defeats the point
+  of the crate.
 - **`ResolvedDoc` is the IR.** Never pandoc's AST. Single load-bearing schema.
 - **`Backend` trait per target.** Async (`BoxFuture`), bytes-first —
   `render_to_bytes(doc, assets) -> RenderedArtifact` is the one method every
@@ -79,6 +137,33 @@ embedded/             rust-embed source — keys mirror these paths
 - **Classifier rule order:** explicit class > content-shape > positional
   (first/last) > default. Content-shape predicates are a closed enum in v1
   (`SingleH1Only`, `SingleImageOnly`, `SingleBlockquoteOnly`, `Empty`).
+- **The HTTP service is a binary, not a library module.** `mdcast-server`
+  lives entirely under `src/bin/mdcast-server/` behind the `server` feature:
+  it composes `Registry::render_to_bytes`, `AssetProvider` and the wire types,
+  and adds nothing the library needs to know about. Consequences worth
+  remembering: nothing outside the bin can `use` its modules (so its
+  end-to-end tests are router-level `#[cfg(test)]` tests via
+  `tower::ServiceExt::oneshot`, not files under `tests/`), and the wire
+  protocol itself stays in `mdcast-api` where `mdcast-client` can reach it
+  without compiling an engine.
+- **`mdcast-client` must never depend on `mdcast`.** Not with
+  `default-features = false`, not at all — that dependency edge is the entire
+  reason the workspace exists (`PROJECT_PLAN.md` §7.1). Its permitted
+  dependencies are `mdcast-api`, `reqwest` (default features off, +
+  `rustls-tls`/`json`/`multipart`, matching the root manifest), `serde`,
+  `serde_json`, `sha2`, `bytes` and `thiserror`; `wiremock` + `tokio` are
+  dev-only. Verify with `cargo tree -p mdcast-client -e normal` — `mdcast`,
+  `rust-embed`, `clap`, `typst` and `pulldown-cmark` must all be absent (~100
+  crates, against `mdcast`'s ~329). Anything the client needs from the
+  protocol goes into `mdcast-api`, never into a new `mdcast` dependency.
+- **The client owns the negotiation; the caller never hashes anything.**
+  `AssetBundle` is `key → bytes`; the client computes every sha256, builds the
+  `AssetManifest`, and on `409` uploads exactly the blobs the server named.
+  **Exactly one retry** — a second `409` for the same digests is
+  `Error::BlobsStillMissing`, never a loop, because the only causes are
+  eviction racing the retry or a server bug and spinning would hide both. The
+  pessimistic path (`check` → `upload` → render) is exposed as
+  `Client::preflight` but is not the default.
 - **`render_template`/`render_template_html` are a parallel entry point, not
   a second IR.** `backends/typst/template.rs`'s `TemplateDoc`/
   `render_template`/`render_template_html` bypass `ResolvedDoc` entirely (no
@@ -110,16 +195,29 @@ happens to mirror them.
 Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
+Feature flags belong to `mdcast` alone, so every target passing `--features`
+is scoped `-p mdcast`; the rest run `--workspace` so `mdcast-api`'s and
+`mdcast-client`'s tests and lints are covered too (neither has features, so
+neither needs an axis of its own).
+
 ```
-make build              # cargo build — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
-make check-all          # all cargo check feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images)
-make test                # cargo test — ~200 tests; unit suite runs in <1s
-make test-typst-html     # cargo test --features typst-html (off-by-default HTML export, issue #53)
-make test-remote-images  # cargo test --features remote-images (off-by-default http(s) image fetch, issue #54)
-make lint                # cargo fmt --check + cargo clippy --all-targets -- -D warnings (+ typst-html, + remote-images)
+make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
+make check-all          # cargo check -p mdcast-api + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
+make test                # cargo test --workspace — ~266 tests (32 mdcast-api, 41 mdcast-client); unit suite runs in <1s
+make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
+make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 44 mdcast-server tests
+make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
-make verify              # lint + check-all + test + test-typst-html + test-remote-images — the pre-"done" gate
+make verify              # lint + check-all + test + test-typst-html + test-remote-images + test-server — the pre-"done" gate
+make run-server          # MDCAST_TOKEN=dev-token MDCAST_BLOB_DIR=target/mdcast-server/blobs cargo run --bin mdcast-server
 ```
+
+The `server` feature is off by default and pulls in `pandoc`, `typst`,
+`mermaid` and `rt-multi-thread` itself (a render service without engines is
+useless) plus axum/sha2/subtle; the `[[bin]] mdcast-server`
+`required-features` spells the whole set out again, so `cargo build` without
+the feature simply skips the binary.
 
 `tests/render_smoke.rs` drives the real engines (in-process typst, subprocess
 pandoc) to a genuine artifact per `Target` — the rest of the suite is unit
@@ -130,7 +228,7 @@ stays green with or without it installed locally.
 `.github/workflows/ci.yml` has two jobs, tuned so no commit is fully
 compiled/tested more than twice end-to-end (once on its PR, once on merge —
 issue #68): `test` runs `make lint`, `make check-all`, `make test`,
-`make test-typst-html`, and `make test-remote-images` on every pull request
+`make test-typst-html`, `make test-remote-images`, and `make test-server` on every pull request
 *and* every push to `master`, with `pandoc` installed so the OOXML/revealjs
 smoke tests actually exercise pandoc in CI. `coverage` runs `make coverage`
 (cargo-llvm-cov) only on release PRs — head branch matching `release-v*` or
@@ -143,11 +241,17 @@ the release PR's coverage snapshot already covers the commit that lands.
 push: it checks the tag against the `Cargo.toml` version, confirms the tag
 commit already has a successful `test` check run (via the GitHub API — the
 tagged commit is a just-merged, CI-green `master` commit, so there's nothing
-to re-verify), then `cargo publish --locked` authenticated via crates.io
-Trusted Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry
-token secret, and no `make verify` re-run (`cargo publish` performs its own
-verification build). Release flow: bump the version, merge, tag `vX.Y.Z`,
-push the tag.
+to re-verify), then publishes **`mdcast-api` → `mdcast` → `mdcast-client`**
+(both dependants name `mdcast-api` by version; `cargo publish` blocks until
+each upload lands in the index), authenticated via crates.io Trusted
+Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry token
+secret, and no `make verify` re-run (`cargo publish` performs its own
+verification build). All three crates take their version from
+`[workspace.package]`, so one bump covers them and the tag check asserts it
+for each. `mdcast-api` and `mdcast-client` each need their **own** (pending)
+trusted publisher configured on crates.io before their first release — one
+publisher does not cover a workspace. Release flow: bump the workspace
+version, merge, tag `vX.Y.Z`, push the tag.
 
 ## Run
 
@@ -173,6 +277,74 @@ code block. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
 `AssetProvider` key for the main `.typ` file, `--data` a JSON file deserialized
 into `TemplateDoc.data`. See README's "Data-driven template rendering"
 section. Only present when built with the `typst` feature.
+
+## HTTP service (`server` feature)
+
+```
+cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
+```
+
+| Env var                   | Default                  | Meaning |
+|---------------------------|--------------------------|---------|
+| `MDCAST_TOKEN`            | **none — startup fails** | Shared bearer token for every `/v1` route |
+| `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
+| `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Node-local blob cache root |
+| `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget; LRU eviction runs after each upload |
+| `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Ceiling for **every** request body, not just uploads |
+| `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
+
+| Endpoint | Auth | Success | Failure |
+|---|---|---|---|
+| `GET /health` | no | `200 ok` | — |
+| `POST /v1/blobs/check` | yes | `200 BlobCheckResponse` | `400`/`401`/`413` |
+| `POST /v1/blobs` | yes | `204` | `400` (bad digest / hash mismatch), `401`, `413` |
+| `POST /v1/render` | yes | `200` artifact bytes | `409 MissingBlobsError`, `400`, `401`, `413`, `422`, `500` |
+| `POST /v1/render/template` | yes | `200` artifact bytes | as above, plus `501` for `format: "html"` without `typst-html` |
+
+Protocol: a render request carries an `AssetManifest` (asset key → sha256);
+the whole manifest is checked up front, and a request naming blobs the server
+lacks gets **one** `409` listing every one of them. Upload is
+`multipart/form-data`, one part per blob, the part *name* being its claimed
+digest — the server re-hashes every byte and rejects a mismatch, so a caller's
+digest is never trusted. Content addressing means a stored blob can't be
+stale: there is no invalidation protocol and eviction is invisible (a `409`
+just means "upload it again").
+
+Response bodies are the artifact itself, with `Content-Type` from the target
+and `Content-Disposition: attachment; filename="output.<ext>"` from
+`RenderedArtifact::filename`. Errors are `ErrorResponse { code, message }`
+(`409` alone has its own shape); internal error text never leaves the process
+— it goes to `tracing::error!` under an incident id the response quotes.
+
+## HTTP client (`mdcast-client`)
+
+The counterpart crate: everything above, typed, with the negotiation folded
+into one call. No feature flags, async only (`reqwest`'s async client — a
+blocking wrapper is deliberately not offered).
+
+```rust
+let client = Client::builder("http://mdcast.internal:8080").token(token).build()?;
+let bundle = AssetBundle::new().with("img/chart.svg", bytes);
+let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?;
+```
+
+- `AssetBundle` — `key → bytes`, `.with()`/`.insert()`; `manifest()` hashes
+  every entry, `bind()` either fills an empty caller manifest from the bundle
+  or verifies a caller-supplied one against it (missing key → `MissingAsset`,
+  wrong digest → `DigestMismatch`, both *before* a round trip, since a `409`
+  can only name a digest).
+- `Client::render` / `render_template` — post, and on `409` upload exactly the
+  named blobs (one multipart request, part name = digest) and post the
+  identical body again. Once. `Client::check`/`upload`/`preflight` are the
+  pessimistic path.
+- `Artifact { bytes, filename, content_type }` — headers win; the fallbacks
+  are derived (`output.<Target::extension()>`, `application/octet-stream`) and
+  a filename carrying a path separator is discarded rather than sanitised.
+- `Error` — `Config`, `Transport`, `Unauthorized` (401), `PayloadTooLarge`
+  (413), `BlobsStillMissing` (the 409 that survived the retry),
+  `Server { status, code: ErrorCode, message }` (the code is carried through,
+  never flattened), `UnexpectedStatus`, `InvalidResponse`, `MissingAsset`,
+  `UnknownDigest`, `DigestMismatch`.
 
 ## Adding a new layout class
 
@@ -448,6 +620,30 @@ section. Only present when built with the `typst` feature.
   variant itself is `#[cfg(feature = "typst-html")]`, so clap simply
   rejects `--format html` as an unknown value when the binary wasn't built
   with the feature).
+- **`mdcast-server` has no compile time or memory limit.** A caller-supplied
+  typst template that loops forever wedges one `spawn_blocking` thread for the
+  life of the process: `spawn_blocking` cannot be cancelled, so a timeout
+  wrapped around the `.await` would free the request without reclaiming the
+  thread. This is a deliberate deferral, not an oversight — the trust boundary
+  is internal callers, and the real fix is a design change rather than a flag:
+  put the compile behind a `Compiler` trait and run it in a killable
+  subprocess with rlimits (`RLIMIT_CPU`/`RLIMIT_AS`). Take it when untrusted
+  templates become a requirement, or when a wedged thread is actually observed.
+  Do **not** paper over it with a `tokio::time::timeout`.
+- `mdcast-server`'s template route deliberately does *not* layer
+  `EmbeddedAssets` under the request's blobs, unlike the markdown route.
+  `render_template` discovers sibling files by listing the template's own
+  directory, and the submitted source is served from the provider root
+  (`main.typ`) so relative `#import`s resolve against manifest keys — layering
+  the embedded catalog underneath would register the entire vendored reveal.js
+  tree and the reference documents as typst virtual files on every request.
+  The markdown route layers them normally, so an unmentioned
+  `reference/reference.docx` or layout still resolves to the built-in.
+- Blob eviction can race a render: a blob present at manifest resolution may be
+  evicted before the render reads it, in which case `BlobAssets::get` returns
+  `None` and the asset degrades exactly as an unsupplied key does (warn +
+  skip). Content addressing makes recovery trivial — upload and retry — so no
+  lock or refcount is worth the complexity at a single instance.
 
 ## Conventions
 
@@ -469,8 +665,13 @@ section. Only present when built with the `typst` feature.
 
 - Don't write `std::fs` calls in `src/backends/*`. Go through `AssetProvider`.
 - Don't reach for pandoc's AST. `ResolvedDoc` is the only IR.
-- Don't split into a workspace. Use Cargo features. (User preference: see
-  `feedback_crate_structure` in auto-memory.)
+- Don't split an *engine* into its own crate. Backends are feature-gated
+  modules, full stop. The workspace has exactly three members and the two
+  extra ones exist for the client side of the HTTP protocol (`mdcast-api` is
+  data, `mdcast-client` is transport) — see `PROJECT_PLAN.md` §7.1 for what
+  overturned the original single-crate rule and what still holds of it.
+- Don't add a `mdcast` dependency to `mdcast-client`, and don't add a
+  blocking wrapper to it — it is async-only on purpose.
 - Don't add a `--remove-pandoc` flag or similar. Pandoc stays for DOCX/PPTX
   indefinitely — no mature Rust OOXML alternative exists; documented in
   `PROJECT_PLAN.md` §10.

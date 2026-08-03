@@ -30,12 +30,15 @@ The value of this tool is *not* the format conversion — that's a solved proble
 | Quarto | **Rejected** | Heavyweight Deno-based external tool, not embeddable as a Rust library. (Note: it does *not* require Jupyter — but the embeddability/weight objection stands.) |
 | Diagrams | **Existing in-house Mermaid→SVG (Rust)** | Already built; faster and better-integrated than Kroki. Integrated as a Rust pre-processing step, not a pandoc Lua filter — so it survives any future engine change. |
 | Internal representation | **Own `ResolvedDoc` type** | Never pandoc's JSON AST. This single decision keeps pandoc removable. |
+| Crate structure | ~~**Single crate** (no sub-crates)~~ → **workspace: `mdcast` + `mdcast-api`** | *Changed — see §7.1.* The original call stands for the engines: backends stay feature-gated modules inside `mdcast`, not crates. What overturned it is the HTTP service: an out-of-process client would otherwise compile `rust-embed` (the whole vendored `embedded/` tree through a proc macro), `clap`, `tempfile`, `toml`, `regex`, `pulldown-cmark`, `futures` and a fat `tokio` just to name a few request structs. |
 | Engine coupling | **Hidden behind one `Backend` trait** | Core never knows which engine a target uses. Swapping the PDF path later = one new impl + a registry change. |
 | Scripting / filters | **Lua now (minimal), Rhai later** | Lua filters are a pandoc feature and are throwaway. Push permanent logic into Rust pre/post steps. Rhai (Rust-native, sandboxable) is for the future own-transformer phase. |
 
 ## 4. Scope
 
 **In scope (v1):** the five exporters, brand-spec single source of truth, Mermaid→SVG integration, version-pinned engines, reproducible container image, CLI.
+
+**Added to scope:** an **HTTP service** (`mdcast-server`, a bin inside the `mdcast` crate behind a `server` feature) and a **standalone client** (`mdcast-client`), speaking the wire protocol in `mdcast-api`. This is the "platform can drive exports programmatically" leg of Phase 5, pulled forward: one host owns pandoc/typst/fonts, everyone else posts markdown. Assets are negotiated by content digest rather than shipped on every request — the client sends a manifest, the server answers `409` with the digests it lacks, the client uploads those and retries.
 
 **Explicitly out of scope (v1), addable later at existing seams:**
 
@@ -83,7 +86,7 @@ Dispatch is a registry of `Box<dyn Backend>` keyed by `Target`. **Rule:** no pan
 
 ## 7. Project structure
 
-Single crate. Backends live in modules; engine dependencies are gated behind Cargo features so users can build with only the engines they need.
+Backends live in modules; engine dependencies are gated behind Cargo features so users can build with only the engines they need. The sketch below is the original single-crate plan — still accurate for everything under `src/`.
 
 ```
 mdcast/
@@ -114,6 +117,120 @@ typst  = []   # gates the typst-invoking backend module + its deps
 ```
 
 > Stays a single crate. Split into a workspace only if a backend grows non-trivial native deps that pollute the build for users who don't need it — the load-bearing boundary is the `Backend` trait, not the crate count.
+
+### 7.1 Amendment: the workspace split (HTTP service)
+
+**The rule above no longer holds in full.** The repo is now a Cargo workspace:
+the root `Cargo.toml` is both `[workspace]` and the `mdcast` `[package]`
+(`src/`, `tests/`, `embedded/`, `examples/` did not move), plus two members:
+
+```
+Cargo.toml       [workspace] + [package] mdcast  — engines, CLI, and the server bin
+mdcast-api/      serde-only shared types + HTTP wire protocol
+mdcast-client/   async client for the service — mdcast-api + reqwest, never mdcast
+```
+
+The trigger was *not* the one the rule anticipated — no backend grew native
+deps. It was the direction of dependency for the HTTP service: a
+`mdcast-client` that depended on `mdcast` would compile `rust-embed` (and
+with it the entire vendored `embedded/` tree — reveal.js plus the reference
+OOXML documents — through a proc macro), `clap`, `tempfile`, `toml`,
+`regex`, `pulldown-cmark`, `futures`, `tracing-subscriber` and a fat `tokio`,
+in order to name a handful of request structs. That is the cost the original
+rule exists to prevent; it just arrives from the consumer side rather than
+the backend side.
+
+So the split is drawn at data, not at engines:
+
+- **`mdcast-api`** — `Target`, `DocMeta`, `BrandSpec` (+ `LogoSpec`,
+  `LogoPosition`, `AutoLayout`, `AutoRule`, `ShapePredicate`), the asset
+  manifest/digest types, and the request/response bodies. **serde and
+  nothing else.** No `anyhow`, no `tokio`, no `toml`, no IO.
+- **`mdcast`** — unchanged in shape. It depends on `mdcast-api` and
+  re-exports every moved type from its original path, so `mdcast::Target`,
+  `mdcast::BrandSpec` and friends still resolve. The loaders that need IO or
+  `anyhow` stayed behind (`brand::from_toml`, `frontmatter::extract`).
+- **`mdcast-client`** — depends on `mdcast-api` plus `reqwest`, `serde`,
+  `serde_json`, `sha2`, `bytes` and `thiserror`. **Never on `mdcast`**, not
+  even with `default-features = false`; that edge is the whole reason for the
+  split, so it is a verified property, not an intention — `cargo tree -p
+  mdcast-client -e normal` is ~100 crates with no `mdcast`, `rust-embed`,
+  `clap`, `typst` or `pulldown-cmark` in it, against `mdcast`'s ~329.
+
+Backends are still feature-gated modules, never crates. The `Backend` trait
+is still the load-bearing boundary. All three crates share one version,
+bumped and published together, in dependency order (`mdcast-api` first) —
+each with its own crates.io trusted publisher.
+
+### 7.2 The service: `mdcast-server`
+
+Landed as a **binary inside `mdcast`** (`src/bin/mdcast-server/`, `server`
+feature), not a crate — it composes `Registry::render_to_bytes`,
+`AssetProvider` and the `mdcast-api` wire types and adds nothing the library
+needs to know about. Deliberate shape, decided up front:
+
+| Decision | Choice | Why |
+|---|---|---|
+| Trust boundary | Internal / trusted callers | One shared bearer token from `MDCAST_TOKEN`, no user model, no per-caller quota |
+| Request model | **Synchronous** | `POST` blocks, the response body *is* the artifact. No queue, no polling, no `202` — a render is seconds, and a job store is a second source of truth |
+| Assets | Content-addressed, negotiated | Manifest of `key → sha256`; missing blobs come back as one `409`, the caller uploads those and retries |
+| Deployment | Single instance, node-local blob cache | LRU on disk, mtime-ordered — no shared store, no cache coherency problem |
+| Compile limits | **None (deferred)** | See below |
+
+Endpoints — all under `/v1` and bearer-gated except health:
+
+| Method + path | Body → response |
+|---|---|
+| `GET /health` | liveness, unauthenticated |
+| `POST /v1/blobs/check` | `BlobCheckRequest` → `BlobCheckResponse` (skip a doomed render round-trip) |
+| `POST /v1/blobs` | `multipart/form-data`, part name = claimed digest → `204`; server re-hashes every byte |
+| `POST /v1/render` | `RenderMarkdownRequest` → artifact bytes, or `409 MissingBlobsError` |
+| `POST /v1/render/template` | `RenderTemplateRequest` → artifact bytes (`501` for `html` without `typst-html`) |
+
+The whole manifest is checked before any work starts, so a `409` lists *every*
+missing blob — a client that had to discover them one failed render at a time
+is exactly the failure mode this protocol exists to avoid. Content addressing
+carries the rest: a stored blob can never be stale, so there is no
+invalidation protocol and eviction needs no client-visible signal.
+
+**Deferred: no compile time or memory limit.** A caller-supplied typst
+template that loops forever wedges one `spawn_blocking` thread for the life of
+the process — `spawn_blocking` cannot be cancelled, so a `tokio::time::timeout`
+would free the request while leaking the thread, which is worse than nothing
+because it hides the problem. Accepted because the trust boundary is internal
+callers. The trigger to take it: untrusted templates become a requirement, or
+a wedged thread is observed in production. The scope when taken: a `Compiler`
+trait with the compile behind it, and a subprocess implementation that can be
+killed, with `RLIMIT_CPU`/`RLIMIT_AS` set — an additive change at a new seam,
+in keeping with §10.
+
+### 7.3 The client: `mdcast-client`
+
+The third crate, and the one that makes §7.1's split pay off: it depends on
+`mdcast-api` plus an HTTP client, speaks exactly the protocol above, and never
+links an engine.
+
+Its job is to make the blob negotiation invisible. A caller fills an
+`AssetBundle` with `key → bytes` — the same flat `AssetProvider` keys used
+everywhere else — and calls `render`. The client hashes every asset, builds
+the `AssetManifest`, posts the request, and on `409` uploads exactly the blobs
+the server named (one multipart request, part name = digest) before posting
+the identical body again.
+
+| Decision | Choice | Why |
+|---|---|---|
+| Dependency on `mdcast` | **Forbidden** | The one constraint the crate exists for — see §7.1 |
+| Sync/async | **Async only** | `reqwest`'s async client; a blocking wrapper would be a second API to keep honest for no new capability |
+| Hashing | **The client's job** | A caller that has to compute sha256 or hand-build a manifest has been handed the protocol, not a client |
+| Retry on `409` | **Exactly once** | A second `409` for the same digests means eviction is racing the retry or the server is broken; a loop would turn a bug into a hang, so it becomes a distinct typed error |
+| Strategy | **Optimistic by default** | One request warm, three cold. `check`/`preflight` are exposed for callers that would rather pay a guaranteed round trip than discover a large upload mid-render |
+| Bundle completeness | **Checked locally** | The server can only answer `409` with a digest; a manifest key with no bytes behind it fails before the round trip, where the *key* is still known |
+| Errors | **`thiserror`, not flattened** | Transport, `401`, `413`, a surviving `409`, and the server's own `ErrorResponse` with its `ErrorCode` intact are all separate variants a caller can match on |
+
+Test double is `wiremock` as a dev-dependency — it never reaches a consumer's
+tree, and the real `mdcast-server` binary is deliberately not started: these
+tests are about what the client does with the statuses the protocol defines,
+and pulling an engine in to produce them would defeat the point of the crate.
 
 ## 8. Delivery plan (ordered by dependency, not calendar)
 
@@ -146,6 +263,13 @@ Generate all four style assets *from* `brand.toml` (one color change, one edit).
 ### Phase 5 — Composition + integration (deferred / optional)
 Fragment transclusion with cycle detection (only if genuinely needed). `mdcast-mcp` skin so KB/blog/platform can call "render this page as branded PDF."
 **Done when:** the platform can drive exports programmatically.
+
+> **Status:** the integration leg landed early and is now complete —
+> `mdcast-server` (§7.2) is the "platform can drive exports programmatically"
+> half over HTTP rather than MCP, and `mdcast-client` (§7.3) is the calling
+> half, so a consumer embeds one crate and gets branded exports without
+> pandoc, typst or fonts anywhere near its build. Any MCP skin sits on the
+> same wire protocol. Fragment transclusion remains open and still optional.
 
 ## 9. Sequencing logic
 

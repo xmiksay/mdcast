@@ -242,7 +242,7 @@ async fn load_brand(brand: Option<&std::path::Path>) -> Result<BrandSpec> {
             let s = tokio::fs::read_to_string(p)
                 .await
                 .with_context(|| format!("read {}", p.display()))?;
-            BrandSpec::from_toml(&s).with_context(|| format!("parse {}", p.display()))
+            mdcast::brand::from_toml(&s).with_context(|| format!("parse {}", p.display()))
         }
         None => Ok(BrandSpec::default()),
     }

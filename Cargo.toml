@@ -1,19 +1,41 @@
-[package]
-name = "mdcast"
+# The repo root is both the workspace root and the `mdcast` package: the
+# engine-bearing crate stays exactly where it was, and the two extra members
+# are the ones a client needs without an engine — `mdcast-api` (serde-only
+# shared types + HTTP wire protocol) and `mdcast-client` (the typed client for
+# it, which must never depend on `mdcast`).
+[workspace]
+members = ["mdcast-api", "mdcast-client"]
+
+[workspace.package]
 version = "0.3.0"
 edition = "2024"
-description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
 license = "MIT OR Apache-2.0"
 authors = ["Martin Miksanik <miksanik@gmail.com>"]
-readme = "README.md"
 repository = "https://github.com/xmiksay/mdcast"
 homepage = "https://github.com/xmiksay/mdcast"
+
+[workspace.dependencies]
+mdcast-api = { version = "0.3.0", path = "mdcast-api" }
+serde = { version = "1", features = ["derive"] }
+
+[package]
+name = "mdcast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
+readme = "README.md"
 documentation = "https://docs.rs/mdcast"
 keywords = ["markdown", "pandoc", "typst", "slides", "document"]
 categories = ["text-processing", "template-engine", "command-line-utilities"]
 exclude = [
     ".claude/",
     "PROJECT_PLAN.md",
+    "mdcast-api/",
+    "mdcast-client/",
     "examples/dump_pandoc_input.rs",
     "examples/dump_typst_driver.rs",
 ]
@@ -36,6 +58,23 @@ typst-html = ["typst", "dep:typst-html", "typst-as-lib/typst-html"]
 # Multi-threaded tokio runtime, needed by the `mdcast` binary's #[tokio::main].
 # Library-only consumers can disable default-features to drop it.
 rt-multi-thread = ["tokio/rt-multi-thread"]
+# The `mdcast-server` binary: an HTTP service speaking `mdcast_api::wire` over
+# the same render pipeline the CLI drives. Off by default — a library consumer
+# should not compile axum. It pulls in the engine features itself because a
+# render service without engines is useless; the bin's `required-features`
+# spells the whole set out again so the manifest reads as the deployment
+# contract it is.
+server = [
+    "pandoc",
+    "typst",
+    "mermaid",
+    "rt-multi-thread",
+    "dep:axum",
+    "dep:sha2",
+    "dep:subtle",
+    "dep:serde_json",
+    "tokio/net",
+]
 # Fetch http(s) image URLs found in markdown through `images::collect_images`
 # instead of leaving them for pandoc to fetch on its own (or, on the typst
 # path, dropping them with a warning — see issue #54). Off by default: no new
@@ -44,9 +83,11 @@ remote-images = ["dep:reqwest"]
 
 [dependencies]
 anyhow = "1"
+axum = { version = "0.8", optional = true, features = ["multipart"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+mdcast-api = { workspace = true }
 mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = { version = "0.41", optional = true }
@@ -55,8 +96,10 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
     "rustls-tls",
 ] }
 rust-embed = "8"
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { version = "1", optional = true }
+sha2 = { version = "0.10", optional = true }
+subtle = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "process", "rt", "macros", "time", "io-util"] }
 toml = "0.9"
@@ -70,11 +113,19 @@ zip = { version = "2", optional = true, default-features = false, features = ["d
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# Router-level tests drive `mdcast-server`'s axum `Router` through
+# `tower::ServiceExt::oneshot` — no socket, no live server.
+tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "mdcast"
 path = "src/bin/mdcast/main.rs"
 required-features = ["rt-multi-thread"]
+
+[[bin]]
+name = "mdcast-server"
+path = "src/bin/mdcast-server/main.rs"
+required-features = ["server", "pandoc", "typst", "mermaid", "rt-multi-thread"]
 
 [package.metadata.docs.rs]
 all-features = true

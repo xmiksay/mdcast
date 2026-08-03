@@ -1,0 +1,39 @@
+[package]
+name = "mdcast-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Async HTTP client for mdcast-server — content-addressed asset negotiation handled for you"
+documentation = "https://docs.rs/mdcast-client"
+keywords = ["markdown", "mdcast", "document", "http", "client"]
+categories = ["text-processing", "api-bindings"]
+
+# The one rule this crate exists to enforce: **no `mdcast` dependency**, not
+# even with `default-features = false`. Embedding the client must not compile
+# `rust-embed` (which pulls the vendored reveal.js tree and the reference
+# OOXML documents in through a proc macro), `clap`, `tempfile`, `toml`,
+# `regex`, `pulldown-cmark`, `futures`, `tracing-subscriber`, `typst`, or
+# pandoc's zip/xml stack. See PROJECT_PLAN.md §7.1.
+[dependencies]
+bytes = "1"
+mdcast-api = { workspace = true }
+# Same reqwest configuration the root manifest uses: no default features, so
+# no native-tls and no OS certificate plumbing.
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "json",
+    "multipart",
+] }
+serde = { workspace = true }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[dev-dependencies]
+# The request/retry flow is tested against a real socket serving canned
+# responses — dev-only, so nothing here reaches a consumer's tree.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+wiremock = "0.6"

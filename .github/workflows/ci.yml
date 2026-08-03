@@ -27,6 +27,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # `lint`, `check-all` and `test` are workspace-scoped, so every member is
+      # built, linted and tested here: `mdcast`, `mdcast-api`, and
+      # `mdcast-client` — whose HTTP-flow tests run against a wiremock socket,
+      # with no server binary involved.
       - name: Lint (fmt + clippy)
         run: make lint
 
@@ -41,6 +45,12 @@ jobs:
 
       - name: Test remote-images feature (issue #54's http(s) image fetch)
         run: make test-remote-images
+
+      # Exercises mdcast-server end to end: blob store, auth layer, and both
+      # render routes through the real router (pandoc is installed above, so
+      # the docx route test does not take its skip path).
+      - name: Test server feature (mdcast-server)
+        run: make test-server
 
   # Coverage on release PRs only (release-vX.Y.Z branch, or a
   # chore(release) title) — produced once per release instead of on every
