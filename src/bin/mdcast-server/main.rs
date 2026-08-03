@@ -56,7 +56,11 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     warn_if_unauthenticated(&config);
-    let store = BlobStore::open(config.blob_dir.clone(), config.max_cache_bytes).await?;
+    let store = BlobStore::new(
+        config.max_cache_bytes,
+        config.cache_lives,
+        config.max_cache_lives,
+    )?;
     let state = Arc::new(AppState {
         store: Arc::new(store),
         registry: Registry::with_defaults(),
@@ -68,9 +72,10 @@ async fn main() -> Result<()> {
         .with_context(|| format!("bind {}", config.bind))?;
     tracing::info!(
         bind = %config.bind,
-        blob_dir = %config.blob_dir.display(),
         max_cache_bytes = config.max_cache_bytes,
         max_upload_bytes = config.max_upload_bytes,
+        cache_lives = config.cache_lives,
+        max_cache_lives = config.max_cache_lives,
         "mdcast-server listening"
     );
     axum::serve(listener, app).await.context("serve http")

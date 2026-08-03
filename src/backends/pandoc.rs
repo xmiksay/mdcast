@@ -32,6 +32,8 @@
 //! `--include-after-body`. See `reveal_assets::brand_style_file`/
 //! `::brand_logo_file` and the README's "Branding reveal.js decks" section.
 
+use std::path::Path;
+
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use tempfile::TempDir;
@@ -98,9 +100,8 @@ impl Backend for PandocBackend {
                 _ => unreachable!(),
             };
             let reference_path = if let Some((key, name)) = reference {
-                if let Some(bytes) = assets.get(key).await? {
-                    let p = root.join(name);
-                    tokio::fs::write(&p, &bytes).await?;
+                let p = root.join(name);
+                if materialise(assets, key, &p).await? {
                     Some(p)
                 } else {
                     tracing::warn!(
@@ -211,6 +212,42 @@ impl Backend for PandocBackend {
                 extras: vec![],
             })
         })
+    }
+}
+
+/// Materialise `key`'s bytes at `dest`. If the provider can offer a real
+/// path for `key` (a `BlobStore`-backed mirror, see `mdcast-server`),
+/// hard-link it into `dest` — inode-based, so it's safe even if the
+/// provider's own cache entry is evicted afterward, and it avoids copying
+/// potentially large bytes pandoc will read once and discard. Falls back to
+/// fetching bytes and writing them on any link error (e.g. `EXDEV` when the
+/// provider's path and `dest` don't share a filesystem) or when the
+/// provider has no path to offer at all. Returns `false` only when the
+/// provider has nothing for `key` under either path.
+async fn materialise(assets: &dyn AssetProvider, key: &str, dest: &Path) -> Result<bool> {
+    if let Some(source) = assets.path(key).await? {
+        match hard_link(&source, dest).await {
+            Ok(()) => return Ok(true),
+            Err(e) => {
+                tracing::warn!(key, error = %e, "hard-linking asset failed; falling back to a copy")
+            }
+        }
+    }
+    match assets.get(key).await? {
+        Some(bytes) => {
+            tokio::fs::write(dest, &bytes).await?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+async fn hard_link(source: &Path, dest: &Path) -> std::io::Result<()> {
+    let source = source.to_path_buf();
+    let dest = dest.to_path_buf();
+    match tokio::task::spawn_blocking(move || std::fs::hard_link(&source, &dest)).await {
+        Ok(result) => result,
+        Err(join_err) => Err(std::io::Error::other(join_err)),
     }
 }
 

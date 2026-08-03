@@ -3,10 +3,9 @@ export CARGO_BUILD_JOBS ?= 4
 .DEFAULT_GOAL := help
 .PHONY: help build release check check-all fmt lint test test-unit test-integration test-typst-html test-remote-images test-server coverage verify demo run-server clean
 
-# Dev defaults for `make run-server` — an exported environment variable wins.
+# Dev default for `make run-server` — an exported environment variable wins.
 # The token is a placeholder for local runs; a deployment must set its own.
 MDCAST_TOKEN ?= dev-token
-MDCAST_BLOB_DIR ?= target/mdcast-server/blobs
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -78,8 +77,8 @@ demo: build ## Render the golden fixture to target/demo/ (html-reveal + pdf)
 	./target/debug/mdcast render tests/golden/cover-deck.md --target html-reveal --out target/demo/cover-deck.html
 	./target/debug/mdcast render tests/golden/cover-deck.md --target pdf --out target/demo/cover-deck.pdf
 
-run-server: ## Run the HTTP service (override MDCAST_TOKEN / MDCAST_BIND / MDCAST_BLOB_DIR)
-	MDCAST_TOKEN=$(MDCAST_TOKEN) MDCAST_BLOB_DIR=$(MDCAST_BLOB_DIR) \
+run-server: ## Run the HTTP service (override MDCAST_TOKEN / MDCAST_BIND / MDCAST_MAX_CACHE_BYTES)
+	MDCAST_TOKEN=$(MDCAST_TOKEN) \
 	  cargo run -p mdcast --features server --bin mdcast-server
 
 clean: ## Remove build artifacts

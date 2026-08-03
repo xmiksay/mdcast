@@ -3,9 +3,9 @@
 //!
 //! Upload is `multipart/form-data`, one blob per part, the part *name* being
 //! the sha256 the caller claims for it — so a client can satisfy a whole `409`
-//! in a single request. Each part is streamed straight to disk through the
-//! hasher; the claimed digest is never trusted, and a part whose bytes hash to
-//! something else is rejected without ever becoming addressable.
+//! in a single request. Each part is streamed straight into memory through
+//! the hasher; the claimed digest is never trusted, and a part whose bytes
+//! hash to something else is rejected without ever becoming addressable.
 
 use std::sync::Arc;
 
@@ -29,7 +29,7 @@ pub async fn check(
     let request = json_body(body)?;
     let mut missing = Vec::new();
     for digest in request.digests {
-        if !state.store.contains(&digest).await {
+        if !state.store.contains(&digest) {
             missing.push(digest);
         }
     }
@@ -44,20 +44,17 @@ pub async fn upload(
     while let Some(mut field) = multipart.next_field().await.map_err(multipart_error)? {
         let claimed = field_digest(field.name())?;
 
-        let mut writer = state.store.begin_write().await?;
+        let mut writer = state.store.begin_write();
         while let Some(chunk) = field.chunk().await.map_err(multipart_error)? {
-            writer.write(&chunk).await?;
+            writer.write(&chunk);
         }
-        writer.finish(&claimed).await?;
+        writer.finish(&claimed)?;
         stored += 1;
     }
 
+    // Eviction (if any) already ran inline as part of each `finish()` above
+    // — there is no separate post-upload sweep to run.
     tracing::info!(stored, "accepted blob upload");
-    // Eviction runs after the upload rather than before: the blobs that just
-    // arrived are the most recently used ones, so they are the last to go.
-    if let Err(e) = state.store.evict().await {
-        tracing::warn!(error = format!("{e:#}"), "blob eviction failed");
-    }
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -92,7 +89,6 @@ impl From<WriteError> for ApiError {
             WriteError::DigestMismatch { claimed, actual } => ApiError::BadRequest(format!(
                 "uploaded bytes hash to {actual}, not the claimed {claimed}"
             )),
-            WriteError::Io(e) => ApiError::Internal(e),
         }
     }
 }

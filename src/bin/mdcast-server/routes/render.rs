@@ -252,14 +252,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_provider_stack_prefers_diagrams_then_blobs_then_embedded() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            crate::blobs::BlobStore::open(dir.path().to_path_buf(), 1 << 20)
-                .await
-                .unwrap(),
-        );
+        let store = Arc::new(crate::blobs::BlobStore::new(1 << 20, 3, 32).unwrap());
         let digest = crate::blobs::store::sha256(b"OVERRIDDEN");
-        store.put(&digest, b"OVERRIDDEN").await.unwrap();
+        store.put(&digest, b"OVERRIDDEN").unwrap();
         let manifest = mdcast::mdcast_api::AssetManifest::from_iter([(
             "reference/reference.docx".to_string(),
             digest,

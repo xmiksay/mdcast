@@ -1,4 +1,4 @@
-//! Content-addressed blob cache on local disk.
+//! Content-addressed blob cache, held entirely in memory.
 //!
 //! A blob's name *is* the sha256 of its bytes, which is what makes the whole
 //! upload negotiation work: a cached blob can never be stale, so there is no
@@ -10,232 +10,354 @@
 //! - **Nothing is trusted.** Every uploaded byte stream is hashed as it
 //!   arrives and compared against the digest it was claimed under; a mismatch
 //!   never becomes addressable.
-//! - **Writes are atomic.** Bytes land in `tmp/`, and only a fully written,
-//!   digest-verified file is `rename`d into place. A crashed upload can leave
-//!   a temp file (wiped at startup), never a corrupt blob under a real digest.
-//! - **Recency lives in the filesystem.** `get` touches the file's mtime and
-//!   eviction sorts by it, so the LRU order needs no sidecar index and
-//!   survives a restart.
+//! - **Eviction is second-chance, not evict-oldest.** Each entry carries a
+//!   `lives` counter, incremented (capped) on every hit and decremented when
+//!   it's touched as an eviction candidate; it's only actually dropped once
+//!   drained to zero. Budget can transiently overshoot `max_bytes` while
+//!   heavily-reused entries keep surviving — this self-corrects as later
+//!   inserts trigger further sweeps and drain reluctant entries by one life
+//!   each time. Pinned entries are never touched by eviction at all, so a
+//!   permanent overshoot from `pinned_bytes` alone exceeding `max_bytes`
+//!   never self-corrects (a `pin()` call warns loudly if this happens).
+//! - **A blob evicted mid-render is not a hazard.** `Bytes` is `Arc`-backed:
+//!   once `get()` hands back a clone, that clone owns its own reference and
+//!   stays valid regardless of what the cache does to its own entry
+//!   afterward. The one place eviction *could* be a hazard — a subprocess
+//!   backend (pandoc) holding a real filesystem path into this store — is
+//!   handled by `mirror_path()` handing out a **hard link**, not a path into
+//!   the cache's own bookkeeping: once linked, the caller's copy is safe no
+//!   matter what happens to the mirror's own directory entry afterward.
 
-use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use lru::LruCache;
 use mdcast::mdcast_api::Digest;
 use sha2::{Digest as _, Sha256};
-use tokio::fs;
-use tokio::io::AsyncWriteExt;
+use tempfile::TempDir;
 
-/// Sub-directory holding partial uploads. Three characters, so it can never
-/// collide with a two-hex-character shard directory.
-const TMP_DIR: &str = "tmp";
+struct Entry {
+    bytes: Bytes,
+    /// Remaining eviction-survival chances. Incremented (capped at
+    /// `max_lives`) on a hit, decremented when touched as an eviction
+    /// candidate, dropped at zero.
+    lives: u32,
+    /// Whether a hard-link source file for this digest exists under
+    /// `mirror_root` yet. Populated lazily, on the first `mirror_path()`
+    /// call for this digest.
+    mirrored: bool,
+    /// Permanently exempt from eviction until `unpin()` or process exit.
+    pinned: bool,
+}
+
+struct Inner {
+    // Capacity is effectively unbounded by count — eviction is driven
+    // entirely by `total_bytes` vs `max_bytes`, not by the crate's own
+    // count-based capacity.
+    cache: LruCache<Digest, Entry>,
+    total_bytes: u64,
+    pinned_bytes: u64,
+}
 
 pub struct BlobStore {
-    root: PathBuf,
+    inner: Mutex<Inner>,
     max_bytes: u64,
+    start_lives: u32,
+    max_lives: u32,
+    /// Scratch directory holding one file per digest actually materialised
+    /// via `mirror_path()` — not a copy of the whole cache, only what a
+    /// subprocess backend has actually asked to hard-link.
+    mirror_root: TempDir,
 }
 
 impl BlobStore {
-    /// Open (creating if needed) the store under `root`. Partial uploads left
-    /// by a previous run are discarded: they are unreferenced by definition,
-    /// since a temp file is never named by digest.
-    pub async fn open(root: PathBuf, max_bytes: u64) -> Result<Self> {
-        let tmp = root.join(TMP_DIR);
-        fs::create_dir_all(&root)
-            .await
-            .with_context(|| format!("create blob dir {}", root.display()))?;
-        if fs::metadata(&tmp).await.is_ok() {
-            fs::remove_dir_all(&tmp)
-                .await
-                .with_context(|| format!("clear stale uploads in {}", tmp.display()))?;
-        }
-        fs::create_dir_all(&tmp)
-            .await
-            .with_context(|| format!("create upload dir {}", tmp.display()))?;
-        Ok(Self { root, max_bytes })
+    pub fn new(max_bytes: u64, start_lives: u32, max_lives: u32) -> Result<Self> {
+        let mirror_root = TempDir::new().context("create blob mirror scratch dir")?;
+        Ok(Self {
+            inner: Mutex::new(Inner {
+                cache: LruCache::unbounded(),
+                total_bytes: 0,
+                pinned_bytes: 0,
+            }),
+            max_bytes,
+            start_lives,
+            max_lives,
+            mirror_root,
+        })
     }
 
-    /// `root/<first two hex chars>/<digest>` — sharded so a large cache does
+    /// `root/<first two hex chars>/<digest>` — sharded so a large mirror does
     /// not put a hundred thousand entries in one directory.
-    pub fn path_for(&self, digest: &Digest) -> PathBuf {
+    fn mirror_path_for(&self, digest: &Digest) -> PathBuf {
         let hex = digest.as_str();
-        self.root.join(&hex[..2]).join(hex)
+        self.mirror_root.path().join(&hex[..2]).join(hex)
     }
 
-    pub async fn contains(&self, digest: &Digest) -> bool {
-        fs::metadata(self.path_for(digest)).await.is_ok()
+    /// Pure existence check — does not affect recency or lives, matching
+    /// `/v1/blobs/check` semantics (checking isn't using).
+    pub fn contains(&self, digest: &Digest) -> bool {
+        self.inner.lock().unwrap().cache.peek(digest).is_some()
     }
 
-    /// Read a blob, refreshing its LRU position. A blob evicted between a
-    /// manifest check and this call reads back as `None` rather than an error
-    /// — the render then treats it as an unresolved asset, exactly as it would
-    /// a key nobody ever uploaded.
-    pub async fn get(&self, digest: &Digest) -> Result<Option<Bytes>> {
-        let path = self.path_for(digest);
-        match fs::read(&path).await {
-            Ok(bytes) => {
-                touch(&path).await;
-                Ok(Some(Bytes::from(bytes)))
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e).with_context(|| format!("read blob {digest}")),
-        }
+    /// Read a blob, refreshing its LRU position and growing its eviction
+    /// resistance. `Bytes` is refcounted, so this is a cheap clone, not a
+    /// copy — and the returned handle stays valid even if this entry is
+    /// evicted from the cache afterward.
+    pub fn get(&self, digest: &Digest) -> Option<Bytes> {
+        let mut inner = self.inner.lock().unwrap();
+        let max_lives = self.max_lives;
+        let entry = inner.cache.get_mut(digest)?;
+        entry.lives = (entry.lives + 1).min(max_lives);
+        Some(entry.bytes.clone())
     }
 
     /// Start a streaming write. The blob becomes addressable only when
     /// [`BlobWriter::finish`] verifies its digest.
-    pub async fn begin_write(&self) -> Result<BlobWriter<'_>> {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let name = format!(
-            "{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        );
-        let path = self.root.join(TMP_DIR).join(name);
-        let file = fs::File::create(&path)
-            .await
-            .with_context(|| format!("create upload file {}", path.display()))?;
-        Ok(BlobWriter {
+    pub fn begin_write(&self) -> BlobWriter<'_> {
+        BlobWriter {
             store: self,
-            path,
-            file,
+            buf: Vec::new(),
             hasher: Sha256::new(),
-            published: false,
-        })
+        }
     }
 
-    /// Convenience wrapper for callers holding the whole blob in memory. Test
+    /// Convenience wrapper for callers holding the whole blob already. Test
     /// only — the upload route streams, and nothing else writes blobs.
     #[cfg(test)]
-    pub async fn put(&self, claimed: &Digest, bytes: &[u8]) -> Result<(), WriteError> {
-        let mut writer = self.begin_write().await.map_err(WriteError::Io)?;
-        writer.write(bytes).await.map_err(WriteError::Io)?;
-        writer.finish(claimed).await
+    pub fn put(&self, claimed: &Digest, bytes: &[u8]) -> Result<(), WriteError> {
+        let mut writer = self.begin_write();
+        writer.write(bytes);
+        writer.finish(claimed)
     }
 
-    /// Delete least-recently-used blobs until the store fits in its budget.
-    /// Called after an upload; returns the number of bytes freed.
-    ///
-    /// The whole store is walked each time. That is deliberate: a node-local
-    /// cache holds thousands of files, not millions, and an index would be one
-    /// more thing to keep consistent with the filesystem across crashes.
-    pub async fn evict(&self) -> Result<u64> {
-        let (mut total, mut entries) = self.walk().await?;
-        if total <= self.max_bytes {
-            return Ok(0);
+    /// Insert a finished, digest-verified blob, evicting as needed to stay
+    /// within `max_bytes` (best-effort — see the module doc comment on soft
+    /// overshoot).
+    fn insert(&self, digest: Digest, bytes: Bytes) {
+        let len = bytes.len() as u64;
+        if len > self.max_bytes {
+            tracing::warn!(
+                %digest,
+                len,
+                max_bytes = self.max_bytes,
+                "blob exceeds the whole cache budget; serving this render without caching it"
+            );
+            return;
         }
 
-        entries.sort_by_key(|(modified, _, _)| *modified);
-        let mut freed = 0;
-        for (_, len, path) in entries {
-            if total <= self.max_bytes {
+        let mut inner = self.inner.lock().unwrap();
+        // Content addressing guarantees identical bytes for the same
+        // digest, so a re-upload is normally a same-size no-op — but handle
+        // the general case anyway, and preserve `lives`/`mirrored`/`pinned`
+        // rather than resetting them: re-inserting an already-pinned
+        // predefined asset must not silently un-pin it.
+        if let Some(entry) = inner.cache.get_mut(&digest) {
+            let old_len = entry.bytes.len() as u64;
+            let was_pinned = entry.pinned;
+            entry.bytes = bytes;
+            inner.total_bytes = inner.total_bytes - old_len + len;
+            if was_pinned {
+                inner.pinned_bytes = inner.pinned_bytes - old_len + len;
+            }
+        } else {
+            inner.cache.push(
+                digest,
+                Entry {
+                    bytes,
+                    lives: self.start_lives,
+                    mirrored: false,
+                    pinned: false,
+                },
+            );
+            inner.total_bytes += len;
+        }
+        self.evict_locked(&mut inner);
+    }
+
+    /// Second-chance eviction sweep: walk least-recently-used first,
+    /// skipping pinned entries outright and decrementing everyone else's
+    /// `lives`, only actually removing an entry once its lives reach zero.
+    /// Stops as soon as budget is met, or once every candidate has been
+    /// touched once (soft overshoot — see the module doc comment).
+    fn evict_locked(&self, inner: &mut Inner) {
+        if inner.total_bytes <= self.max_bytes {
+            return;
+        }
+        // `lru`'s iteration order is most-recently-used first; walk it
+        // reversed to touch the least-recently-used candidate first.
+        let candidates: Vec<Digest> = inner.cache.iter().rev().map(|(k, _)| k.clone()).collect();
+        let mut freed = 0u64;
+        for digest in candidates {
+            if inner.total_bytes <= self.max_bytes {
                 break;
             }
-            match fs::remove_file(&path).await {
-                Ok(()) => {
-                    total -= len;
-                    freed += len;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "evicting blob failed")
-                }
-            }
-        }
-        tracing::info!(
-            freed,
-            remaining = total,
-            "evicted least-recently-used blobs"
-        );
-        Ok(freed)
-    }
-
-    /// Every stored blob as `(mtime, size, path)`, plus the total size.
-    async fn walk(&self) -> Result<(u64, Vec<(SystemTime, u64, PathBuf)>)> {
-        let mut total = 0;
-        let mut entries = Vec::new();
-        let mut shards = fs::read_dir(&self.root)
-            .await
-            .with_context(|| format!("scan blob dir {}", self.root.display()))?;
-        while let Some(shard) = shards.next_entry().await? {
-            if shard.file_name() == TMP_DIR || !shard.file_type().await?.is_dir() {
+            let Some(entry) = inner.cache.peek_mut(&digest) else {
+                continue; // shouldn't happen mid-sweep, but never panic on it
+            };
+            if entry.pinned {
                 continue;
             }
-            let mut files = fs::read_dir(shard.path()).await?;
-            while let Some(file) = files.next_entry().await? {
-                let Ok(meta) = file.metadata().await else {
-                    continue; // evicted by a concurrent request mid-walk
-                };
-                if !meta.is_file() {
-                    continue;
+            entry.lives = entry.lives.saturating_sub(1);
+            if entry.lives > 0 {
+                continue;
+            }
+            let Some((_, entry)) = inner.cache.pop_entry(&digest) else {
+                continue;
+            };
+            let len = entry.bytes.len() as u64;
+            inner.total_bytes -= len;
+            freed += len;
+            if entry.mirrored {
+                let path = self.mirror_path_for(&digest);
+                if let Err(e) = std::fs::remove_file(&path) {
+                    tracing::warn!(path = %path.display(), error = %e, "evicting blob mirror failed");
                 }
-                total += meta.len();
-                entries.push((
-                    meta.modified().unwrap_or(UNIX_EPOCH),
-                    meta.len(),
-                    file.path(),
-                ));
             }
         }
-        Ok((total, entries))
+        if freed > 0 {
+            tracing::info!(
+                freed,
+                remaining = inner.total_bytes,
+                "evicted least-recently-used blobs"
+            );
+        }
+    }
+
+    /// Mark an already-cached digest permanently exempt from eviction.
+    /// Returns `false` if the digest isn't present — a caller must insert
+    /// (e.g. via a completed upload) before pinning it.
+    ///
+    /// No production caller exists yet — this is the primitive a future
+    /// prefill routine (issue #72) will pin predefined assets through, kept
+    /// deliberately independent of that not-yet-written ingestion loop. See
+    /// `store_tests.rs` for coverage in the meantime.
+    #[allow(dead_code)]
+    pub fn pin(&self, digest: &Digest) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.cache.peek_mut(digest) else {
+            return false;
+        };
+        if !entry.pinned {
+            entry.pinned = true;
+            inner.pinned_bytes += entry.bytes.len() as u64;
+        }
+        if inner.pinned_bytes > self.max_bytes {
+            tracing::warn!(
+                pinned_bytes = inner.pinned_bytes,
+                max_bytes = self.max_bytes,
+                "pinned blobs alone exceed the cache budget; raise MDCAST_MAX_CACHE_BYTES or reduce the pinned set"
+            );
+        }
+        true
+    }
+
+    /// Release a digest's pin. Returns `false` if the digest isn't present.
+    #[allow(dead_code)] // see `pin`'s doc comment
+    pub fn unpin(&self, digest: &Digest) -> bool {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = inner.cache.peek_mut(digest) else {
+            return false;
+        };
+        if entry.pinned {
+            entry.pinned = false;
+            inner.pinned_bytes -= entry.bytes.len() as u64;
+        }
+        true
+    }
+
+    #[allow(dead_code)] // see `pin`'s doc comment
+    pub fn pinned_bytes(&self) -> u64 {
+        self.inner.lock().unwrap().pinned_bytes
+    }
+
+    /// A real filesystem path holding this digest's bytes, suitable for
+    /// hard-linking into a subprocess backend's own temp dir. Lazily
+    /// materialises the mirror file on first call for a digest; returns
+    /// `None` if the digest isn't cached — mirrors are entirely derived
+    /// from and subordinate to RAM residency, so there's no "mirror and
+    /// cache disagree" question to get wrong.
+    ///
+    /// The actual write happens off the async runtime via `spawn_blocking`
+    /// (it's real disk I/O, sized by the whole blob), and `mirrored` is only
+    /// set *after* the write is durably in place — not before — so a
+    /// concurrent caller can never observe `mirrored` and hard-link a file
+    /// that hasn't finished being written yet. Two concurrent first-calls
+    /// for the same digest both write (via `tempfile`'s own unique naming,
+    /// so their tmp files never collide) and persist to the same final
+    /// path; since content addressing guarantees identical bytes, whichever
+    /// persist wins is harmless.
+    pub async fn mirror_path(&self, digest: &Digest) -> Result<Option<PathBuf>> {
+        let bytes = {
+            let mut inner = self.inner.lock().unwrap();
+            let max_lives = self.max_lives;
+            let Some(entry) = inner.cache.get_mut(digest) else {
+                return Ok(None);
+            };
+            if entry.mirrored {
+                return Ok(Some(self.mirror_path_for(digest)));
+            }
+            entry.lives = (entry.lives + 1).min(max_lives);
+            entry.bytes.clone()
+        };
+
+        let final_path = self.mirror_path_for(digest);
+        let dest = final_path.clone();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let parent = dest
+                .parent()
+                .context("mirror path always has a shard parent")?;
+            std::fs::create_dir_all(parent).context("create blob mirror shard dir")?;
+            let mut tmp =
+                tempfile::NamedTempFile::new_in(parent).context("create blob mirror tmp file")?;
+            std::io::Write::write_all(&mut tmp, &bytes).context("write blob mirror tmp file")?;
+            tmp.persist(&dest).context("publish blob mirror file")?;
+            Ok(())
+        })
+        .await
+        .context("blob mirror write task panicked")??;
+
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(entry) = inner.cache.get_mut(digest) {
+            entry.mirrored = true;
+        }
+        // Else: this digest was evicted between the write above and here.
+        // The mirror file we just wrote is now orphaned — acceptable
+        // (rare, and content-addressed, so it's harmless garbage rather
+        // than stale/wrong data); it just won't be cleaned up by eviction
+        // since eviction only knows about entries still in the cache.
+        Ok(Some(final_path))
     }
 }
 
-/// A blob being written: bytes go to a temp file and through a hasher at the
-/// same time, so verification costs no extra pass over the data.
+/// A blob being written: bytes are hashed as they arrive and buffered in
+/// memory — there is nothing to clean up on drop, since nothing outside the
+/// buffer itself was ever touched.
 pub struct BlobWriter<'a> {
     store: &'a BlobStore,
-    path: PathBuf,
-    file: fs::File,
+    buf: Vec<u8>,
     hasher: Sha256,
-    published: bool,
 }
 
 impl BlobWriter<'_> {
-    pub async fn write(&mut self, chunk: &[u8]) -> Result<()> {
+    pub fn write(&mut self, chunk: &[u8]) {
         self.hasher.update(chunk);
-        self.file.write_all(chunk).await.context("write blob chunk")
+        self.buf.extend_from_slice(chunk);
     }
 
-    /// Verify the accumulated hash against `claimed` and, only if they match,
-    /// publish the blob under its digest with an atomic rename.
-    pub async fn finish(mut self, claimed: &Digest) -> Result<(), WriteError> {
-        self.file.flush().await.map_err(io("flush blob"))?;
-        // Cloned rather than consumed: the `Drop` impl below forbids moving a
-        // field out of `self`.
-        let actual = Digest::from_sha256(self.hasher.clone().finalize().into());
+    /// Verify the accumulated hash against `claimed` and, only if they
+    /// match, insert the blob into the cache under its digest.
+    pub fn finish(self, claimed: &Digest) -> Result<(), WriteError> {
+        let actual = Digest::from_sha256(self.hasher.finalize().into());
         if &actual != claimed {
             return Err(WriteError::DigestMismatch {
                 claimed: claimed.clone(),
                 actual,
             });
         }
-
-        let final_path = self.store.path_for(claimed);
-        if let Some(parent) = final_path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .map_err(io("create blob shard dir"))?;
-        }
-        // Re-uploading an existing blob overwrites it with byte-identical
-        // content, which is what makes the route idempotent.
-        fs::rename(&self.path, &final_path)
-            .await
-            .map_err(io("publish blob"))?;
-        self.published = true;
+        self.store.insert(claimed.clone(), Bytes::from(self.buf));
         Ok(())
-    }
-}
-
-impl Drop for BlobWriter<'_> {
-    /// A rejected or abandoned upload must not leave its temp file behind. The
-    /// unlink is synchronous because `Drop` cannot await; it is a single
-    /// syscall on a file this task just wrote, so it will not stall the
-    /// runtime.
-    fn drop(&mut self) {
-        if !self.published {
-            let _ = std::fs::remove_file(&self.path);
-        }
     }
 }
 
@@ -243,35 +365,7 @@ impl Drop for BlobWriter<'_> {
 pub enum WriteError {
     /// The bytes do not hash to the digest they were uploaded under. Always
     /// the caller's fault, and safe to report in full.
-    DigestMismatch {
-        claimed: Digest,
-        actual: Digest,
-    },
-    Io(anyhow::Error),
-}
-
-fn io(what: &'static str) -> impl Fn(std::io::Error) -> WriteError {
-    move |e| WriteError::Io(anyhow::Error::new(e).context(what))
-}
-
-/// Refresh a blob's LRU position. Best-effort: a store on a read-only or
-/// `noatime`-ish mount still serves renders, it just evicts in a worse order.
-async fn touch(path: &Path) {
-    let owned = path.to_path_buf();
-    let touched = tokio::task::spawn_blocking(move || {
-        std::fs::File::options()
-            .write(true)
-            .open(&owned)?
-            .set_modified(SystemTime::now())
-    })
-    .await;
-    match touched {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::debug!(path = %path.display(), error = %e, "touching blob mtime failed; LRU order may drift")
-        }
-        Err(e) => tracing::debug!(error = %e, "blob mtime touch task failed"),
-    }
+    DigestMismatch { claimed: Digest, actual: Digest },
 }
 
 /// sha256 of a whole slice — the one-shot counterpart of [`BlobWriter`]'s

@@ -73,6 +73,7 @@ server = [
     "dep:sha2",
     "dep:subtle",
     "dep:serde_json",
+    "dep:lru",
     "tokio/net",
 ]
 # Fetch http(s) image URLs found in markdown through `images::collect_images`
@@ -87,6 +88,7 @@ axum = { version = "0.8", optional = true, features = ["multipart"] }
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+lru = { version = "0.18", optional = true }
 mdcast-api = { workspace = true }
 mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }

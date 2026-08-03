@@ -13,6 +13,7 @@
 //! caller learns about every missing blob in one `409` instead of discovering
 //! them one failed render at a time.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -37,7 +38,7 @@ impl BlobAssets {
     ) -> Result<Self, Vec<MissingBlob>> {
         let mut missing = Vec::new();
         for (key, digest) in manifest.entries() {
-            if !store.contains(digest).await {
+            if !store.contains(digest) {
                 missing.push(MissingBlob {
                     key: key.to_string(),
                     digest: digest.clone(),
@@ -54,12 +55,11 @@ impl BlobAssets {
 
 impl AssetProvider for BlobAssets {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
-        Box::pin(async move {
-            let Some(digest) = self.manifest.get(key) else {
-                return Ok(None); // not declared: fall through to the layer below
-            };
-            self.store.get(digest).await
-        })
+        let result = self
+            .manifest
+            .get(key)
+            .and_then(|digest| self.store.get(digest));
+        Box::pin(async move { Ok(result) })
     }
 
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
@@ -72,6 +72,15 @@ impl AssetProvider for BlobAssets {
             .collect();
         Box::pin(async move { Ok(keys) })
     }
+
+    fn path<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<PathBuf>>> {
+        Box::pin(async move {
+            let Some(digest) = self.manifest.get(key) else {
+                return Ok(None); // not declared: fall through to the layer below
+            };
+            self.store.mirror_path(digest).await
+        })
+    }
 }
 
 #[cfg(test)]
@@ -79,20 +88,15 @@ mod tests {
     use super::super::store::sha256;
     use super::*;
 
-    async fn store(dir: &tempfile::TempDir) -> Arc<BlobStore> {
-        Arc::new(
-            BlobStore::open(dir.path().to_path_buf(), 1 << 20)
-                .await
-                .unwrap(),
-        )
+    fn store() -> Arc<BlobStore> {
+        Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap())
     }
 
     #[tokio::test]
     async fn resolve_reports_every_missing_entry_at_once() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir).await;
+        let store = store();
         let present = sha256(b"present");
-        store.put(&present, b"present").await.unwrap();
+        store.put(&present, b"present").unwrap();
 
         let manifest = AssetManifest::from_iter([
             ("img/here.png".to_string(), present),
@@ -112,10 +116,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_resolved_manifest_serves_its_keys_and_only_its_keys() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir).await;
+        let store = store();
         let digest = sha256(b"<svg/>");
-        store.put(&digest, b"<svg/>").await.unwrap();
+        store.put(&digest, b"<svg/>").unwrap();
         let manifest = AssetManifest::from_iter([("img/logo.svg".to_string(), digest)]);
 
         let assets = BlobAssets::resolve(store, manifest).await.ok().unwrap();
@@ -133,10 +136,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_is_the_manifest_filtered_by_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir).await;
+        let store = store();
         let digest = sha256(b"x");
-        store.put(&digest, b"x").await.unwrap();
+        store.put(&digest, b"x").unwrap();
         let manifest = AssetManifest::from_iter([
             ("partials/header.typ".to_string(), digest.clone()),
             ("logo.svg".to_string(), digest),
@@ -154,20 +156,26 @@ mod tests {
 
     /// A blob evicted between the manifest check and the render reads back as
     /// `None`, not an error — the render then degrades exactly as it would for
-    /// an asset key nobody ever supplied.
+    /// an asset key nobody ever supplied. Budget/lives are sized so inserting
+    /// `b` genuinely evicts `a` via the real eviction sweep, rather than
+    /// simulating eviction out-of-band.
     #[tokio::test]
     async fn an_evicted_blob_degrades_to_none() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = store(&dir).await;
-        let digest = sha256(b"doomed");
-        store.put(&digest, b"doomed").await.unwrap();
-        let manifest = AssetManifest::from_iter([("img/x.png".to_string(), digest.clone())]);
+        // Budget (10 bytes) fits `a` (8 bytes) alone, and fits `b` (5 bytes)
+        // alone, but not both together — `b` doesn't exceed the whole
+        // budget by itself, so it isn't bypassed like an oversized blob
+        // would be; inserting it forces a real eviction sweep that drains
+        // `a`'s single life to zero.
+        let store = Arc::new(BlobStore::new(10, 1, 32).unwrap());
+        let a = sha256(b"a-doomed");
+        store.put(&a, b"a-doomed").unwrap();
+        let manifest = AssetManifest::from_iter([("img/x.png".to_string(), a.clone())]);
         let assets = BlobAssets::resolve(store.clone(), manifest)
             .await
             .ok()
             .unwrap();
 
-        std::fs::remove_file(store.path_for(&digest)).unwrap();
+        store.put(&sha256(b"bbbbb"), b"bbbbb").unwrap();
 
         assert_eq!(assets.get("img/x.png").await.unwrap(), None);
     }

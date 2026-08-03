@@ -5,20 +5,21 @@
 //! when that happens.
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 pub const BIND: &str = "MDCAST_BIND";
 pub const TOKEN: &str = "MDCAST_TOKEN";
-pub const BLOB_DIR: &str = "MDCAST_BLOB_DIR";
 pub const MAX_CACHE_BYTES: &str = "MDCAST_MAX_CACHE_BYTES";
 pub const MAX_UPLOAD_BYTES: &str = "MDCAST_MAX_UPLOAD_BYTES";
+pub const CACHE_LIVES: &str = "MDCAST_CACHE_LIVES";
+pub const MAX_CACHE_LIVES: &str = "MDCAST_MAX_CACHE_LIVES";
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
-const DEFAULT_BLOB_DIR: &str = "/var/lib/mdcast/blobs";
-const DEFAULT_MAX_CACHE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
+const DEFAULT_CACHE_LIVES: u32 = 3;
+const DEFAULT_MAX_CACHE_LIVES: u32 = 32;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -27,14 +28,17 @@ pub struct Config {
     /// the bearer-auth layer entirely instead of applying one that would
     /// authorise everything.
     pub token: Option<String>,
-    pub blob_dir: PathBuf,
-    /// Total on-disk budget for the blob cache. Exceeding it evicts the
-    /// least-recently-used blobs after an upload.
+    /// Total in-memory budget for the blob cache. Exceeding it evicts
+    /// least-recently-used, second-chance-drained blobs on insert.
     pub max_cache_bytes: u64,
     /// Body-size ceiling for *every* request, not just uploads — one knob, so
     /// a caller can't sidestep it by posting a giant render request instead of
     /// a giant blob.
     pub max_upload_bytes: usize,
+    /// Eviction-survival chances a newly-cached blob starts with.
+    pub cache_lives: u32,
+    /// Ceiling repeated hits can grow an entry's lives to.
+    pub max_cache_lives: u32,
 }
 
 impl Config {
@@ -53,17 +57,23 @@ impl Config {
             .parse()
             .with_context(|| format!("{BIND} must be an ADDR:PORT socket address"))?;
 
+        let cache_lives = parse_u32(get(CACHE_LIVES), CACHE_LIVES)?.unwrap_or(DEFAULT_CACHE_LIVES);
+        let max_cache_lives =
+            parse_u32(get(MAX_CACHE_LIVES), MAX_CACHE_LIVES)?.unwrap_or(DEFAULT_MAX_CACHE_LIVES);
+        if max_cache_lives < cache_lives {
+            bail!("{MAX_CACHE_LIVES} ({max_cache_lives}) must be >= {CACHE_LIVES} ({cache_lives})");
+        }
+
         Ok(Self {
             bind,
             token,
-            blob_dir: get(BLOB_DIR)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from(DEFAULT_BLOB_DIR)),
             max_cache_bytes: parse_bytes(get(MAX_CACHE_BYTES), MAX_CACHE_BYTES)?
                 .unwrap_or(DEFAULT_MAX_CACHE_BYTES),
             max_upload_bytes: parse_bytes(get(MAX_UPLOAD_BYTES), MAX_UPLOAD_BYTES)?
                 .map(|n| usize::try_from(n).unwrap_or(usize::MAX))
                 .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES),
+            cache_lives,
+            max_cache_lives,
         })
     }
 }
@@ -75,6 +85,15 @@ fn parse_bytes(raw: Option<String>, name: &str) -> Result<Option<u64>> {
         s.trim()
             .parse::<u64>()
             .with_context(|| format!("{name} must be a byte count (a plain integer), got {s:?}"))
+    })
+    .transpose()
+}
+
+fn parse_u32(raw: Option<String>, name: &str) -> Result<Option<u32>> {
+    raw.map(|s| {
+        s.trim()
+            .parse::<u32>()
+            .with_context(|| format!("{name} must be a non-negative integer, got {s:?}"))
     })
     .transpose()
 }
@@ -98,9 +117,10 @@ mod tests {
 
         assert_eq!(cfg.token.as_deref(), Some("s3cret"));
         assert_eq!(cfg.bind.to_string(), DEFAULT_BIND);
-        assert_eq!(cfg.blob_dir, PathBuf::from(DEFAULT_BLOB_DIR));
         assert_eq!(cfg.max_cache_bytes, DEFAULT_MAX_CACHE_BYTES);
         assert_eq!(cfg.max_upload_bytes, DEFAULT_MAX_UPLOAD_BYTES);
+        assert_eq!(cfg.cache_lives, DEFAULT_CACHE_LIVES);
+        assert_eq!(cfg.max_cache_lives, DEFAULT_MAX_CACHE_LIVES);
     }
 
     #[test]
@@ -116,16 +136,18 @@ mod tests {
         let cfg = config_from(&[
             (TOKEN, "t"),
             (BIND, "0.0.0.0:9000"),
-            (BLOB_DIR, "/srv/blobs"),
             (MAX_CACHE_BYTES, "1024"),
             (MAX_UPLOAD_BYTES, "2048"),
+            (CACHE_LIVES, "5"),
+            (MAX_CACHE_LIVES, "50"),
         ])
         .unwrap();
 
         assert_eq!(cfg.bind.to_string(), "0.0.0.0:9000");
-        assert_eq!(cfg.blob_dir, PathBuf::from("/srv/blobs"));
         assert_eq!(cfg.max_cache_bytes, 1024);
         assert_eq!(cfg.max_upload_bytes, 2048);
+        assert_eq!(cfg.cache_lives, 5);
+        assert_eq!(cfg.max_cache_lives, 50);
     }
 
     #[test]
@@ -135,5 +157,19 @@ mod tests {
 
         let err = config_from(&[(TOKEN, "t"), (MAX_CACHE_BYTES, "2GiB")]).unwrap_err();
         assert!(err.to_string().contains(MAX_CACHE_BYTES), "{err}");
+
+        let err = config_from(&[(TOKEN, "t"), (CACHE_LIVES, "not-a-number")]).unwrap_err();
+        assert!(err.to_string().contains(CACHE_LIVES), "{err}");
+
+        let err = config_from(&[(TOKEN, "t"), (MAX_CACHE_LIVES, "not-a-number")]).unwrap_err();
+        assert!(err.to_string().contains(MAX_CACHE_LIVES), "{err}");
+    }
+
+    #[test]
+    fn max_cache_lives_below_cache_lives_refuses_to_start() {
+        let err =
+            config_from(&[(TOKEN, "t"), (CACHE_LIVES, "10"), (MAX_CACHE_LIVES, "5")]).unwrap_err();
+        assert!(err.to_string().contains(CACHE_LIVES), "{err}");
+        assert!(err.to_string().contains(MAX_CACHE_LIVES), "{err}");
     }
 }
