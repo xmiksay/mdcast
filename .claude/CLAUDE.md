@@ -286,7 +286,7 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 
 | Env var                   | Default                  | Meaning |
 |---------------------------|--------------------------|---------|
-| `MDCAST_TOKEN`            | **none — startup fails** | Shared bearer token for every `/v1` route |
+| `MDCAST_TOKEN`             | unset — unauthenticated | Shared bearer token for every `/v1` route. Unset/empty starts the service anyway with every `/v1` route open (no `require_bearer` layer applied at all — see `routes::router`/`config::Config.token: Option<String>`, issue #70) and fires a startup `tracing::warn!`, louder when `MDCAST_BIND` isn't loopback. Only run it token-less behind infrastructure that already authenticates callers. |
 | `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
 | `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Node-local blob cache root |
 | `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget; LRU eviction runs after each upload |
@@ -296,10 +296,10 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | Endpoint | Auth | Success | Failure |
 |---|---|---|---|
 | `GET /health` | no | `200 ok` | — |
-| `POST /v1/blobs/check` | yes | `200 BlobCheckResponse` | `400`/`401`/`413` |
-| `POST /v1/blobs` | yes | `204` | `400` (bad digest / hash mismatch), `401`, `413` |
-| `POST /v1/render` | yes | `200` artifact bytes | `409 MissingBlobsError`, `400`, `401`, `413`, `422`, `500` |
-| `POST /v1/render/template` | yes | `200` artifact bytes | as above, plus `501` for `format: "html"` without `typst-html` |
+| `POST /v1/blobs/check` | if `MDCAST_TOKEN` set | `200 BlobCheckResponse` | `400`/`401`/`413` |
+| `POST /v1/blobs` | if `MDCAST_TOKEN` set | `204` | `400` (bad digest / hash mismatch), `401`, `413` |
+| `POST /v1/render` | if `MDCAST_TOKEN` set | `200` artifact bytes | `409 MissingBlobsError`, `400`, `401`, `413`, `422`, `500` |
+| `POST /v1/render/template` | if `MDCAST_TOKEN` set | `200` artifact bytes | as above, plus `501` for `format: "html"` without `typst-html` |
 
 Protocol: a render request carries an `AssetManifest` (asset key → sha256);
 the whole manifest is checked up front, and a request naming blobs the server

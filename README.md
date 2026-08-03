@@ -823,8 +823,8 @@ file deserialized into `TemplateDoc.data`. `--format` defaults to `pdf`;
 
 `mdcast-server` puts the same pipeline behind an HTTP API, so one host owns
 pandoc, typst and the fonts, and everything else just posts markdown. It is
-built for **internal, trusted callers**: a single shared bearer token, a
-single instance, a node-local cache.
+built for **internal, trusted callers**: a single shared bearer token (optional
+— see below), a single instance, a node-local cache.
 
 ```sh
 cargo build --release --features server
@@ -840,26 +840,27 @@ and the response body *is* the artifact. No job ids, no polling.
 
 | Variable                  | Default                  | Meaning |
 |---------------------------|--------------------------|---------|
-| `MDCAST_TOKEN`            | **none — startup fails** | Shared bearer token required by every `/v1` route |
+| `MDCAST_TOKEN`             | unset — unauthenticated | Shared bearer token required by every `/v1` route. **Unset or empty starts the service anyway, with every `/v1` route open to any caller that can reach it** — a prominent `tracing::warn!` fires at startup (louder still if `MDCAST_BIND` is not loopback). Only skip it when something in front of `mdcast-server` (ingress, service mesh, WireGuard segment) already authenticates every caller. |
 | `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
 | `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Blob cache root (created if missing) |
 | `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget — least-recently-used blobs are evicted past it |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
-There is no default token on purpose: a render service that silently accepts
-every request because an env var was forgotten is worse than one that refuses
-to boot.
+An unset token doesn't just relax auth on a route — the `require_bearer`
+middleware layer is left out of the router entirely, so there's no
+half-applied gate to regress into "always authorised" by accident. `/health`
+is unauthenticated in both modes.
 
 ### Endpoints
 
 | Method + path              | Auth | Request → response |
 |----------------------------|------|--------------------|
 | `GET /health`              | no   | → `ok` (for load balancers and container health checks) |
-| `POST /v1/blobs/check`     | yes  | `BlobCheckRequest` → `BlobCheckResponse` — which digests am I missing? |
-| `POST /v1/blobs`           | yes  | `multipart/form-data`, one part per blob → `204` |
-| `POST /v1/render`          | yes  | `RenderMarkdownRequest` → artifact bytes |
-| `POST /v1/render/template` | yes  | `RenderTemplateRequest` → artifact bytes |
+| `POST /v1/blobs/check`     | if `MDCAST_TOKEN` is set  | `BlobCheckRequest` → `BlobCheckResponse` — which digests am I missing? |
+| `POST /v1/blobs`           | if `MDCAST_TOKEN` is set  | `multipart/form-data`, one part per blob → `204` |
+| `POST /v1/render`          | if `MDCAST_TOKEN` is set  | `RenderMarkdownRequest` → artifact bytes |
+| `POST /v1/render/template` | if `MDCAST_TOKEN` is set  | `RenderTemplateRequest` → artifact bytes |
 
 Status codes: `400` malformed request, `401` missing/wrong token, `409`
 missing blobs (see below), `413` body over the limit, `422` the render itself

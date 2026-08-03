@@ -1,12 +1,13 @@
 //! Startup configuration, read from the environment. Every knob is a
-//! `MDCAST_`-prefixed variable; only the bearer token has no default, because
-//! a render service that silently accepts every request when the operator
-//! forgot one env var is the worst possible failure mode here.
+//! `MDCAST_`-prefixed variable. The bearer token is optional: unset or empty
+//! means the service starts unauthenticated (every `/v1` route is open) —
+//! see `main::warn_if_unauthenticated` for the startup warning that fires
+//! when that happens.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 pub const BIND: &str = "MDCAST_BIND";
 pub const TOKEN: &str = "MDCAST_TOKEN";
@@ -22,7 +23,10 @@ const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 #[derive(Debug, Clone)]
 pub struct Config {
     pub bind: SocketAddr,
-    pub token: String,
+    /// `None` when `MDCAST_TOKEN` is unset or empty — the router then skips
+    /// the bearer-auth layer entirely instead of applying one that would
+    /// authorise everything.
+    pub token: Option<String>,
     pub blob_dir: PathBuf,
     /// Total on-disk budget for the blob cache. Exceeding it evicts the
     /// least-recently-used blobs after an upload.
@@ -42,12 +46,7 @@ impl Config {
     /// parsing and defaulting without mutating the process environment (which
     /// is global, and therefore racy under a parallel test runner).
     fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self> {
-        let token = get(TOKEN).unwrap_or_default();
-        if token.is_empty() {
-            bail!(
-                "{TOKEN} is unset or empty — refusing to start an unauthenticated render service"
-            );
-        }
+        let token = get(TOKEN).filter(|t| !t.is_empty());
 
         let bind: SocketAddr = get(BIND)
             .unwrap_or_else(|| DEFAULT_BIND.to_string())
@@ -97,7 +96,7 @@ mod tests {
     fn token_alone_is_enough_and_everything_else_defaults() {
         let cfg = config_from(&[(TOKEN, "s3cret")]).unwrap();
 
-        assert_eq!(cfg.token, "s3cret");
+        assert_eq!(cfg.token.as_deref(), Some("s3cret"));
         assert_eq!(cfg.bind.to_string(), DEFAULT_BIND);
         assert_eq!(cfg.blob_dir, PathBuf::from(DEFAULT_BLOB_DIR));
         assert_eq!(cfg.max_cache_bytes, DEFAULT_MAX_CACHE_BYTES);
@@ -105,13 +104,10 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_or_empty_token_refuses_to_start() {
+    fn a_missing_or_empty_token_starts_unauthenticated_rather_than_erroring() {
         for pairs in [&[][..], &[(TOKEN, "")][..]] {
-            let err = config_from(pairs).unwrap_err();
-            assert!(
-                err.to_string().contains(TOKEN),
-                "startup error should name the variable: {err}"
-            );
+            let cfg = config_from(pairs).unwrap();
+            assert_eq!(cfg.token, None);
         }
     }
 

@@ -4,10 +4,14 @@
 //! | Method + path        | Auth | Body → response |
 //! |----------------------|------|-----------------|
 //! | `GET /health`        | no   | `ok` |
-//! | `POST /v1/blobs/check` | yes | `BlobCheckRequest` → `BlobCheckResponse` |
-//! | `POST /v1/blobs`     | yes  | multipart upload → `204` |
-//! | `POST /v1/render`    | yes  | `RenderMarkdownRequest` → artifact bytes |
-//! | `POST /v1/render/template` | yes | `RenderTemplateRequest` → artifact bytes |
+//! | `POST /v1/blobs/check` | if configured | `BlobCheckRequest` → `BlobCheckResponse` |
+//! | `POST /v1/blobs`     | if configured  | multipart upload → `204` |
+//! | `POST /v1/render`    | if configured  | `RenderMarkdownRequest` → artifact bytes |
+//! | `POST /v1/render/template` | if configured | `RenderTemplateRequest` → artifact bytes |
+//!
+//! "if configured" means `MDCAST_TOKEN` was set at startup — see `config.rs`
+//! and `main::warn_if_unauthenticated`. When it wasn't, every `/v1` route is
+//! open, same as `/health`.
 
 use std::sync::Arc;
 
@@ -32,20 +36,26 @@ pub struct AppState {
     pub registry: Registry,
 }
 
-/// Everything under `/v1` sits behind the bearer gate; `/health` deliberately
-/// does not, so a load balancer or `docker healthcheck` needs no credentials.
-/// The body limit is applied once, at the outermost layer, so it covers render
-/// requests as well as uploads — one knob, no way around it.
-pub fn router(state: Arc<AppState>, token: &str, max_body_bytes: usize) -> Router {
-    let v1 = Router::new()
+/// Everything under `/v1` sits behind the bearer gate when `token` is
+/// `Some` — `None` means `MDCAST_TOKEN` was unset at startup, and the layer
+/// is skipped entirely rather than kept and made to pass everything, so an
+/// authless deployment can never regress into "always authorised" by
+/// accident. `/health` is never gated, so a load balancer or `docker
+/// healthcheck` needs no credentials either way. The body limit is applied
+/// once, at the outermost layer, so it covers render requests as well as
+/// uploads — one knob, no way around it.
+pub fn router(state: Arc<AppState>, token: Option<&str>, max_body_bytes: usize) -> Router {
+    let mut v1 = Router::new()
         .route("/blobs/check", post(blobs::check))
         .route("/blobs", post(blobs::upload))
         .route("/render", post(render::markdown))
-        .route("/render/template", post(template::render))
-        .route_layer(axum::middleware::from_fn_with_state(
+        .route("/render/template", post(template::render));
+    if let Some(token) = token {
+        v1 = v1.route_layer(axum::middleware::from_fn_with_state(
             Arc::<str>::from(token),
             require_bearer,
         ));
+    }
 
     Router::new()
         .route("/health", get(health))
