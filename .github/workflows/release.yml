@@ -10,6 +10,12 @@ env:
 jobs:
   # Publish to crates.io on every version tag. Authenticates via crates.io
   # Trusted Publishing (OIDC) — no long-lived registry token in secrets.
+  #
+  # No `make verify` re-run here: the tagged commit is a just-merged,
+  # CI-green master commit (ci.yml's `test` job already ran on its PR and
+  # again on merge), and `cargo publish` performs its own verification
+  # build. We only assert that commit actually has a passing `test` run
+  # before publishing on top of it.
   publish:
     runs-on: ubuntu-latest
     permissions:
@@ -19,8 +25,8 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: Verify tag matches Cargo.toml version
         run: |
@@ -31,14 +37,16 @@ jobs:
             exit 1
           fi
 
-      - name: Install pandoc
-        run: sudo apt-get update && sudo apt-get install -y pandoc
-
-      - uses: Swatinem/rust-cache@v2
-
-      # Tag pushes don't run the PR gate — re-verify before publishing.
-      - name: Verify (lint + check-all + test)
-        run: make verify
+      - name: Verify tag commit passed CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/check-runs" \
+            --jq '[.check_runs[] | select(.name == "test")] | sort_by(.started_at) | last | .conclusion')"
+          if [ "$conclusion" != "success" ]; then
+            echo "Tag commit ${GITHUB_SHA} has no successful 'test' check run (found: ${conclusion:-none})" >&2
+            exit 1
+          fi
 
       - name: Authenticate with crates.io
         id: auth

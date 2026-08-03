@@ -127,20 +127,27 @@ tests and never invokes an engine. The pandoc-backed smoke tests skip
 gracefully (not `#[ignore]`) when `pandoc` isn't on `PATH`, so `cargo test`
 stays green with or without it installed locally.
 
-`.github/workflows/ci.yml` has two jobs: `test` runs `make lint`,
-`make check-all`, `make test`, `make test-typst-html`, and
-`make test-remote-images` on every pull request, with `pandoc` installed so
-the OOXML/revealjs smoke tests actually exercise pandoc in CI; `coverage`
-runs `make coverage` (cargo-llvm-cov) on every push/merge to `master`, writes
-the summary table to the Actions job summary, and uploads `lcov.info` + the
-HTML report as a `coverage-report` artifact.
+`.github/workflows/ci.yml` has two jobs, tuned so no commit is fully
+compiled/tested more than twice end-to-end (once on its PR, once on merge —
+issue #68): `test` runs `make lint`, `make check-all`, `make test`,
+`make test-typst-html`, and `make test-remote-images` on every pull request
+*and* every push to `master`, with `pandoc` installed so the OOXML/revealjs
+smoke tests actually exercise pandoc in CI. `coverage` runs `make coverage`
+(cargo-llvm-cov) only on release PRs — head branch matching `release-v*` or
+a `chore(release)`-prefixed title — writing the summary table to the Actions
+job summary and uploading `lcov.info` + the HTML report as a
+`coverage-report` artifact; it no longer runs on every master push, since
+the release PR's coverage snapshot already covers the commit that lands.
 
 `.github/workflows/release.yml` publishes to crates.io on every `v*` tag
-push: it checks the tag against the `Cargo.toml` version, re-runs
-`make verify` (tag pushes skip the PR gate), then `cargo publish --locked`
-authenticated via crates.io Trusted Publishing (OIDC,
-`rust-lang/crates-io-auth-action`) — no registry token secret. Release flow:
-bump the version, merge, tag `vX.Y.Z`, push the tag.
+push: it checks the tag against the `Cargo.toml` version, confirms the tag
+commit already has a successful `test` check run (via the GitHub API — the
+tagged commit is a just-merged, CI-green `master` commit, so there's nothing
+to re-verify), then `cargo publish --locked` authenticated via crates.io
+Trusted Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry
+token secret, and no `make verify` re-run (`cargo publish` performs its own
+verification build). Release flow: bump the version, merge, tag `vX.Y.Z`,
+push the tag.
 
 ## Run
 
