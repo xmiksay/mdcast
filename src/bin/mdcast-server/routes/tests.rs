@@ -27,7 +27,7 @@ async fn app(dir: &tempfile::TempDir) -> (Router, Arc<BlobStore>) {
         store: store.clone(),
         registry: Registry::with_defaults(),
     });
-    (router(state, TOKEN, 1 << 20), store)
+    (router(state, Some(TOKEN), 1 << 20), store)
 }
 
 fn authorized(method: &str, uri: &str) -> axum::http::request::Builder {
@@ -124,6 +124,41 @@ async fn v1_rejects_anything_but_the_configured_token() {
         );
         assert_eq!(body_json(response).await["code"], "unauthorized");
     }
+}
+
+/// A router built with `token: None` (the `MDCAST_TOKEN`-unset case) must
+/// serve `/v1` without any credentials at all — the auth layer isn't merely
+/// permissive, it's absent.
+#[tokio::test]
+async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(
+        BlobStore::open(dir.path().to_path_buf(), 1 << 20)
+            .await
+            .unwrap(),
+    );
+    let app = router(
+        Arc::new(AppState {
+            store,
+            registry: Registry::with_defaults(),
+        }),
+        None,
+        1 << 20,
+    );
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/blobs/check")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"digests":[]}"#))
+        .unwrap();
+    let (status, response) = send(&app, request).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body_json(response).await,
+        serde_json::json!({ "missing": [] })
+    );
 }
 
 #[tokio::test]
@@ -443,7 +478,7 @@ async fn a_body_over_the_limit_is_a_413() {
             store,
             registry: Registry::with_defaults(),
         }),
-        TOKEN,
+        Some(TOKEN),
         64,
     );
 

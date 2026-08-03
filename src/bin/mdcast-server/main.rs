@@ -55,12 +55,13 @@ async fn main() -> Result<()> {
         .init();
 
     let config = Config::from_env()?;
+    warn_if_unauthenticated(&config);
     let store = BlobStore::open(config.blob_dir.clone(), config.max_cache_bytes).await?;
     let state = Arc::new(AppState {
         store: Arc::new(store),
         registry: Registry::with_defaults(),
     });
-    let app = routes::router(state, &config.token, config.max_upload_bytes);
+    let app = routes::router(state, config.token.as_deref(), config.max_upload_bytes);
 
     let listener = tokio::net::TcpListener::bind(config.bind)
         .await
@@ -73,4 +74,37 @@ async fn main() -> Result<()> {
         "mdcast-server listening"
     );
     axum::serve(listener, app).await.context("serve http")
+}
+
+/// `MDCAST_TOKEN` unset or empty means the router skips `require_bearer`
+/// entirely (`routes::router`) — every `/v1` route is then reachable by
+/// anyone who can reach `bind`. That's a deliberate, documented mode for a
+/// service already sitting behind infrastructure that authenticates callers
+/// (ingress, mesh, WireGuard), but it must never be silent: a non-loopback
+/// bind with no token is an open render/upload/arbitrary-Typst-execution
+/// service on the network, which is worth shouting about louder than a
+/// loopback bind whose blast radius is just the host it runs on.
+fn warn_if_unauthenticated(config: &Config) {
+    if config.token.is_some() {
+        return;
+    }
+    if config.bind.ip().is_loopback() {
+        tracing::warn!(
+            bind = %config.bind,
+            "MDCAST_TOKEN is unset — mdcast-server is running UNAUTHENTICATED. Every caller \
+             that can reach the bind address can render, upload blobs, and (via \
+             /v1/render/template) execute arbitrary Typst. Set MDCAST_TOKEN unless this \
+             instance sits behind infrastructure that already authenticates every caller."
+        );
+    } else {
+        tracing::warn!(
+            bind = %config.bind,
+            "MDCAST_TOKEN is unset AND MDCAST_BIND is not loopback — mdcast-server is an OPEN, \
+             UNAUTHENTICATED render service reachable over the network. Any caller that can \
+             reach this address can render, upload blobs, and (via /v1/render/template) \
+             execute arbitrary Typst. Set MDCAST_TOKEN now unless this bind address is \
+             intentionally exposed behind infrastructure that already authenticates every \
+             caller."
+        );
+    }
 }
