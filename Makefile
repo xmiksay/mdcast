@@ -12,9 +12,10 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}'
 
-# Workspace: `mdcast` (root package) + `mdcast-api`. Feature flags belong to
-# `mdcast` alone, so anything passing --features is scoped with `-p mdcast`;
-# everything else runs across the whole workspace.
+# Workspace: `mdcast` (root package) + `mdcast-api` + `mdcast-client`. Feature
+# flags belong to `mdcast` alone, so anything passing --features is scoped with
+# `-p mdcast`; everything else runs across the whole workspace, which is what
+# builds, lints and tests the two client-side members.
 build: ## Debug build (default features = pandoc + typst)
 	cargo build --workspace
 
@@ -26,6 +27,7 @@ check: ## Fast typecheck (default features)
 
 check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check -p mdcast-api
+	cargo check -p mdcast-client
 	cargo check -p mdcast --no-default-features
 	cargo check -p mdcast --no-default-features --features pandoc
 	cargo check -p mdcast --no-default-features --features typst
@@ -50,8 +52,8 @@ lint: ## fmt-check + clippy (default + typst-html + remote-images + server featu
 test-unit: ## Unit tests (in-module #[cfg(test)])
 	cargo test --workspace --lib --bins
 
-test-integration: ## Integration tests (tests/ — incl. engine smoke tests; pandoc-backed ones skip if pandoc is absent)
-	cargo test -p mdcast --test '*'
+test-integration: ## Integration tests (tests/ — engine smoke tests, which skip if pandoc is absent, plus the client's HTTP flow)
+	cargo test -p mdcast -p mdcast-client --test '*'
 
 test: ## All tests, whole workspace (default features)
 	cargo test --workspace

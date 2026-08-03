@@ -8,14 +8,14 @@ that first if you need the *why*. This file is the operational summary.
 
 ## Layout
 
-Cargo workspace with two members. The root `Cargo.toml` is **both** the
+Cargo workspace with three members. The root `Cargo.toml` is **both** the
 `[workspace]` root and the `mdcast` `[package]` — `src/`, `tests/`,
 `embedded/` and `examples/` never moved. Shared metadata (version, edition,
 license, authors, repository, homepage) lives in `[workspace.package]` and
-both crates inherit it, so they release in lockstep.
+all three crates inherit it, so they release in lockstep.
 
 Engine dependencies stay gated behind Cargo features inside `mdcast` — the
-split is drawn at *data*, not at engines. `mdcast-api` exists so the future
+split is drawn at *data*, not at engines. `mdcast-api` exists so
 `mdcast-client` can speak the HTTP protocol without compiling `rust-embed`
 (the whole vendored `embedded/` tree via proc macro), `clap`, `toml`,
 `pulldown-cmark`, `tempfile` and a fat `tokio` for a few structs. See
@@ -35,6 +35,16 @@ mdcast-api/           serde-only shared types + wire protocol; no anyhow/tokio/I
    └─ error.rs        ErrorResponse + ErrorCode (every other 4xx/5xx: bad_request,
                       unauthorized, payload_too_large, unsupported_target,
                       render_failed, internal)
+
+mdcast-client/        async client for mdcast-server; mdcast-api + reqwest, NEVER mdcast
+├─ src/lib.rs         crate docs + module wiring + flat re-exports
+├─ src/client.rs      Client/ClientBuilder, render()/render_template(), the 409→upload→retry-once flow
+├─ src/blobs.rs       check()/upload()/preflight() + upload-set selection (impl Client, split for file size)
+├─ src/bundle.rs      AssetBundle (key → bytes) + sha256() + manifest()/bind()
+├─ src/artifact.rs    Artifact (bytes/filename/content_type) + Content-Disposition parsing
+├─ src/request.rs     request::markdown()/template() — constructors for the wire bodies
+├─ src/error.rs       Error (thiserror) + from_status() status/body → typed error
+└─ tests/negotiation.rs  wiremock-backed HTTP flow tests (dev-dependency only)
 
 src/
 ├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports (incl. mdcast_api's Target/DocMeta)
@@ -136,6 +146,24 @@ embedded/             rust-embed source — keys mirror these paths
   `tower::ServiceExt::oneshot`, not files under `tests/`), and the wire
   protocol itself stays in `mdcast-api` where `mdcast-client` can reach it
   without compiling an engine.
+- **`mdcast-client` must never depend on `mdcast`.** Not with
+  `default-features = false`, not at all — that dependency edge is the entire
+  reason the workspace exists (`PROJECT_PLAN.md` §7.1). Its permitted
+  dependencies are `mdcast-api`, `reqwest` (default features off, +
+  `rustls-tls`/`json`/`multipart`, matching the root manifest), `serde`,
+  `serde_json`, `sha2`, `bytes` and `thiserror`; `wiremock` + `tokio` are
+  dev-only. Verify with `cargo tree -p mdcast-client -e normal` — `mdcast`,
+  `rust-embed`, `clap`, `typst` and `pulldown-cmark` must all be absent (~100
+  crates, against `mdcast`'s ~329). Anything the client needs from the
+  protocol goes into `mdcast-api`, never into a new `mdcast` dependency.
+- **The client owns the negotiation; the caller never hashes anything.**
+  `AssetBundle` is `key → bytes`; the client computes every sha256, builds the
+  `AssetManifest`, and on `409` uploads exactly the blobs the server named.
+  **Exactly one retry** — a second `409` for the same digests is
+  `Error::BlobsStillMissing`, never a loop, because the only causes are
+  eviction racing the retry or a server bug and spinning would hide both. The
+  pessimistic path (`check` → `upload` → render) is exposed as
+  `Client::preflight` but is not the default.
 - **`render_template`/`render_template_html` are a parallel entry point, not
   a second IR.** `backends/typst/template.rs`'s `TemplateDoc`/
   `render_template`/`render_template_html` bypass `ResolvedDoc` entirely (no
@@ -168,13 +196,14 @@ Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
 Feature flags belong to `mdcast` alone, so every target passing `--features`
-is scoped `-p mdcast`; the rest run `--workspace` so `mdcast-api`'s tests and
-lints are covered too.
+is scoped `-p mdcast`; the rest run `--workspace` so `mdcast-api`'s and
+`mdcast-client`'s tests and lints are covered too (neither has features, so
+neither needs an axis of its own).
 
 ```
 make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
-make check-all          # cargo check -p mdcast-api + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
-make test                # cargo test --workspace — ~225 tests (32 of them mdcast-api); unit suite runs in <1s
+make check-all          # cargo check -p mdcast-api + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
+make test                # cargo test --workspace — ~266 tests (32 mdcast-api, 41 mdcast-client); unit suite runs in <1s
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
 make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 44 mdcast-server tests
@@ -212,15 +241,17 @@ the release PR's coverage snapshot already covers the commit that lands.
 push: it checks the tag against the `Cargo.toml` version, confirms the tag
 commit already has a successful `test` check run (via the GitHub API — the
 tagged commit is a just-merged, CI-green `master` commit, so there's nothing
-to re-verify), then publishes **`mdcast-api` first and `mdcast` second**
-(`mdcast` depends on it by version; `cargo publish` blocks until each upload
-lands in the index), authenticated via crates.io Trusted Publishing (OIDC,
-`rust-lang/crates-io-auth-action`) — no registry token secret, and no
-`make verify` re-run (`cargo publish` performs its own verification build).
-Both crates take their version from `[workspace.package]`, so one bump
-covers both and the tag check asserts it for each. `mdcast-api` needs its own
-(pending) trusted publisher configured on crates.io before its first release.
-Release flow: bump the workspace version, merge, tag `vX.Y.Z`, push the tag.
+to re-verify), then publishes **`mdcast-api` → `mdcast` → `mdcast-client`**
+(both dependants name `mdcast-api` by version; `cargo publish` blocks until
+each upload lands in the index), authenticated via crates.io Trusted
+Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry token
+secret, and no `make verify` re-run (`cargo publish` performs its own
+verification build). All three crates take their version from
+`[workspace.package]`, so one bump covers them and the tag check asserts it
+for each. `mdcast-api` and `mdcast-client` each need their **own** (pending)
+trusted publisher configured on crates.io before their first release — one
+publisher does not cover a workspace. Release flow: bump the workspace
+version, merge, tag `vX.Y.Z`, push the tag.
 
 ## Run
 
@@ -284,6 +315,36 @@ and `Content-Disposition: attachment; filename="output.<ext>"` from
 `RenderedArtifact::filename`. Errors are `ErrorResponse { code, message }`
 (`409` alone has its own shape); internal error text never leaves the process
 — it goes to `tracing::error!` under an incident id the response quotes.
+
+## HTTP client (`mdcast-client`)
+
+The counterpart crate: everything above, typed, with the negotiation folded
+into one call. No feature flags, async only (`reqwest`'s async client — a
+blocking wrapper is deliberately not offered).
+
+```rust
+let client = Client::builder("http://mdcast.internal:8080").token(token).build()?;
+let bundle = AssetBundle::new().with("img/chart.svg", bytes);
+let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?;
+```
+
+- `AssetBundle` — `key → bytes`, `.with()`/`.insert()`; `manifest()` hashes
+  every entry, `bind()` either fills an empty caller manifest from the bundle
+  or verifies a caller-supplied one against it (missing key → `MissingAsset`,
+  wrong digest → `DigestMismatch`, both *before* a round trip, since a `409`
+  can only name a digest).
+- `Client::render` / `render_template` — post, and on `409` upload exactly the
+  named blobs (one multipart request, part name = digest) and post the
+  identical body again. Once. `Client::check`/`upload`/`preflight` are the
+  pessimistic path.
+- `Artifact { bytes, filename, content_type }` — headers win; the fallbacks
+  are derived (`output.<Target::extension()>`, `application/octet-stream`) and
+  a filename carrying a path separator is discarded rather than sanitised.
+- `Error` — `Config`, `Transport`, `Unauthorized` (401), `PayloadTooLarge`
+  (413), `BlobsStillMissing` (the 409 that survived the retry),
+  `Server { status, code: ErrorCode, message }` (the code is carried through,
+  never flattened), `UnexpectedStatus`, `InvalidResponse`, `MissingAsset`,
+  `UnknownDigest`, `DigestMismatch`.
 
 ## Adding a new layout class
 
@@ -605,9 +666,12 @@ and `Content-Disposition: attachment; filename="output.<ext>"` from
 - Don't write `std::fs` calls in `src/backends/*`. Go through `AssetProvider`.
 - Don't reach for pandoc's AST. `ResolvedDoc` is the only IR.
 - Don't split an *engine* into its own crate. Backends are feature-gated
-  modules, full stop. The workspace has exactly two members and the second
-  one (`mdcast-api`) is data, not behaviour — see `PROJECT_PLAN.md` §7.1 for
-  what overturned the original single-crate rule and what still holds of it.
+  modules, full stop. The workspace has exactly three members and the two
+  extra ones exist for the client side of the HTTP protocol (`mdcast-api` is
+  data, `mdcast-client` is transport) — see `PROJECT_PLAN.md` §7.1 for what
+  overturned the original single-crate rule and what still holds of it.
+- Don't add a `mdcast` dependency to `mdcast-client`, and don't add a
+  blocking wrapper to it — it is async-only on purpose.
 - Don't add a `--remove-pandoc` flag or similar. Pandoc stays for DOCX/PPTX
   indefinitely — no mature Rust OOXML alternative exists; documented in
   `PROJECT_PLAN.md` §10.

@@ -1,8 +1,10 @@
 # The repo root is both the workspace root and the `mdcast` package: the
-# engine-bearing crate stays exactly where it was, and `mdcast-api` (the
-# serde-only shared types + HTTP wire protocol) is the one extra member.
+# engine-bearing crate stays exactly where it was, and the two extra members
+# are the ones a client needs without an engine — `mdcast-api` (serde-only
+# shared types + HTTP wire protocol) and `mdcast-client` (the typed client for
+# it, which must never depend on `mdcast`).
 [workspace]
-members = ["mdcast-api"]
+members = ["mdcast-api", "mdcast-client"]
 
 [workspace.package]
 version = "0.3.0"
@@ -33,6 +35,7 @@ exclude = [
     ".claude/",
     "PROJECT_PLAN.md",
     "mdcast-api/",
+    "mdcast-client/",
     "examples/dump_pandoc_input.rs",
     "examples/dump_typst_driver.rs",
 ]

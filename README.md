@@ -718,18 +718,28 @@ Anything the provider returns `None` for falls through to the next layer.
 
 ## Crates
 
-The repo is a Cargo workspace with two published crates:
+The repo is a Cargo workspace with three published crates:
 
 | Crate | What it is | Dependencies |
 |---|---|---|
 | `mdcast` | The library, the CLI, and the `mdcast-server` binary (`server` feature) — engines, backends, asset pipeline. The repo root *is* this package. | pandoc/typst engines, tokio, axum, … (feature-gated) |
 | `mdcast-api` | Shared data types (`Target`, `DocMeta`, `BrandSpec`, …) and the HTTP wire protocol the service speaks. | **serde only** |
+| `mdcast-client` | Async client for `mdcast-server`, with the asset negotiation folded in. | `mdcast-api` + `reqwest` — **never `mdcast`** |
 
 `mdcast` depends on `mdcast-api` and re-exports everything it moved there
 from the original paths, so `mdcast::Target`, `mdcast::BrandSpec` and
 `mdcast::DocMeta` keep working — you never need to name `mdcast-api` unless
-you are writing a client that must not compile the engines. Both crates share
-one version and are published together.
+you are writing a client that must not compile the engines.
+
+`mdcast-client` is that client. It depends on `mdcast-api` and an HTTP client
+and **never on `mdcast`**, not even with `default-features = false`: calling
+the service should not compile `rust-embed` (which pulls the whole vendored
+reveal.js tree and the reference OOXML documents in through a proc macro),
+`clap`, `typst`, `pulldown-cmark` or pandoc's zip/xml stack into a process
+whose job is to POST some JSON. That is ~100 crates instead of ~330.
+
+All three crates share one version and are published together, `mdcast-api`
+first.
 
 ## Cargo features
 
@@ -934,6 +944,73 @@ with the wrong content type.
   extras — html-reveal embeds its resources — but a future one that did would
   need a container format here.
 
+## HTTP client (`mdcast-client`)
+
+The three `curl` calls above — render, `409`, upload exactly what was missing,
+render again — are what the client does for you. In Rust that whole exchange
+is one `await`:
+
+```toml
+[dependencies]
+mdcast-client = "0.3"
+```
+
+```rust
+use mdcast_client::{AssetBundle, Client, request};
+use mdcast_client::mdcast_api::Target;
+
+let client = Client::builder("http://localhost:8080").token(token).build()?;
+let bundle = AssetBundle::new().with("img/chart.svg", std::fs::read("chart.svg")?);
+let artifact = client
+    .render(request::markdown("# Q3\n\n![](img/chart.svg)", Target::Pdf), &bundle)
+    .await?;
+
+std::fs::write(&artifact.filename, &artifact.bytes)?; // output.pdf
+```
+
+You never compute a sha256, never build an `AssetManifest`, and never write a
+retry loop. Fill an `AssetBundle` with the same asset keys the library uses
+(`img/chart.svg`, `reference/reference.docx`, `typst/layouts/pdf/hero.typ`),
+and the client hashes them, sends the manifest, and — if the server answers
+`409` — uploads **only** the blobs it named before posting the identical
+request again. Warm cache: one request. Cold: three.
+
+The retry happens **exactly once**. A second `409` for the same digests means
+eviction is racing the retry or the server is misbehaving, so it surfaces as
+`Error::BlobsStillMissing` rather than spinning.
+
+### The pessimistic path
+
+If you would rather never discover a large upload mid-render, ask first:
+
+```rust
+client.preflight(&bundle).await?;  // POST /v1/blobs/check, upload what's missing
+let artifact = client.render(request, &bundle).await?;  // cannot 409
+```
+
+`preflight` returns the digests it uploaded. `check` and `upload` are exposed
+separately if you want to drive the two halves yourself.
+
+### Errors
+
+`mdcast_client::Error` is a `thiserror` enum you can match on, not a string:
+
+| Variant | When |
+|---|---|
+| `Transport` | DNS, connect, TLS, timeout — the request never completed |
+| `Unauthorized` | `401` — fix the token, not the payload |
+| `PayloadTooLarge` | `413` — over `MDCAST_MAX_UPLOAD_BYTES`; retrying as-is is hopeless |
+| `BlobsStillMissing` | a `409` that survived the upload and the retry |
+| `Server { status, code, message }` | the server's own `ErrorResponse` — the `ErrorCode` (`render_failed`, `unsupported_target`, `internal`, …) is carried through, not flattened |
+| `UnexpectedStatus` / `InvalidResponse` | something other than mdcast answered, or its body did not decode |
+| `MissingAsset` / `UnknownDigest` / `DigestMismatch` | the bundle cannot satisfy its own manifest — caught locally, before a round trip, while the asset *key* is still known |
+
+Other notes: the client is async only (no blocking wrapper), a
+`reqwest::Client` can be injected via `.http_client(…)` so it uses your own
+connection pool and timeouts, `render_template` is the `render-template`
+equivalent, and `Artifact` carries `bytes`, `filename` and `content_type` from
+the response headers.
+
 ## Development
 
 All day-to-day commands are wrapped in the `Makefile` — run a bare `make` to
@@ -943,11 +1020,11 @@ list them:
 |-------------------------|-----------------------------------------------------------------|
 | `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | `mdcast-api`, plus all `mdcast` feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images, +server, +server/typst-html) |
+| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images, +server, +server/typst-html) |
 | `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images + server features) |
 | `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
-| `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
+| `make test-integration` | `tests/` suites: engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) + `mdcast-client`'s HTTP flow against a `wiremock` socket |
 | `make test-typst-html`  | Tests for the off-by-default `typst-html` feature (HTML export, issue #53) |
 | `make test-remote-images` | Tests for the off-by-default `remote-images` feature (http(s) image fetch, issue #54) |
 | `make test-server`      | Tests for the off-by-default `server` feature — blob store, auth, and router-level tests of every endpoint |
