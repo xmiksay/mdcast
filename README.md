@@ -716,6 +716,21 @@ Anything the provider returns `None` for falls through to the next layer.
   seven built-in content-shape layouts (pptx has no per-class layout
   selection — see `.claude/CLAUDE.md`'s Known limitations).
 
+## Crates
+
+The repo is a Cargo workspace with two published crates:
+
+| Crate | What it is | Dependencies |
+|---|---|---|
+| `mdcast` | The library and the CLI — engines, backends, asset pipeline. The repo root *is* this package. | pandoc/typst engines, tokio, … (feature-gated) |
+| `mdcast-api` | Shared data types (`Target`, `DocMeta`, `BrandSpec`, …) and the HTTP wire protocol for the forthcoming render service. | **serde only** |
+
+`mdcast` depends on `mdcast-api` and re-exports everything it moved there
+from the original paths, so `mdcast::Target`, `mdcast::BrandSpec` and
+`mdcast::DocMeta` keep working — you never need to name `mdcast-api` unless
+you are writing a client that must not compile the engines. Both crates share
+one version and are published together.
+
 ## Cargo features
 
 ```toml
@@ -799,11 +814,11 @@ list them:
 
 | Target                  | What it does                                                    |
 |-------------------------|-----------------------------------------------------------------|
-| `make build` / `release`| Debug / release build (default features = pandoc + typst + mermaid) |
+| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | All feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images) |
-| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` (default + typst-html + remote-images features) |
-| `make test`             | Full suite, default features (unit + integration)               |
+| `make check-all`        | `mdcast-api`, plus all `mdcast` feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images) |
+| `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images features) |
+| `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
 | `make test-integration` | `tests/` suite, incl. engine smoke tests (pandoc-backed ones skip when `pandoc` is absent) |
 | `make test-typst-html`  | Tests for the off-by-default `typst-html` feature (HTML export, issue #53) |

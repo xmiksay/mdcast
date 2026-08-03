@@ -7,50 +7,54 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
 	  | awk 'BEGIN{FS=":.*?## "}{printf "  \033[36m%-18s\033[0m %s\n",$$1,$$2}'
 
+# Workspace: `mdcast` (root package) + `mdcast-api`. Feature flags belong to
+# `mdcast` alone, so anything passing --features is scoped with `-p mdcast`;
+# everything else runs across the whole workspace.
 build: ## Debug build (default features = pandoc + typst)
-	cargo build
+	cargo build --workspace
 
 release: ## Release build
-	cargo build --release
+	cargo build --workspace --release
 
 check: ## Fast typecheck (default features)
-	cargo check
+	cargo check --workspace
 
 check-all: ## Typecheck all feature combinations (the CI contract)
-	cargo check --no-default-features
-	cargo check --no-default-features --features pandoc
-	cargo check --no-default-features --features typst
-	cargo check --no-default-features --features pandoc,typst,rt-multi-thread
-	cargo check
-	cargo check --features typst-html
-	cargo check --features remote-images
+	cargo check -p mdcast-api
+	cargo check -p mdcast --no-default-features
+	cargo check -p mdcast --no-default-features --features pandoc
+	cargo check -p mdcast --no-default-features --features typst
+	cargo check -p mdcast --no-default-features --features pandoc,typst,rt-multi-thread
+	cargo check -p mdcast
+	cargo check -p mdcast --features typst-html
+	cargo check -p mdcast --features remote-images
 
 fmt: ## Apply formatting
-	cargo fmt
+	cargo fmt --all
 
 lint: ## fmt-check + clippy (default + typst-html + remote-images features), warnings are errors (mirrors CI)
-	cargo fmt --check
-	cargo clippy --all-targets -- -D warnings
-	cargo clippy --all-targets --features typst-html -- -D warnings
-	cargo clippy --all-targets --features remote-images -- -D warnings
+	cargo fmt --all --check
+	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy -p mdcast --all-targets --features typst-html -- -D warnings
+	cargo clippy -p mdcast --all-targets --features remote-images -- -D warnings
 
 test-unit: ## Unit tests (in-module #[cfg(test)])
-	cargo test --lib --bins
+	cargo test --workspace --lib --bins
 
 test-integration: ## Integration tests (tests/ — incl. engine smoke tests; pandoc-backed ones skip if pandoc is absent)
-	cargo test --test '*'
+	cargo test -p mdcast --test '*'
 
-test: ## All tests (default features)
-	cargo test
+test: ## All tests, whole workspace (default features)
+	cargo test --workspace
 
 test-typst-html: ## Tests for the off-by-default typst-html feature (issue #53's HTML export)
-	cargo test --features typst-html
+	cargo test -p mdcast --features typst-html
 
 test-remote-images: ## Tests for the off-by-default remote-images feature (issue #54's http(s) image fetch)
-	cargo test --features remote-images
+	cargo test -p mdcast --features remote-images
 
 coverage: ## Test coverage: lcov.info + terminal summary (needs cargo-llvm-cov)
-	cargo llvm-cov --lcov --output-path lcov.info
+	cargo llvm-cov --workspace --lcov --output-path lcov.info
 	cargo llvm-cov report --summary-only
 
 verify: lint check-all test test-typst-html test-remote-images ## Pre-"done" gate: lint + all feature combos + all tests

@@ -1739,6 +1739,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures",
+ "mdcast-api",
  "mermaid-svg",
  "pulldown-cmark",
  "quick-xml 0.41.0",
@@ -1757,6 +1758,14 @@ dependencies = [
  "typst-html",
  "typst-pdf",
  "zip",
+]
+
+[[package]]
+name = "mdcast-api"
+version = "0.3.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

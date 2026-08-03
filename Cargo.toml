@@ -1,19 +1,38 @@
-[package]
-name = "mdcast"
+# The repo root is both the workspace root and the `mdcast` package: the
+# engine-bearing crate stays exactly where it was, and `mdcast-api` (the
+# serde-only shared types + HTTP wire protocol) is the one extra member.
+[workspace]
+members = ["mdcast-api"]
+
+[workspace.package]
 version = "0.3.0"
 edition = "2024"
-description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
 license = "MIT OR Apache-2.0"
 authors = ["Martin Miksanik <miksanik@gmail.com>"]
-readme = "README.md"
 repository = "https://github.com/xmiksay/mdcast"
 homepage = "https://github.com/xmiksay/mdcast"
+
+[workspace.dependencies]
+mdcast-api = { version = "0.3.0", path = "mdcast-api" }
+serde = { version = "1", features = ["derive"] }
+
+[package]
+name = "mdcast"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Markdown → DOCX/ODT/PDF/PPTX/HTML-reveal with per-page layout templates, powered by pandoc and typst"
+readme = "README.md"
 documentation = "https://docs.rs/mdcast"
 keywords = ["markdown", "pandoc", "typst", "slides", "document"]
 categories = ["text-processing", "template-engine", "command-line-utilities"]
 exclude = [
     ".claude/",
     "PROJECT_PLAN.md",
+    "mdcast-api/",
     "examples/dump_pandoc_input.rs",
     "examples/dump_typst_driver.rs",
 ]
@@ -47,6 +66,7 @@ anyhow = "1"
 bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+mdcast-api = { workspace = true }
 mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = { version = "0.41", optional = true }
@@ -55,7 +75,7 @@ reqwest = { version = "0.12", optional = true, default-features = false, feature
     "rustls-tls",
 ] }
 rust-embed = "8"
-serde = { version = "1", features = ["derive"] }
+serde = { workspace = true }
 serde_json = { version = "1", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "process", "rt", "macros", "time", "io-util"] }

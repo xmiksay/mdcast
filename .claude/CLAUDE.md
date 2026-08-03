@@ -8,14 +8,36 @@ that first if you need the *why*. This file is the operational summary.
 
 ## Layout
 
-Single crate. Engine dependencies are gated behind Cargo features (no
-sub-crates).
+Cargo workspace with two members. The root `Cargo.toml` is **both** the
+`[workspace]` root and the `mdcast` `[package]` — `src/`, `tests/`,
+`embedded/` and `examples/` never moved. Shared metadata (version, edition,
+license, authors, repository, homepage) lives in `[workspace.package]` and
+both crates inherit it, so they release in lockstep.
+
+Engine dependencies stay gated behind Cargo features inside `mdcast` — the
+split is drawn at *data*, not at engines. `mdcast-api` exists so the future
+`mdcast-client` can speak the HTTP protocol without compiling `rust-embed`
+(the whole vendored `embedded/` tree via proc macro), `clap`, `toml`,
+`pulldown-cmark`, `tempfile` and a fat `tokio` for a few structs. See
+`PROJECT_PLAN.md` §7.1.
 
 ```
+mdcast-api/           serde-only shared types + wire protocol; no anyhow/tokio/IO
+├─ src/lib.rs         module wiring + flat re-exports
+├─ src/doc.rs         Target, DocMeta
+├─ src/brand.rs       BrandSpec, LogoSpec, LogoPosition, AutoLayout, AutoRule, ShapePredicate
+├─ src/digest.rs      Digest (validated lowercase-hex sha256) + DigestError
+├─ src/manifest.rs    AssetManifest — asset key → Digest
+└─ src/wire/
+   ├─ mod.rs          protocol overview (manifest → 409 → upload → retry)
+   ├─ render.rs       RenderMarkdownRequest/RenderOptions, RenderTemplateRequest/TemplateFormat
+   ├─ blob.rs         BlobCheckRequest/Response, MissingBlob, MissingBlobsError (the 409 body)
+   └─ error.rs        ErrorResponse + ErrorCode (every other 4xx/5xx)
+
 src/
-├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports
+├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports (incl. mdcast_api's Target/DocMeta)
 ├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
-├─ brand.rs           BrandSpec + AutoLayout config + LogoSpec/LogoPosition (issue #57)
+├─ brand.rs           re-export of mdcast_api::brand + from_toml() (the anyhow/toml loader)
 ├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
 ├─ image_format.rs    sniff() + mime_type() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
 ├─ images/
@@ -54,6 +76,17 @@ embedded/             rust-embed source — keys mirror these paths
 
 ## Architectural seams (don't violate)
 
+- **Pure data lives in `mdcast-api`, behaviour stays in `mdcast`.** A type
+  that is just fields (`Target`, `DocMeta`, `BrandSpec` & co.) belongs in
+  `mdcast-api`; anything that touches IO, `anyhow`, `toml` or `tokio` stays
+  here and operates on the re-exported type — that is why the `brand.toml`
+  loader is a free function `brand::from_toml` instead of
+  `BrandSpec::from_toml`, and why `frontmatter::extract` did not move.
+  `mdcast` re-exports every moved type from its original path
+  (`mdcast::Target`, `mdcast::BrandSpec`, `mdcast::DocMeta`, …) and also
+  `pub use mdcast_api;`, so nothing downstream has to name the new crate.
+  Adding a dependency to `mdcast-api` other than `serde` defeats the point
+  of the crate.
 - **`ResolvedDoc` is the IR.** Never pandoc's AST. Single load-bearing schema.
 - **`Backend` trait per target.** Async (`BoxFuture`), bytes-first —
   `render_to_bytes(doc, assets) -> RenderedArtifact` is the one method every
@@ -110,13 +143,17 @@ happens to mirror them.
 Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
+Feature flags belong to `mdcast` alone, so every target passing `--features`
+is scoped `-p mdcast`; the rest run `--workspace` so `mdcast-api`'s tests and
+lints are covered too.
+
 ```
-make build              # cargo build — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
-make check-all          # all cargo check feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images)
-make test                # cargo test — ~200 tests; unit suite runs in <1s
-make test-typst-html     # cargo test --features typst-html (off-by-default HTML export, issue #53)
-make test-remote-images  # cargo test --features remote-images (off-by-default http(s) image fetch, issue #54)
-make lint                # cargo fmt --check + cargo clippy --all-targets -- -D warnings (+ typst-html, + remote-images)
+make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
+make check-all          # cargo check -p mdcast-api + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images)
+make test                # cargo test --workspace — ~225 tests (32 of them mdcast-api); unit suite runs in <1s
+make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
+make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
+make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ typst-html, + remote-images)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-typst-html + test-remote-images — the pre-"done" gate
 ```
@@ -143,11 +180,15 @@ the release PR's coverage snapshot already covers the commit that lands.
 push: it checks the tag against the `Cargo.toml` version, confirms the tag
 commit already has a successful `test` check run (via the GitHub API — the
 tagged commit is a just-merged, CI-green `master` commit, so there's nothing
-to re-verify), then `cargo publish --locked` authenticated via crates.io
-Trusted Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry
-token secret, and no `make verify` re-run (`cargo publish` performs its own
-verification build). Release flow: bump the version, merge, tag `vX.Y.Z`,
-push the tag.
+to re-verify), then publishes **`mdcast-api` first and `mdcast` second**
+(`mdcast` depends on it by version; `cargo publish` blocks until each upload
+lands in the index), authenticated via crates.io Trusted Publishing (OIDC,
+`rust-lang/crates-io-auth-action`) — no registry token secret, and no
+`make verify` re-run (`cargo publish` performs its own verification build).
+Both crates take their version from `[workspace.package]`, so one bump
+covers both and the tag check asserts it for each. `mdcast-api` needs its own
+(pending) trusted publisher configured on crates.io before its first release.
+Release flow: bump the workspace version, merge, tag `vX.Y.Z`, push the tag.
 
 ## Run
 
@@ -469,8 +510,10 @@ section. Only present when built with the `typst` feature.
 
 - Don't write `std::fs` calls in `src/backends/*`. Go through `AssetProvider`.
 - Don't reach for pandoc's AST. `ResolvedDoc` is the only IR.
-- Don't split into a workspace. Use Cargo features. (User preference: see
-  `feedback_crate_structure` in auto-memory.)
+- Don't split an *engine* into its own crate. Backends are feature-gated
+  modules, full stop. The workspace has exactly two members and the second
+  one (`mdcast-api`) is data, not behaviour — see `PROJECT_PLAN.md` §7.1 for
+  what overturned the original single-crate rule and what still holds of it.
 - Don't add a `--remove-pandoc` flag or similar. Pandoc stays for DOCX/PPTX
   indefinitely — no mature Rust OOXML alternative exists; documented in
   `PROJECT_PLAN.md` §10.

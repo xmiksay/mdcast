@@ -15,61 +15,22 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
+
+/// The shared data types and the HTTP wire protocol, re-exported so a
+/// consumer of `mdcast` never has to name the dependency itself.
+pub use mdcast_api;
 
 pub use assets::{
     AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, async_provider, sync_provider,
 };
 pub use brand::{AutoLayout, BrandSpec};
+// `Target`/`DocMeta` are defined in `mdcast-api` (serde-only, no engine
+// deps) and re-exported here from their original paths — see that crate's
+// docs for why the split exists.
+pub use mdcast_api::{DocMeta, Target};
 pub use pages::splitter::{DefaultSplitter, PageSplitter};
 pub use pages::{Page, PageOrigin, RawPage};
 pub use preprocessor::{Chain, HtmlImageTags, Identity, MarkdownPreprocessor};
-
-/// Output target. One backend per variant.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum Target {
-    Docx,
-    Odt,
-    Pdf,
-    PdfPresentation,
-    Pptx,
-    HtmlReveal,
-}
-
-impl Target {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Target::Docx => "docx",
-            Target::Odt => "odt",
-            Target::Pdf => "pdf",
-            Target::PdfPresentation => "pdf-presentation",
-            Target::Pptx => "pptx",
-            Target::HtmlReveal => "html-reveal",
-        }
-    }
-
-    /// File extension (without the leading dot) for a suggested filename.
-    pub fn extension(&self) -> &'static str {
-        match self {
-            Target::Docx => "docx",
-            Target::Odt => "odt",
-            Target::Pdf | Target::PdfPresentation => "pdf",
-            Target::Pptx => "pptx",
-            Target::HtmlReveal => "html",
-        }
-    }
-}
-
-/// Document-level metadata extracted from frontmatter / config.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DocMeta {
-    pub title: Option<String>,
-    pub author: Option<String>,
-    pub date: Option<String>,
-    #[serde(default)]
-    pub extra: std::collections::BTreeMap<String, String>,
-}
 
 /// Opaque handle into a `BrandSpec` so backends don't carry the whole spec around.
 #[derive(Debug, Clone)]

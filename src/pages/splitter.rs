@@ -261,12 +261,9 @@ fn extract_class_attr(s: &str) -> Option<String> {
     let after = &s[key_pos + 5..];
     let after = after.trim_start();
     let after = after.strip_prefix('=')?.trim_start();
-    let (quote, rest) = if let Some(r) = after.strip_prefix('"') {
-        ('"', r)
-    } else if let Some(r) = after.strip_prefix('\'') {
-        ('\'', r)
-    } else {
-        return None;
+    let (quote, rest) = match after.strip_prefix('"') {
+        Some(r) => ('"', r),
+        None => ('\'', after.strip_prefix('\'')?),
     };
     let end = rest.find(quote)?;
     Some(rest[..end].trim().to_string())

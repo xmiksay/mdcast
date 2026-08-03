@@ -30,12 +30,15 @@ The value of this tool is *not* the format conversion — that's a solved proble
 | Quarto | **Rejected** | Heavyweight Deno-based external tool, not embeddable as a Rust library. (Note: it does *not* require Jupyter — but the embeddability/weight objection stands.) |
 | Diagrams | **Existing in-house Mermaid→SVG (Rust)** | Already built; faster and better-integrated than Kroki. Integrated as a Rust pre-processing step, not a pandoc Lua filter — so it survives any future engine change. |
 | Internal representation | **Own `ResolvedDoc` type** | Never pandoc's JSON AST. This single decision keeps pandoc removable. |
+| Crate structure | ~~**Single crate** (no sub-crates)~~ → **workspace: `mdcast` + `mdcast-api`** | *Changed — see §7.1.* The original call stands for the engines: backends stay feature-gated modules inside `mdcast`, not crates. What overturned it is the HTTP service: an out-of-process client would otherwise compile `rust-embed` (the whole vendored `embedded/` tree through a proc macro), `clap`, `tempfile`, `toml`, `regex`, `pulldown-cmark`, `futures` and a fat `tokio` just to name a few request structs. |
 | Engine coupling | **Hidden behind one `Backend` trait** | Core never knows which engine a target uses. Swapping the PDF path later = one new impl + a registry change. |
 | Scripting / filters | **Lua now (minimal), Rhai later** | Lua filters are a pandoc feature and are throwaway. Push permanent logic into Rust pre/post steps. Rhai (Rust-native, sandboxable) is for the future own-transformer phase. |
 
 ## 4. Scope
 
 **In scope (v1):** the five exporters, brand-spec single source of truth, Mermaid→SVG integration, version-pinned engines, reproducible container image, CLI.
+
+**Added to scope:** an **HTTP service** (`mdcast-server`, a bin inside the `mdcast` crate behind a `server` feature) and a **standalone client** (`mdcast-client`), speaking the wire protocol in `mdcast-api`. This is the "platform can drive exports programmatically" leg of Phase 5, pulled forward: one host owns pandoc/typst/fonts, everyone else posts markdown. Assets are negotiated by content digest rather than shipped on every request — the client sends a manifest, the server answers `409` with the digests it lacks, the client uploads those and retries.
 
 **Explicitly out of scope (v1), addable later at existing seams:**
 
@@ -83,7 +86,7 @@ Dispatch is a registry of `Box<dyn Backend>` keyed by `Target`. **Rule:** no pan
 
 ## 7. Project structure
 
-Single crate. Backends live in modules; engine dependencies are gated behind Cargo features so users can build with only the engines they need.
+Backends live in modules; engine dependencies are gated behind Cargo features so users can build with only the engines they need. The sketch below is the original single-crate plan — still accurate for everything under `src/`.
 
 ```
 mdcast/
@@ -114,6 +117,44 @@ typst  = []   # gates the typst-invoking backend module + its deps
 ```
 
 > Stays a single crate. Split into a workspace only if a backend grows non-trivial native deps that pollute the build for users who don't need it — the load-bearing boundary is the `Backend` trait, not the crate count.
+
+### 7.1 Amendment: the workspace split (HTTP service)
+
+**The rule above no longer holds in full.** The repo is now a Cargo workspace:
+the root `Cargo.toml` is both `[workspace]` and the `mdcast` `[package]`
+(`src/`, `tests/`, `embedded/`, `examples/` did not move), plus one member:
+
+```
+Cargo.toml     [workspace] + [package] mdcast   — engines, CLI, and later the server bin
+mdcast-api/    serde-only shared types + HTTP wire protocol
+```
+
+The trigger was *not* the one the rule anticipated — no backend grew native
+deps. It was the direction of dependency for the HTTP service: a
+`mdcast-client` that depended on `mdcast` would compile `rust-embed` (and
+with it the entire vendored `embedded/` tree — reveal.js plus the reference
+OOXML documents — through a proc macro), `clap`, `tempfile`, `toml`,
+`regex`, `pulldown-cmark`, `futures`, `tracing-subscriber` and a fat `tokio`,
+in order to name a handful of request structs. That is the cost the original
+rule exists to prevent; it just arrives from the consumer side rather than
+the backend side.
+
+So the split is drawn at data, not at engines:
+
+- **`mdcast-api`** — `Target`, `DocMeta`, `BrandSpec` (+ `LogoSpec`,
+  `LogoPosition`, `AutoLayout`, `AutoRule`, `ShapePredicate`), the asset
+  manifest/digest types, and the request/response bodies. **serde and
+  nothing else.** No `anyhow`, no `tokio`, no `toml`, no IO.
+- **`mdcast`** — unchanged in shape. It depends on `mdcast-api` and
+  re-exports every moved type from its original path, so `mdcast::Target`,
+  `mdcast::BrandSpec` and friends still resolve. The loaders that need IO or
+  `anyhow` stayed behind (`brand::from_toml`, `frontmatter::extract`).
+- **`mdcast-client`** (later commit) — depends on `mdcast-api` + an HTTP
+  client, never on `mdcast`.
+
+Backends are still feature-gated modules, never crates. The `Backend` trait
+is still the load-bearing boundary. Both crates share one version, bumped and
+published together (`mdcast-api` first).
 
 ## 8. Delivery plan (ordered by dependency, not calendar)
 
