@@ -227,13 +227,9 @@ impl BlobStore {
 
     /// Mark an already-cached digest permanently exempt from eviction.
     /// Returns `false` if the digest isn't present — a caller must insert
-    /// (e.g. via a completed upload) before pinning it.
-    ///
-    /// No production caller exists yet — this is the primitive a future
-    /// prefill routine (issue #72) will pin predefined assets through, kept
-    /// deliberately independent of that not-yet-written ingestion loop. See
-    /// `store_tests.rs` for coverage in the meantime.
-    #[allow(dead_code)]
+    /// (e.g. via a completed upload) before pinning it. Used by
+    /// `prefill::prefill` to exempt predefined assets from eviction
+    /// outright.
     pub fn pin(&self, digest: &Digest) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let Some(entry) = inner.cache.peek_mut(digest) else {
@@ -254,7 +250,9 @@ impl BlobStore {
     }
 
     /// Release a digest's pin. Returns `false` if the digest isn't present.
-    #[allow(dead_code)] // see `pin`'s doc comment
+    /// No production caller yet — kept for symmetry with `pin` and exercised
+    /// in `store_tests.rs`.
+    #[allow(dead_code)]
     pub fn unpin(&self, digest: &Digest) -> bool {
         let mut inner = self.inner.lock().unwrap();
         let Some(entry) = inner.cache.peek_mut(digest) else {
@@ -267,7 +265,7 @@ impl BlobStore {
         true
     }
 
-    #[allow(dead_code)] // see `pin`'s doc comment
+    /// Total bytes currently pinned — logged by `main` after prefill runs.
     pub fn pinned_bytes(&self) -> u64 {
         self.inner.lock().unwrap().pinned_bytes
     }
