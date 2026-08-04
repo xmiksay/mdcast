@@ -85,7 +85,7 @@ src/
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
    ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
    ├─ blobs/
-   │  ├─ store.rs       BlobStore/BlobWriter — sharded, atomic (tmp+rename), mtime LRU, sha256-verified
+   │  ├─ store.rs       BlobStore/BlobWriter — in-memory, byte-budgeted, second-chance ("lives") LRU, sha256-verified, pin()/mirror_path() for #72/pandoc
    │  └─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
    └─ routes/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
@@ -125,9 +125,17 @@ embedded/             rust-embed source — keys mirror these paths
   output) is owned and cleaned up inside `PandocBackend::render_to_bytes` —
   nothing escapes to the caller but the bytes.
 - **`AssetProvider` is the only way backends reach files.** No `std::fs` in
-  backend code. Trait is `async` (boxed-future, dyn-safe). Image refs are
-  resolved through it via `images::resolve_images` *before* pandoc sees the
-  markdown.
+  backend code *to read source data* — trait is `async` (boxed-future,
+  dyn-safe). Image refs are resolved through it via `images::resolve_images`
+  *before* pandoc sees the markdown. The one narrow exception: `path()`
+  (issue #71) lets a provider hand back a real filesystem path it already
+  controls instead of bytes; `PandocBackend` then calls `std::fs::hard_link`
+  on *that provider-supplied path* (never a path it guessed itself) to avoid
+  copying potentially large, provider-cached bytes into its own temp dir on
+  every render — falling back to the ordinary `get()` + write when `path()`
+  returns `None`. `AssetProvider` is still the sole gateway to *which* bytes
+  a backend can see; this only changes how the already-authorized bytes get
+  materialised.
 - **Per-target template namespacing.** A class (`hero`) resolves to a
   *different* file per target: `typst/layouts/pdf/hero.typ` vs
   `typst/layouts/pdf-presentation/hero.typ`. Author writes the class once.
@@ -206,11 +214,11 @@ make check-all          # cargo check -p mdcast-api + -p mdcast-client + all mdc
 make test                # cargo test --workspace — ~266 tests (32 mdcast-api, 41 mdcast-client); unit suite runs in <1s
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 44 mdcast-server tests
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 52 mdcast-server tests
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-typst-html + test-remote-images + test-server — the pre-"done" gate
-make run-server          # MDCAST_TOKEN=dev-token MDCAST_BLOB_DIR=target/mdcast-server/blobs cargo run --bin mdcast-server
+make run-server          # MDCAST_TOKEN=dev-token cargo run --bin mdcast-server
 ```
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
@@ -288,10 +296,26 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 |---------------------------|--------------------------|---------|
 | `MDCAST_TOKEN`             | unset — unauthenticated | Shared bearer token for every `/v1` route. Unset/empty starts the service anyway with every `/v1` route open (no `require_bearer` layer applied at all — see `routes::router`/`config::Config.token: Option<String>`, issue #70) and fires a startup `tracing::warn!`, louder when `MDCAST_BIND` isn't loopback. Only run it token-less behind infrastructure that already authenticates callers. |
 | `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
-| `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Node-local blob cache root |
-| `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget; LRU eviction runs after each upload |
+| `MDCAST_MAX_CACHE_BYTES`  | `268435456` (256 MiB)    | In-memory cache budget; second-chance eviction runs on insert |
+| `MDCAST_CACHE_LIVES`      | `3`                      | Eviction-survival chances a newly-cached blob starts with |
+| `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to (startup fails if below `MDCAST_CACHE_LIVES`) |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Ceiling for **every** request body, not just uploads |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
+
+No `MDCAST_BLOB_DIR` — the blob cache is entirely in memory (issue #71) and
+does not survive a restart; a caller referencing an evicted-by-restart blob
+just gets a `409` and re-uploads it, same as any other eviction. The one
+piece of disk it still touches is a lazily-populated, process-scratch mirror
+(`blobs/store.rs::mirror_path`) that `PandocBackend` hard-links assets from
+instead of rewriting them into every render's temp dir — a hard link (not a
+symlink) so the mirror's own eviction can never race a subprocess mid-read;
+see `store.rs`'s module doc comment for the full rationale. `BlobStore::pin`/
+`unpin`/`pinned_bytes` exist for a future prefill routine (issue #72) to
+exempt predefined/branded assets from eviction outright — no caller yet, so
+size `MDCAST_MAX_CACHE_BYTES` comfortably above whatever that predefined set
+ends up being once #72 lands, since pinned bytes exceeding the budget is a
+permanent (logged, non-fatal) overshoot rather than something eviction can
+fix.
 
 | Endpoint | Auth | Success | Failure |
 |---|---|---|---|

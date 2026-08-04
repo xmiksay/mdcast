@@ -123,3 +123,115 @@ async fn materialise_subtree_fetches_only_prefixed_keys_in_parallel() {
     );
     assert!(!dir.path().join("reference.odt").exists());
 }
+
+struct PathAssets {
+    key: &'static str,
+    path: Option<std::path::PathBuf>,
+    bytes: &'static [u8],
+}
+
+impl AssetProvider for PathAssets {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
+        let v = (key == self.key).then(|| Bytes::from_static(self.bytes));
+        Box::pin(async move { Ok(v) })
+    }
+
+    fn list<'a>(&'a self, _prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        Box::pin(async move { Ok(Vec::new()) })
+    }
+
+    fn path<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<std::path::PathBuf>>> {
+        let v = if key == self.key {
+            self.path.clone()
+        } else {
+            None
+        };
+        Box::pin(async move { Ok(v) })
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn materialise_hard_links_when_the_provider_offers_a_path() {
+    use std::os::unix::fs::MetadataExt;
+
+    let source_dir = tempfile::tempdir().unwrap();
+    let source_path = source_dir.path().join("reference.docx");
+    tokio::fs::write(&source_path, b"REFDOC").await.unwrap();
+
+    // `bytes` deliberately differs from the source file's content: if
+    // `materialise` fell back to `get()` instead of hard-linking, this
+    // assertion below would catch it.
+    let provider = PathAssets {
+        key: "reference/reference.docx",
+        path: Some(source_path.clone()),
+        bytes: b"WRONG-IF-COPIED",
+    };
+
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().join("reference.docx");
+
+    let materialised = materialise(&provider, "reference/reference.docx", &dest_path)
+        .await
+        .unwrap();
+
+    assert!(materialised);
+    assert_eq!(tokio::fs::read(&dest_path).await.unwrap(), b"REFDOC");
+    let source_ino = tokio::fs::metadata(&source_path).await.unwrap().ino();
+    let dest_ino = tokio::fs::metadata(&dest_path).await.unwrap().ino();
+    assert_eq!(source_ino, dest_ino, "expected a hard link, not a copy");
+}
+
+#[tokio::test]
+async fn materialise_falls_back_to_a_copy_when_the_link_target_is_missing() {
+    let provider = PathAssets {
+        key: "reference/reference.docx",
+        path: Some(std::path::PathBuf::from("/does/not/exist/reference.docx")),
+        bytes: b"COPIED",
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().join("reference.docx");
+
+    let materialised = materialise(&provider, "reference/reference.docx", &dest_path)
+        .await
+        .unwrap();
+
+    assert!(materialised);
+    assert_eq!(tokio::fs::read(&dest_path).await.unwrap(), b"COPIED");
+}
+
+#[tokio::test]
+async fn materialise_falls_back_to_a_copy_when_path_is_none() {
+    let provider = PathAssets {
+        key: "reference/reference.docx",
+        path: None,
+        bytes: b"COPIED",
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().join("reference.docx");
+
+    let materialised = materialise(&provider, "reference/reference.docx", &dest_path)
+        .await
+        .unwrap();
+
+    assert!(materialised);
+    assert_eq!(tokio::fs::read(&dest_path).await.unwrap(), b"COPIED");
+}
+
+#[tokio::test]
+async fn materialise_reports_false_when_the_provider_has_nothing() {
+    let provider = PathAssets {
+        key: "reference/reference.docx",
+        path: None,
+        bytes: b"unused",
+    };
+    let dest_dir = tempfile::tempdir().unwrap();
+    let dest_path = dest_dir.path().join("missing.docx");
+
+    let materialised = materialise(&provider, "reference/reference.pptx", &dest_path)
+        .await
+        .unwrap();
+
+    assert!(!materialised);
+    assert!(!dest_path.exists());
+}

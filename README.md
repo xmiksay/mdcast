@@ -823,13 +823,13 @@ file deserialized into `TemplateDoc.data`. `--format` defaults to `pdf`;
 
 `mdcast-server` puts the same pipeline behind an HTTP API, so one host owns
 pandoc, typst and the fonts, and everything else just posts markdown. It is
-built for **internal, trusted callers**: a single shared bearer token (optional
-— see below), a single instance, a node-local cache.
+built for **internal, trusted callers**: a single shared bearer token
+(optional — see below), a single instance, an in-memory cache with no
+persistence across restarts.
 
 ```sh
 cargo build --release --features server
 MDCAST_TOKEN=$(openssl rand -hex 32) \
-MDCAST_BLOB_DIR=/var/lib/mdcast/blobs \
   ./target/release/mdcast-server
 ```
 
@@ -842,8 +842,9 @@ and the response body *is* the artifact. No job ids, no polling.
 |---------------------------|--------------------------|---------|
 | `MDCAST_TOKEN`             | unset — unauthenticated | Shared bearer token required by every `/v1` route. **Unset or empty starts the service anyway, with every `/v1` route open to any caller that can reach it** — a prominent `tracing::warn!` fires at startup (louder still if `MDCAST_BIND` is not loopback). Only skip it when something in front of `mdcast-server` (ingress, service mesh, WireGuard segment) already authenticates every caller. |
 | `MDCAST_BIND`             | `127.0.0.1:8080`         | Listen address |
-| `MDCAST_BLOB_DIR`         | `/var/lib/mdcast/blobs`  | Blob cache root (created if missing) |
-| `MDCAST_MAX_CACHE_BYTES`  | `2147483648` (2 GiB)     | Cache budget — least-recently-used blobs are evicted past it |
+| `MDCAST_MAX_CACHE_BYTES`  | `268435456` (256 MiB)    | In-memory cache budget — least-recently-used blobs are evicted past it |
+| `MDCAST_CACHE_LIVES`      | `3`                      | Eviction-survival chances a newly-cached blob starts with (second-chance eviction, not evict-oldest) |
+| `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
@@ -851,6 +852,12 @@ An unset token doesn't just relax auth on a route — the `require_bearer`
 middleware layer is left out of the router entirely, so there's no
 half-applied gate to regress into "always authorised" by accident. `/health`
 is unauthenticated in both modes.
+
+The blob cache is entirely in memory and does not survive a restart — there
+is no `MDCAST_BLOB_DIR`. A blob missing after a restart just means the next
+render referencing it gets a `409` and the caller re-uploads it, exactly as
+if it had never been cached; the negotiation protocol already treats
+eviction as invisible, so this needs no special handling on the client side.
 
 ### Endpoints
 
@@ -1032,7 +1039,7 @@ list them:
 | `make coverage`         | Coverage report: `lcov.info` + terminal summary (needs [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)); CI runs it only on release PRs |
 | `make verify`           | Pre-merge gate: `lint` + `check-all` + `test` + `test-typst-html` + `test-remote-images` + `test-server` — what CI's `test` job runs on every PR and again on merge to `master` |
 | `make demo`             | Render the golden fixture to `target/demo/` (html-reveal + pdf) |
-| `make run-server`       | Run `mdcast-server` locally (`MDCAST_TOKEN=dev-token`, blobs under `target/`) |
+| `make run-server`       | Run `mdcast-server` locally (`MDCAST_TOKEN=dev-token`) |
 
 `CARGO_BUILD_JOBS` defaults to 4; override with `make build CARGO_BUILD_JOBS=8`.
 

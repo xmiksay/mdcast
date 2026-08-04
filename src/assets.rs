@@ -3,6 +3,7 @@
 //! catalog in via `rust-embed`; consumers wrap or replace it.
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 use anyhow::Result;
@@ -16,6 +17,16 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait AssetProvider: Send + Sync {
     fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>>;
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>>;
+
+    /// A real filesystem path this key already lives at, if the provider can
+    /// offer one directly instead of handing back bytes for the caller to
+    /// write itself (e.g. a subprocess backend that would otherwise copy
+    /// `get()`'s bytes into its own temp file can hard-link this path
+    /// instead). Default: no path available — callers fall back to `get()`
+    /// plus their own write.
+    fn path<'a>(&'a self, _key: &'a str) -> BoxFuture<'a, Result<Option<PathBuf>>> {
+        Box::pin(async move { Ok(None) })
+    }
 }
 
 #[derive(rust_embed::RustEmbed)]
@@ -51,6 +62,10 @@ impl<T: AssetProvider + ?Sized> AssetProvider for Box<T> {
     fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
         (**self).list(prefix)
     }
+
+    fn path<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<PathBuf>>> {
+        (**self).path(key)
+    }
 }
 
 /// Try `over` first, fall back to `base`. Lets a consumer ship a small override
@@ -80,6 +95,15 @@ impl<O: AssetProvider, B: AssetProvider> AssetProvider for LayeredAssets<O, B> {
                 }
             }
             Ok(out)
+        })
+    }
+
+    fn path<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<PathBuf>>> {
+        Box::pin(async move {
+            match self.over.path(key).await? {
+                Some(p) => Ok(Some(p)),
+                None => self.base.path(key).await,
+            }
         })
     }
 }
@@ -194,5 +218,42 @@ mod tests {
             Some(Bytes::from_static(b"BASE-B"))
         );
         assert_eq!(layered.get("c").await.unwrap(), None);
+    }
+
+    /// Minimal `AssetProvider` that can offer a real path for one key —
+    /// `sync_provider`/`async_provider` don't override `path()`, so
+    /// exercising it needs a real impl.
+    struct PathProvider(&'static str, &'static str);
+
+    impl AssetProvider for PathProvider {
+        fn get<'a>(&'a self, _key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
+            Box::pin(async move { Ok(None) })
+        }
+
+        fn list<'a>(&'a self, _prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+            Box::pin(async move { Ok(Vec::new()) })
+        }
+
+        fn path<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<PathBuf>>> {
+            let result = (key == self.0).then(|| PathBuf::from(self.1));
+            Box::pin(async move { Ok(result) })
+        }
+    }
+
+    #[tokio::test]
+    async fn layered_path_prefers_over_then_falls_back_to_base() {
+        let over = PathProvider("a", "/over/a");
+        let base = PathProvider("b", "/base/b");
+        let layered = LayeredAssets { over, base };
+
+        assert_eq!(
+            layered.path("a").await.unwrap(),
+            Some(PathBuf::from("/over/a"))
+        );
+        assert_eq!(
+            layered.path("b").await.unwrap(),
+            Some(PathBuf::from("/base/b"))
+        );
+        assert_eq!(layered.path("c").await.unwrap(), None);
     }
 }

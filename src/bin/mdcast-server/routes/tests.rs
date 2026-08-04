@@ -17,12 +17,8 @@ use crate::blobs::store::sha256;
 const TOKEN: &str = "test-token";
 const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#;
 
-async fn app(dir: &tempfile::TempDir) -> (Router, Arc<BlobStore>) {
-    let store = Arc::new(
-        BlobStore::open(dir.path().to_path_buf(), 1 << 20)
-            .await
-            .unwrap(),
-    );
+fn app() -> (Router, Arc<BlobStore>) {
+    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
     let state = Arc::new(AppState {
         store: store.clone(),
         registry: Registry::with_defaults(),
@@ -87,8 +83,7 @@ async fn body_json(response: Response) -> serde_json::Value {
 
 #[tokio::test]
 async fn health_needs_no_credentials() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let request = Request::builder()
         .uri("/health")
@@ -102,8 +97,7 @@ async fn health_needs_no_credentials() {
 
 #[tokio::test]
 async fn v1_rejects_anything_but_the_configured_token() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     for header_value in [None, Some("Bearer wrong-token"), Some("Basic dXNlcjpwdw==")] {
         let mut request = Request::builder()
@@ -131,12 +125,7 @@ async fn v1_rejects_anything_but_the_configured_token() {
 /// permissive, it's absent.
 #[tokio::test]
 async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        BlobStore::open(dir.path().to_path_buf(), 1 << 20)
-            .await
-            .unwrap(),
-    );
+    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
     let app = router(
         Arc::new(AppState {
             store,
@@ -163,11 +152,10 @@ async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
 
 #[tokio::test]
 async fn blob_check_reports_exactly_the_digests_the_store_lacks() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, store) = app(&dir).await;
+    let (app, store) = app();
     let present = sha256(b"present");
     let absent = sha256(b"absent");
-    store.put(&present, b"present").await.unwrap();
+    store.put(&present, b"present").unwrap();
 
     let request = json_request(
         "/v1/blobs/check",
@@ -184,8 +172,7 @@ async fn blob_check_reports_exactly_the_digests_the_store_lacks() {
 
 #[tokio::test]
 async fn uploading_several_blobs_at_once_satisfies_a_later_check() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
     let (first, second) = (sha256(b"one"), sha256(b"two"));
 
     let (status, _) = send(
@@ -212,15 +199,14 @@ async fn uploading_several_blobs_at_once_satisfies_a_later_check() {
 
 #[tokio::test]
 async fn an_upload_whose_bytes_do_not_match_its_digest_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, store) = app(&dir).await;
+    let (app, store) = app();
     let claimed = sha256(b"what I promised");
 
     let (status, response) = send(&app, multipart(&[(claimed.as_str(), b"what I sent")])).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body_json(response).await["code"], "bad_request");
-    assert!(!store.contains(&claimed).await);
+    assert!(!store.contains(&claimed));
 }
 
 fn markdown_request(manifest: serde_json::Value) -> Request<Body> {
@@ -236,10 +222,9 @@ fn markdown_request(manifest: serde_json::Value) -> Request<Body> {
 
 #[tokio::test]
 async fn a_render_naming_blobs_the_server_lacks_answers_409_with_all_of_them() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, store) = app(&dir).await;
+    let (app, store) = app();
     let here = sha256(b"here");
-    store.put(&here, b"here").await.unwrap();
+    store.put(&here, b"here").unwrap();
 
     let request = markdown_request(serde_json::json!({
         "charts/revenue.svg": sha256(SVG).as_str(),
@@ -274,8 +259,7 @@ async fn a_render_naming_blobs_the_server_lacks_answers_409_with_all_of_them() {
 /// upload, retry, PDF.
 #[tokio::test]
 async fn a_render_with_a_satisfied_manifest_returns_the_artifact() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
     let chart = sha256(SVG);
     let manifest = serde_json::json!({ "charts/revenue.svg": chart.as_str() });
 
@@ -313,8 +297,7 @@ async fn a_pandoc_target_renders_end_to_end() {
         eprintln!("skipping a_pandoc_target_renders_end_to_end: `pandoc` not on PATH");
         return;
     }
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let request = json_request(
         "/v1/render",
@@ -341,8 +324,7 @@ async fn a_pandoc_target_renders_end_to_end() {
 
 #[tokio::test]
 async fn a_malformed_render_request_is_a_400_with_an_error_body() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     for body in [
         serde_json::json!({ "markdown": "# Hi" }),
@@ -360,8 +342,7 @@ async fn a_malformed_render_request_is_a_400_with_an_error_body() {
 /// deserializer rejects it at the request boundary.
 #[tokio::test]
 async fn a_manifest_with_a_bogus_digest_is_a_400() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let (status, _) = send(
         &app,
@@ -385,8 +366,7 @@ fn template_request(format: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn a_template_render_returns_a_pdf() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let (status, response) = send(&app, template_request("pdf")).await;
 
@@ -397,8 +377,7 @@ async fn a_template_render_returns_a_pdf() {
 
 #[tokio::test]
 async fn a_template_can_import_a_partial_from_the_manifest() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
     const PARTIAL: &[u8] = b"#let greeting = [Hello]";
     let digest = sha256(PARTIAL);
     send(&app, multipart(&[(digest.as_str(), PARTIAL)])).await;
@@ -418,8 +397,7 @@ async fn a_template_can_import_a_partial_from_the_manifest() {
 
 #[tokio::test]
 async fn a_template_render_with_malformed_data_is_a_400() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let request = json_request(
         "/v1/render/template",
@@ -439,8 +417,7 @@ async fn a_template_render_with_malformed_data_is_a_400() {
 #[cfg(not(feature = "typst-html"))]
 #[tokio::test]
 async fn html_template_output_says_so_when_the_feature_is_off() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let (status, response) = send(&app, template_request("html")).await;
 
@@ -451,8 +428,7 @@ async fn html_template_output_says_so_when_the_feature_is_off() {
 #[cfg(feature = "typst-html")]
 #[tokio::test]
 async fn html_template_output_works_when_the_feature_is_on() {
-    let dir = tempfile::tempdir().unwrap();
-    let (app, _) = app(&dir).await;
+    let (app, _) = app();
 
     let (status, response) = send(&app, template_request("html")).await;
 
@@ -467,12 +443,7 @@ async fn html_template_output_works_when_the_feature_is_on() {
 
 #[tokio::test]
 async fn a_body_over_the_limit_is_a_413() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(
-        BlobStore::open(dir.path().to_path_buf(), 1 << 20)
-            .await
-            .unwrap(),
-    );
+    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
     let app = router(
         Arc::new(AppState {
             store,
