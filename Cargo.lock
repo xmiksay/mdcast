@@ -1910,7 +1910,6 @@ dependencies = [
  "subtle",
  "tempfile",
  "tokio",
- "toml 0.9.12+spec-1.1.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -1927,6 +1926,7 @@ version = "0.3.0"
 dependencies = [
  "serde",
  "serde_json",
+ "toml 0.9.12+spec-1.1.0",
 ]
 
 [[package]]

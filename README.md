@@ -771,7 +771,7 @@ The repo is a Cargo workspace with three published crates:
 | Crate | What it is | Dependencies |
 |---|---|---|
 | `mdcast` | The library, the CLI, and the `mdcast-server` binary (`server` feature) — engines, backends, asset pipeline. The repo root *is* this package. | pandoc/typst engines, tokio, axum, … (feature-gated) |
-| `mdcast-api` | Shared data types (`Target`, `DocMeta`, `BrandSpec`, …) and the HTTP wire protocol the service speaks. | **serde only** |
+| `mdcast-api` | Shared data types (`Target`, `DocMeta`, `BrandSpec`, …) and the HTTP wire protocol the service speaks. | **serde only** by default; optional `toml` feature adds `BrandSpec::from_toml` |
 | `mdcast-client` | Async client for `mdcast-server`, with the asset negotiation folded in. | `mdcast-api` + `reqwest` — **never `mdcast`** |
 
 `mdcast` depends on `mdcast-api` and re-exports everything it moved there
@@ -1125,6 +1125,30 @@ Other notes: the client is async only (no blocking wrapper), a
 connection pool and timeouts, `render_template` is the `render-template`
 equivalent, and `Artifact` carries `bytes`, `filename` and `content_type` from
 the response headers.
+
+### Loading `brand.toml` without `mdcast` (issue #80)
+
+A `mdcast-client`-only caller typically has a `brand.toml` — it's the
+documented brand format — but must not compile `mdcast` to parse it, since
+that dependency edge is the whole reason the workspace is split (see
+"Crates" above). `mdcast-api` has an optional `toml` feature for exactly
+this, adding an inherent `BrandSpec::from_toml`:
+
+```toml
+[dependencies]
+mdcast-api = { version = "0.3", features = ["toml"] }
+```
+
+```rust
+use mdcast_client::mdcast_api::BrandSpec;
+
+let brand = BrandSpec::from_toml(&std::fs::read_to_string("brand.toml")?)?;
+```
+
+Depending on `mdcast-api` directly like this is safe even though
+`mdcast-client` already depends on it: Cargo unifies the feature across both
+edges in the same build, so nothing is compiled twice. The feature is off by
+default — `mdcast-api`'s serde-only contract is unchanged unless you opt in.
 
 ## Development
 

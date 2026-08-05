@@ -110,15 +110,24 @@ embedded/             rust-embed source — keys mirror these paths
 
 - **Pure data lives in `mdcast-api`, behaviour stays in `mdcast`.** A type
   that is just fields (`Target`, `DocMeta`, `BrandSpec` & co.) belongs in
-  `mdcast-api`; anything that touches IO, `anyhow`, `toml` or `tokio` stays
-  here and operates on the re-exported type — that is why the `brand.toml`
-  loader is a free function `brand::from_toml` instead of
-  `BrandSpec::from_toml`, and why `frontmatter::extract` did not move.
-  `mdcast` re-exports every moved type from its original path
-  (`mdcast::Target`, `mdcast::BrandSpec`, `mdcast::DocMeta`, …) and also
-  `pub use mdcast_api;`, so nothing downstream has to name the new crate.
-  Adding a dependency to `mdcast-api` other than `serde` defeats the point
-  of the crate.
+  `mdcast-api`; anything that touches IO, `anyhow` or `tokio` stays here and
+  operates on the re-exported type — that is why `frontmatter::extract` did
+  not move, and why `mdcast::brand::from_toml` (the `anyhow`-wrapped loader)
+  stays a free function here rather than becoming the *only*
+  `BrandSpec::from_toml`. `mdcast` re-exports every moved type from its
+  original path (`mdcast::Target`, `mdcast::BrandSpec`, `mdcast::DocMeta`, …)
+  and also `pub use mdcast_api;`, so nothing downstream has to name the new
+  crate. `mdcast-api`'s **default** feature set stays `serde`-only — that is
+  the crate's contract; the one exception is `BrandSpec::from_toml` (issue
+  #80), an inherent method gated behind an *optional*, off-by-default `toml`
+  feature (`mdcast-api/src/brand.rs`) for a caller that has a `brand.toml`
+  but must not compile `mdcast` to parse it (e.g. one built on
+  `mdcast-client`) — `mdcast` enables that feature on its own `mdcast-api`
+  dependency and `brand::from_toml` here delegates to it instead of calling
+  `toml::from_str` itself, so there is exactly one parse implementation. Do
+  not add any *other* dependency to `mdcast-api`, default or optional,
+  without the same bar: a real caller that must not compile `mdcast` hitting
+  the gap.
 - **`ResolvedDoc` is the IR.** Never pandoc's AST. Single load-bearing schema.
 - **`Backend` trait per target.** Async (`BoxFuture`), bytes-first —
   `render_to_bytes(doc, assets) -> RenderedArtifact` is the one method every
@@ -241,21 +250,26 @@ happens to mirror them.
 Day-to-day commands are wrapped in the `Makefile` — run a bare `make` to list
 all targets:
 
-Feature flags belong to `mdcast` alone, so every target passing `--features`
-is scoped `-p mdcast`; the rest run `--workspace` so `mdcast-api`'s and
-`mdcast-client`'s tests and lints are covered too (neither has features, so
-neither needs an axis of its own).
+Feature flags belong mostly to `mdcast`, so every `mdcast`-scoped target
+passing `--features` is scoped `-p mdcast`; `mdcast-client` has no features
+of its own and runs under `--workspace`. `mdcast-api` has exactly one
+optional feature, `toml` (issue #80, `BrandSpec::from_toml` — see
+"Architectural seams" above), off by default and checked/tested/linted with
+its own `-p mdcast-api --features toml` target rather than folded into
+`--workspace`, matching the pattern the `mdcast`-side off-by-default features
+already use.
 
 ```
 make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
-make check-all          # cargo check -p mdcast-api + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
-make test                # cargo test --workspace — ~279 tests (32 mdcast-api, 39 mdcast-client); unit suite runs in <1s
+make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
+make test                # cargo test --workspace — default features only; unit suite runs in <1s
+make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
 make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 66 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
-make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ typst-html, + remote-images, + server, + server,typst-html)
+make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
-make verify              # lint + check-all + test + test-typst-html + test-remote-images + test-server — the pre-"done" gate
+make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
 make run-server          # MDCAST_TOKEN=dev-token cargo run --bin mdcast-server
 ```
 
@@ -274,7 +288,8 @@ stays green with or without it installed locally.
 `.github/workflows/ci.yml` has two jobs, tuned so no commit is fully
 compiled/tested more than twice end-to-end (once on its PR, once on merge —
 issue #68): `test` runs `make lint`, `make check-all`, `make test`,
-`make test-typst-html`, `make test-remote-images`, and `make test-server` on every pull request
+`make test-api-toml`, `make test-typst-html`, `make test-remote-images`, and
+`make test-server` on every pull request
 *and* every push to `master`, with `pandoc` and a prebuilt `typst` CLI binary
 both installed so the OOXML/revealjs smoke tests actually exercise pandoc and
 the `TypstCompiler::Cli` tests (issue #73) actually exercise a real `typst`
