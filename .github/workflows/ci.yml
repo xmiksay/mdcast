@@ -21,6 +21,19 @@ jobs:
       - name: Install pandoc
         run: sudo apt-get update && sudo apt-get install -y pandoc
 
+      # `TypstCompiler::Cli` (issue #73) tests skip gracefully when no
+      # `typst` binary is on PATH — matching pandoc's own convention above —
+      # but installing it here means the `cli`-mode tests actually run in CI
+      # instead of taking that skip path. Pulls the prebuilt release binary
+      # rather than `cargo install typst-cli`, since the whole point of `cli`
+      # mode is that its version need not match the linked `typst` crate.
+      - name: Install typst
+        run: |
+          curl -fsSL https://github.com/typst/typst/releases/latest/download/typst-x86_64-unknown-linux-musl.tar.xz -o typst.tar.xz
+          tar -xf typst.tar.xz
+          sudo mv typst-x86_64-unknown-linux-musl/typst /usr/local/bin/typst
+          typst --version
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -47,8 +60,9 @@ jobs:
         run: make test-remote-images
 
       # Exercises mdcast-server end to end: blob store, auth layer, and both
-      # render routes through the real router (pandoc is installed above, so
-      # the docx route test does not take its skip path).
+      # render routes through the real router (pandoc and typst are both
+      # installed above, so neither the docx route test nor the
+      # TypstCompiler::Cli tests take their skip path).
       - name: Test server feature (mdcast-server)
         run: make test-server
 

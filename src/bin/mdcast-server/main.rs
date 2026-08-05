@@ -22,13 +22,18 @@
 //! routes/      router, /health, /v1/blobs*, /v1/render, /v1/render/template
 //! ```
 //!
-//! **Known limitation (deliberate, see README's "Known limitations"):** a
-//! caller-supplied typst template that loops forever wedges a
+//! **Known limitation, mitigated by `MDCAST_TYPST=cli` (issue #73; see
+//! README's "Known limitations"):** with the default `MDCAST_TYPST=library`,
+//! a caller-supplied typst template that loops forever wedges a
 //! `spawn_blocking` thread for the life of the process — `spawn_blocking`
 //! cannot be cancelled — and there is no compile time or memory limit. The
-//! trust boundary is internal callers, so this is accepted rather than
-//! designed around; the fix, if it ever bites, is to put the compile behind a
-//! `Compiler` trait and run it in a killable subprocess with rlimits.
+//! trust boundary is internal callers, so `library` mode accepts this rather
+//! than designs around it. Setting `MDCAST_TYPST=cli` runs each compile as a
+//! killable child process instead: `MDCAST_TYPST_TIMEOUT_SECS` bounds it and
+//! `MDCAST_TYPST_MAX_MEMORY_BYTES` can cap its address space, and a
+//! timed-out compile is killed and reaped before the request's error
+//! response is returned — the server's thread and process counts return to
+//! baseline, which `library` mode cannot offer.
 
 use std::sync::Arc;
 
@@ -56,6 +61,11 @@ async fn main() -> Result<()> {
 
     let config = Config::from_env()?;
     warn_if_unauthenticated(&config);
+    // Best-effort: logs the CLI binary's reported version so version skew
+    // between it and mdcast's linked `typst` crate is visible at startup
+    // rather than discovered as a rendering difference (issue #73). A no-op
+    // when `typst_compiler` is `Library`.
+    config.typst_compiler.log_startup_info().await;
     let store = BlobStore::new(
         config.max_cache_bytes,
         config.cache_lives,
@@ -75,7 +85,8 @@ async fn main() -> Result<()> {
     }
     let state = Arc::new(AppState {
         store: Arc::new(store),
-        registry: Registry::with_defaults(),
+        registry: Registry::with_typst_compiler(config.typst_compiler.clone()),
+        typst_compiler: config.typst_compiler.clone(),
     });
     let app = routes::router(state, config.token.as_deref(), config.max_upload_bytes);
 
@@ -88,6 +99,7 @@ async fn main() -> Result<()> {
         max_upload_bytes = config.max_upload_bytes,
         cache_lives = config.cache_lives,
         max_cache_lives = config.max_cache_lives,
+        typst_compiler = ?config.typst_compiler,
         "mdcast-server listening"
     );
     axum::serve(listener, app).await.context("serve http")

@@ -18,12 +18,31 @@ const TOKEN: &str = "test-token";
 const SVG: &[u8] = br#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"/>"#;
 
 fn app() -> (Router, Arc<BlobStore>) {
+    app_with_compiler(TypstCompiler::Library)
+}
+
+fn app_with_compiler(typst_compiler: TypstCompiler) -> (Router, Arc<BlobStore>) {
     let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
     let state = Arc::new(AppState {
         store: store.clone(),
-        registry: Registry::with_defaults(),
+        registry: Registry::with_typst_compiler(typst_compiler.clone()),
+        typst_compiler,
     });
     (router(state, Some(TOKEN), 1 << 20), store)
+}
+
+/// `None` when no `typst` binary is on `PATH` — callers skip gracefully,
+/// matching the pandoc convention in `tests/render_smoke.rs`.
+fn typst_cli_compiler(timeout: std::time::Duration) -> Option<TypstCompiler> {
+    let bin = std::env::var_os("PATH")?
+        .to_string_lossy()
+        .split(':')
+        .map(|dir| std::path::Path::new(dir).join("typst"))
+        .find(|p| p.is_file())
+        .map(|_| "typst".to_string())?;
+    Some(TypstCompiler::Cli(
+        mdcast::backends::typst::CliCompiler::new(bin, timeout),
+    ))
 }
 
 fn authorized(method: &str, uri: &str) -> axum::http::request::Builder {
@@ -130,6 +149,7 @@ async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
         Arc::new(AppState {
             store,
             registry: Registry::with_defaults(),
+            typst_compiler: TypstCompiler::Library,
         }),
         None,
         1 << 20,
@@ -353,93 +373,8 @@ async fn a_manifest_with_a_bogus_digest_is_a_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
 
-fn template_request(format: &str) -> Request<Body> {
-    json_request(
-        "/v1/render/template",
-        serde_json::json!({
-            "template_source": "#let d = json(\"/data.json\")\n= Invoice #d.number\n",
-            "data": r#"{"number":"INV-042"}"#,
-            "format": format,
-        }),
-    )
-}
-
-#[tokio::test]
-async fn a_template_render_returns_a_pdf() {
-    let (app, _) = app();
-
-    let (status, response) = send(&app, template_request("pdf")).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(response.headers()[header::CONTENT_TYPE], "application/pdf");
-    assert!(body_bytes(response).await.starts_with(b"%PDF-"));
-}
-
-#[tokio::test]
-async fn a_template_can_import_a_partial_from_the_manifest() {
-    let (app, _) = app();
-    const PARTIAL: &[u8] = b"#let greeting = [Hello]";
-    let digest = sha256(PARTIAL);
-    send(&app, multipart(&[(digest.as_str(), PARTIAL)])).await;
-
-    let request = json_request(
-        "/v1/render/template",
-        serde_json::json!({
-            "template_source": "#import \"partials/header.typ\": greeting\n#greeting\n",
-            "data": "{}",
-            "assets": { "partials/header.typ": digest.as_str() },
-        }),
-    );
-    let (status, response) = send(&app, request).await;
-
-    assert_eq!(status, StatusCode::OK, "{:?}", body_bytes(response).await);
-}
-
-#[tokio::test]
-async fn a_template_render_with_malformed_data_is_a_400() {
-    let (app, _) = app();
-
-    let request = json_request(
-        "/v1/render/template",
-        serde_json::json!({ "template_source": "= Hi", "data": "not json" }),
-    );
-    let (status, response) = send(&app, request).await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert!(
-        body_json(response).await["message"]
-            .as_str()
-            .unwrap()
-            .contains("`data`")
-    );
-}
-
-#[cfg(not(feature = "typst-html"))]
-#[tokio::test]
-async fn html_template_output_says_so_when_the_feature_is_off() {
-    let (app, _) = app();
-
-    let (status, response) = send(&app, template_request("html")).await;
-
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-    assert_eq!(body_json(response).await["code"], "unsupported_target");
-}
-
-#[cfg(feature = "typst-html")]
-#[tokio::test]
-async fn html_template_output_works_when_the_feature_is_on() {
-    let (app, _) = app();
-
-    let (status, response) = send(&app, template_request("html")).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        response.headers()[header::CONTENT_TYPE],
-        "text/html; charset=utf-8"
-    );
-    let body = body_bytes(response).await;
-    assert!(String::from_utf8_lossy(&body).contains("Invoice INV-042"));
-}
+#[path = "template_tests.rs"]
+mod template_tests;
 
 #[tokio::test]
 async fn a_body_over_the_limit_is_a_413() {
@@ -448,6 +383,7 @@ async fn a_body_over_the_limit_is_a_413() {
         Arc::new(AppState {
             store,
             registry: Registry::with_defaults(),
+            typst_compiler: TypstCompiler::Library,
         }),
         Some(TOKEN),
         64,

@@ -6,8 +6,10 @@
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use mdcast::backends::typst::{CliCompiler, TypstCompiler};
 
 pub const BIND: &str = "MDCAST_BIND";
 pub const TOKEN: &str = "MDCAST_TOKEN";
@@ -16,12 +18,18 @@ pub const MAX_UPLOAD_BYTES: &str = "MDCAST_MAX_UPLOAD_BYTES";
 pub const CACHE_LIVES: &str = "MDCAST_CACHE_LIVES";
 pub const MAX_CACHE_LIVES: &str = "MDCAST_MAX_CACHE_LIVES";
 pub const PREFILL_DIR: &str = "MDCAST_PREFILL_DIR";
+pub const TYPST: &str = "MDCAST_TYPST";
+pub const TYPST_BIN: &str = "MDCAST_TYPST_BIN";
+pub const TYPST_TIMEOUT_SECS: &str = "MDCAST_TYPST_TIMEOUT_SECS";
+pub const TYPST_MAX_MEMORY_BYTES: &str = "MDCAST_TYPST_MAX_MEMORY_BYTES";
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_UPLOAD_BYTES: usize = 256 * 1024 * 1024;
 const DEFAULT_CACHE_LIVES: u32 = 3;
 const DEFAULT_MAX_CACHE_LIVES: u32 = 32;
+const DEFAULT_TYPST_BIN: &str = "typst";
+const DEFAULT_TYPST_TIMEOUT_SECS: u32 = 30;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -45,6 +53,10 @@ pub struct Config {
     /// (issue #72). `None` when `MDCAST_PREFILL_DIR` is unset — prefill is
     /// entirely opt-in.
     pub prefill_dir: Option<PathBuf>,
+    /// Which Typst compiler `/v1/render` and `/v1/render/template` use
+    /// (issue #73). Defaults to `Library` — an existing deployment that sets
+    /// none of the `MDCAST_TYPST*` variables sees byte-identical behaviour.
+    pub typst_compiler: TypstCompiler,
 }
 
 impl Config {
@@ -83,6 +95,7 @@ impl Config {
             prefill_dir: get(PREFILL_DIR)
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
+            typst_compiler: parse_typst_compiler(&get)?,
         })
     }
 }
@@ -105,6 +118,29 @@ fn parse_u32(raw: Option<String>, name: &str) -> Result<Option<u32>> {
             .with_context(|| format!("{name} must be a non-negative integer, got {s:?}"))
     })
     .transpose()
+}
+
+/// `MDCAST_TYPST` selects the compiler; `cli` mode reads the remaining
+/// `MDCAST_TYPST_*` variables, all of which are meaningless (and ignored) in
+/// `library` mode.
+fn parse_typst_compiler(get: &impl Fn(&str) -> Option<String>) -> Result<TypstCompiler> {
+    match get(TYPST).as_deref().unwrap_or("library").trim() {
+        "" | "library" => Ok(TypstCompiler::Library),
+        "cli" => {
+            let bin = get(TYPST_BIN)
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| DEFAULT_TYPST_BIN.to_string());
+            let timeout_secs = parse_u32(get(TYPST_TIMEOUT_SECS), TYPST_TIMEOUT_SECS)?
+                .unwrap_or(DEFAULT_TYPST_TIMEOUT_SECS);
+            let max_memory_bytes =
+                parse_bytes(get(TYPST_MAX_MEMORY_BYTES), TYPST_MAX_MEMORY_BYTES)?;
+            Ok(TypstCompiler::Cli(
+                CliCompiler::new(bin, Duration::from_secs(timeout_secs.into()))
+                    .with_max_memory_bytes(max_memory_bytes),
+            ))
+        }
+        other => bail!("{TYPST} must be \"library\" or \"cli\", got {other:?}"),
+    }
 }
 
 #[cfg(test)]
@@ -131,6 +167,7 @@ mod tests {
         assert_eq!(cfg.cache_lives, DEFAULT_CACHE_LIVES);
         assert_eq!(cfg.max_cache_lives, DEFAULT_MAX_CACHE_LIVES);
         assert_eq!(cfg.prefill_dir, None);
+        assert_eq!(cfg.typst_compiler, TypstCompiler::Library);
     }
 
     #[test]
@@ -151,6 +188,10 @@ mod tests {
             (CACHE_LIVES, "5"),
             (MAX_CACHE_LIVES, "50"),
             (PREFILL_DIR, "/srv/mdcast/prefill"),
+            (TYPST, "cli"),
+            (TYPST_BIN, "/opt/typst/typst"),
+            (TYPST_TIMEOUT_SECS, "5"),
+            (TYPST_MAX_MEMORY_BYTES, "1024"),
         ])
         .unwrap();
 
@@ -160,12 +201,66 @@ mod tests {
         assert_eq!(cfg.cache_lives, 5);
         assert_eq!(cfg.max_cache_lives, 50);
         assert_eq!(cfg.prefill_dir, Some(PathBuf::from("/srv/mdcast/prefill")));
+        assert_eq!(
+            cfg.typst_compiler,
+            TypstCompiler::Cli(
+                CliCompiler::new("/opt/typst/typst", Duration::from_secs(5))
+                    .with_max_memory_bytes(Some(1024))
+            )
+        );
     }
 
     #[test]
     fn an_empty_prefill_dir_is_treated_as_unset() {
         let cfg = config_from(&[(TOKEN, "t"), (PREFILL_DIR, "")]).unwrap();
         assert_eq!(cfg.prefill_dir, None);
+    }
+
+    #[test]
+    fn typst_library_is_the_default_and_the_explicit_choice() {
+        for pairs in [&[(TOKEN, "t")][..], &[(TOKEN, "t"), (TYPST, "library")][..]] {
+            let cfg = config_from(pairs).unwrap();
+            assert_eq!(cfg.typst_compiler, TypstCompiler::Library);
+        }
+    }
+
+    #[test]
+    fn typst_cli_reads_bin_timeout_and_memory_cap() {
+        let cfg = config_from(&[
+            (TOKEN, "t"),
+            (TYPST, "cli"),
+            (TYPST_BIN, "/opt/typst/typst"),
+            (TYPST_TIMEOUT_SECS, "5"),
+            (TYPST_MAX_MEMORY_BYTES, "1073741824"),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cfg.typst_compiler,
+            TypstCompiler::Cli(
+                CliCompiler::new("/opt/typst/typst", Duration::from_secs(5))
+                    .with_max_memory_bytes(Some(1024 * 1024 * 1024))
+            )
+        );
+    }
+
+    #[test]
+    fn typst_cli_defaults_bin_and_timeout_when_unset() {
+        let cfg = config_from(&[(TOKEN, "t"), (TYPST, "cli")]).unwrap();
+
+        assert_eq!(
+            cfg.typst_compiler,
+            TypstCompiler::Cli(CliCompiler::new(
+                DEFAULT_TYPST_BIN,
+                Duration::from_secs(DEFAULT_TYPST_TIMEOUT_SECS.into())
+            ))
+        );
+    }
+
+    #[test]
+    fn an_unknown_typst_mode_names_the_variable() {
+        let err = config_from(&[(TOKEN, "t"), (TYPST, "subprocess")]).unwrap_err();
+        assert!(err.to_string().contains(TYPST), "{err}");
     }
 
     #[test]

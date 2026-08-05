@@ -10,6 +10,12 @@
 //! layering the embedded catalog under it would register the entire vendored
 //! reveal.js tree and the reference documents as virtual files on every
 //! render.
+//!
+//! HTML output (`format: "html"`) is available whenever `state.typst_compiler`
+//! is `Cli` — a real `typst` binary supports `--features html` regardless of
+//! how mdcast itself was built (issue #73) — and otherwise falls back to the
+//! `Library`-only path gated by the `typst-html` cargo feature, unchanged
+//! from before issue #73.
 
 use std::sync::Arc;
 
@@ -18,7 +24,7 @@ use axum::extract::State;
 use axum::extract::rejection::JsonRejection;
 use axum::response::Response;
 use bytes::Bytes;
-use mdcast::backends::typst::{TemplateDoc, render_template};
+use mdcast::backends::typst::{TemplateDoc, TypstCompiler, render_template_with};
 use mdcast::mdcast_api::wire::{RenderTemplateRequest, TemplateFormat};
 use mdcast::{AssetProvider, BrandHandle, LayeredAssets, sync_provider};
 
@@ -71,31 +77,61 @@ pub async fn render(
     tracing::info!(format = ?format, "rendering template");
     match format {
         TemplateFormat::Pdf => {
-            let artifact = render_template(&doc, &provider)
+            let artifact = render_template_with(&doc, &provider, &state.typst_compiler)
                 .await
                 .map_err(ApiError::RenderFailed)?;
             Ok(artifact_response("application/pdf", artifact))
         }
-        TemplateFormat::Html => html(&doc, &provider).await,
+        TemplateFormat::Html => html(&doc, &provider, &state.typst_compiler).await,
+    }
+}
+
+/// `Cli` mode needs no build-time toggle for HTML export (issue #73) — a real
+/// `typst` binary either supports `--features html` or it does not, decided
+/// per invocation. `Library` mode keeps its pre-issue-#73 behaviour exactly:
+/// gated behind the `typst-html` cargo feature, `501` without it.
+async fn html(
+    doc: &TemplateDoc,
+    provider: &dyn AssetProvider,
+    compiler: &TypstCompiler,
+) -> Result<Response, ApiError> {
+    match compiler {
+        TypstCompiler::Cli(_) => {
+            let artifact =
+                mdcast::backends::typst::render_template_html_with(doc, provider, compiler)
+                    .await
+                    .map_err(ApiError::RenderFailed)?;
+            Ok(artifact_response("text/html; charset=utf-8", artifact))
+        }
+        TypstCompiler::Library => html_library(doc, provider).await,
     }
 }
 
 #[cfg(feature = "typst-html")]
-async fn html(doc: &TemplateDoc, provider: &dyn AssetProvider) -> Result<Response, ApiError> {
+async fn html_library(
+    doc: &TemplateDoc,
+    provider: &dyn AssetProvider,
+) -> Result<Response, ApiError> {
     let artifact = mdcast::backends::typst::render_template_html(doc, provider)
         .await
         .map_err(ApiError::RenderFailed)?;
     Ok(artifact_response("text/html; charset=utf-8", artifact))
 }
 
-/// HTML export lives behind the off-by-default `typst-html` feature. A server
-/// built without it says so, rather than panicking or quietly handing back a
-/// PDF with the wrong content type.
+/// HTML export via the in-process compiler lives behind the off-by-default
+/// `typst-html` feature. A server built without it, and configured with
+/// `MDCAST_TYPST=library`, says so rather than panicking or quietly handing
+/// back a PDF with the wrong content type — set `MDCAST_TYPST=cli` instead to
+/// get HTML output without this build feature.
 #[cfg(not(feature = "typst-html"))]
-async fn html(_doc: &TemplateDoc, _provider: &dyn AssetProvider) -> Result<Response, ApiError> {
+async fn html_library(
+    _doc: &TemplateDoc,
+    _provider: &dyn AssetProvider,
+) -> Result<Response, ApiError> {
     Err(ApiError::Unsupported(
         "this server was built without the `typst-html` feature; \
-         only \"pdf\" template output is available"
+         only \"pdf\" template output is available in `library` mode — set \
+         MDCAST_TYPST=cli to get HTML output without this build feature"
             .into(),
     ))
 }

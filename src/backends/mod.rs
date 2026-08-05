@@ -31,7 +31,8 @@ impl Registry {
         }
     }
 
-    /// Registry with every feature-enabled backend installed at its default target.
+    /// Registry with every feature-enabled backend installed at its default
+    /// target, typst using its default (`Library`) compiler.
     #[allow(unused_mut)] // `r` is only mutated when at least one backend feature is on
     pub fn with_defaults() -> Self {
         let mut r = Self::empty();
@@ -40,6 +41,31 @@ impl Registry {
             r.register(Box::new(typst::TypstBackend::new(Target::Pdf)));
             r.register(Box::new(typst::TypstBackend::new(Target::PdfPresentation)));
         }
+        #[cfg(feature = "pandoc")]
+        {
+            r.register(Box::new(pandoc::PandocBackend::new(Target::Docx)));
+            r.register(Box::new(pandoc::PandocBackend::new(Target::Odt)));
+            r.register(Box::new(pandoc::PandocBackend::new(Target::Pptx)));
+            r.register(Box::new(pandoc::PandocBackend::new(Target::HtmlReveal)));
+        }
+        r
+    }
+
+    /// Same as [`Registry::with_defaults`], but the typst targets use an
+    /// explicitly selected [`typst::TypstCompiler`] rather than always
+    /// `Library` (issue #73) — what `mdcast-server` and the CLI call once a
+    /// compiler is configured.
+    #[cfg(feature = "typst")]
+    pub fn with_typst_compiler(compiler: typst::TypstCompiler) -> Self {
+        let mut r = Self::empty();
+        r.register(Box::new(typst::TypstBackend::with_compiler(
+            Target::Pdf,
+            compiler.clone(),
+        )));
+        r.register(Box::new(typst::TypstBackend::with_compiler(
+            Target::PdfPresentation,
+            compiler,
+        )));
         #[cfg(feature = "pandoc")]
         {
             r.register(Box::new(pandoc::PandocBackend::new(Target::Docx)));

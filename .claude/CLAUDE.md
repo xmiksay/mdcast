@@ -66,7 +66,12 @@ src/
 │  ├─ reveal_assets.rs #[cfg(feature = "pandoc")] materialise_subtree()/brand_style_file()/brand_logo_file() — html-reveal temp-root materialisation
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
-│     ├─ mod.rs         TypstBackend, driver assembly, in-process compile (spawn_compile/forward_warnings shared with template.rs)
+│     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
+│     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
+│     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
+│     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
+│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler — temp-dir materialisation + `typst compile` subprocess, timeout+kill, safe_join path-traversal guard, optional RLIMIT_AS cap
+│     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
 │     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
@@ -74,11 +79,12 @@ src/
 │     │  ├─ tests.rs    unit tests for md_to_typst()
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
-│     └─ template.rs    TemplateDoc + render_template()/render_template_html() — user template + data → PDF/HTML, no markdown
+│     └─ template.rs    TemplateDoc + render_template()/render_template_html() (Library-default) and render_template_with()/render_template_html_with() (explicit TypstCompiler) — user template + data → PDF/HTML, no markdown
 ├─ bin/mdcast/
 │  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
 │  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
-│  └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
+│  ├─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
+│  └─ typst_compiler_args.rs #[cfg(feature = "typst")] TypstCompilerArgs — --typst-compiler/--typst-bin/--typst-timeout-secs, `#[command(flatten)]`d onto both `render` and `render-template` (issue #73)
 └─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
    ├─ main.rs           wiring only: config → blob store → prefill → Registry → router → axum::serve
    ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
@@ -92,7 +98,7 @@ src/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
       ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
       ├─ render.rs      POST /v1/render — resolve_doc()/provider_stack(), the CLI pipeline minus the filesystem
-      └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest, `typst-html` gated Html arm
+      └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest; Html arm needs the `typst-html` build feature in `library` mode, needs nothing extra in `cli` mode (issue #73)
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
@@ -180,10 +186,41 @@ embedded/             rust-embed source — keys mirror these paths
   structured-data case (user typst template + JSON → PDF, or HTML behind the
   `typst-html` feature). `Registry`/`Backend` stay untouched — they're
   `Target`-keyed and markdown-shaped, and there is no `Target` variant this
-  belongs under. Reuses `/context.typ` and the in-process compile machinery;
+  belongs under. Reuses `/context.typ` and the compiler seam below;
   does not reuse layouts, fonts, or `ResolvedDoc.assets` (no per-class layout
   to declare chrome for — a template reaches its own images via sibling
   files instead).
+- **The Typst compiler is a runtime-selectable seam, not always in-process
+  (issue #73).** `backends/typst/compiler/` defines `CompileInputs` (a flat,
+  already-resolved virtual filesystem: sources, files, fonts, the main file's
+  path, and `CompileFormat::{Pdf,Html}`) and `TypstCompiler::{Library,Cli}`.
+  Both compile sites — `mod.rs::render_to_bytes` (markdown) and
+  `template.rs::compile_template` (data-driven) — reduce their inputs to a
+  `CompileInputs` and call `self.compiler.compile(inputs)`/
+  `compiler.compile(inputs)`; neither knows or cares which mode actually
+  runs. `Library` (default) is exactly the pre-#73 in-process
+  `typst-as-lib` compile, just reshaped onto the shared input type — an
+  existing deployment setting nothing sees byte-identical behaviour. `Cli`
+  materialises `CompileInputs` into a temp directory (`tempfile::TempDir`,
+  owner-only permissions, always removed on every return path since the
+  guard is held for the whole function) and shells out to `typst compile
+  --root <dir> --font-path <dir>/.mdcast-fonts`, wrapped in
+  `tokio::time::timeout` with an explicit `child.kill().await` (which also
+  reaps) on elapse — the thing `spawn_blocking` structurally cannot offer.
+  `safe_join` is the one place every path this module writes is checked for
+  `..`/absolute escapes before touching disk — necessary because
+  `template.rs`'s sibling discovery deliberately preserves caller-influenced
+  `/`-nested provider keys (unlike the markdown path's `images::sanitize_key`,
+  which already flattens them), so an unsanitised manifest key must not
+  become an arbitrary-file-write outside the temp dir. HTML export
+  (`--features html`) works in `Cli` mode regardless of the `typst-html`
+  cargo feature — only `Library` mode needs it, since that feature is really
+  `typst-as-lib`'s process-wide `typst::Feature::Html` toggle (see the
+  `render_template_html` bullet below). `Registry::with_typst_compiler` /
+  `TypstBackend::with_compiler` / `render_template_with` /
+  `render_template_html_with` are the compiler-explicit entry points;
+  `Registry::with_defaults` / `TypstBackend::new` / `render_template` /
+  `render_template_html` all still exist unchanged and default to `Library`.
 
 ## Asset key namespace
 
@@ -212,10 +249,10 @@ neither needs an axis of its own).
 ```
 make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
 make check-all          # cargo check -p mdcast-api + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
-make test                # cargo test --workspace — ~266 tests (32 mdcast-api, 41 mdcast-client); unit suite runs in <1s
+make test                # cargo test --workspace — ~279 tests (32 mdcast-api, 39 mdcast-client); unit suite runs in <1s
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 52 mdcast-server tests
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 66 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -238,8 +275,11 @@ stays green with or without it installed locally.
 compiled/tested more than twice end-to-end (once on its PR, once on merge —
 issue #68): `test` runs `make lint`, `make check-all`, `make test`,
 `make test-typst-html`, `make test-remote-images`, and `make test-server` on every pull request
-*and* every push to `master`, with `pandoc` installed so the OOXML/revealjs
-smoke tests actually exercise pandoc in CI. `coverage` runs `make coverage`
+*and* every push to `master`, with `pandoc` and a prebuilt `typst` CLI binary
+both installed so the OOXML/revealjs smoke tests actually exercise pandoc and
+the `TypstCompiler::Cli` tests (issue #73) actually exercise a real `typst`
+binary in CI, rather than each taking their graceful-skip path. `coverage`
+runs `make coverage`
 (cargo-llvm-cov) only on release PRs — head branch matching `release-v*` or
 a `chore(release)`-prefixed title — writing the summary table to the Actions
 job summary and uploading `lcov.info` + the HTML report as a
@@ -265,9 +305,9 @@ version, merge, tag `vX.Y.Z`, push the tag.
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]...
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]  # prints per-page (class, origin)
-./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html]  # typst-only, no markdown
+./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]  # typst-only, no markdown
 ```
 
 `--assets DIR` layers a filesystem-backed provider over `EmbeddedAssets`.
@@ -282,10 +322,19 @@ over the provider stack; a diagram that fails to render warns and stays a
 code block. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
 `.fonts` entries for typst layouts (see README).
 
+`--typst-compiler` (issue #73) selects `TypstCompiler::Library` (default, the
+in-process compile) or `Cli` (shells out to `--typst-bin`, default `typst`,
+killed after `--typst-timeout-secs`, default `30`). Both `render` and
+`render-template` accept it (`main.rs`'s `TypstCompilerArgs`, flattened onto
+each subcommand); ignored by pandoc targets. See README's "Selecting the
+Typst compiler" section.
+
 `render-template` is the data-driven entry point (issue #52): `TEMPLATE` is an
 `AssetProvider` key for the main `.typ` file, `--data` a JSON file deserialized
 into `TemplateDoc.data`. See README's "Data-driven template rendering"
-section. Only present when built with the `typst` feature.
+section. Only present when built with the `typst` feature. `--format html`
+needs the `typst-html` cargo feature in `library` mode, needs nothing extra in
+`cli` mode.
 
 ## HTTP service (`server` feature)
 
@@ -302,6 +351,10 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to (startup fails if below `MDCAST_CACHE_LIVES`) |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Ceiling for **every** request body, not just uploads |
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
+| `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shells out to a `typst` binary per compile — issue #73). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. |
+| `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode. Exceeded → the child is killed and reaped before the request's error response is returned |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to the `cli`-mode child. Unix-only; a no-op elsewhere |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
 No `MDCAST_BLOB_DIR` — the blob cache is entirely in memory (issue #71) and
@@ -563,8 +616,17 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   document destined only for LibreOffice). Combinations the matrix leaves
   ambiguous (TIFF in html-reveal is browser-dependent, WebP in odt needs
   LibreOffice ≥ 7.4) are deliberately left un-warned rather than guessed at.
-- Typst runs **in-process** (`typst-as-lib`) — no `typst` binary is needed to
-  render PDF targets. Only pandoc is an external binary dependency.
+- Typst runs **in-process by default** (`typst-as-lib`) — no `typst` binary is
+  needed to render PDF targets. As of issue #73, the compiler is a seam
+  (`backends/typst/compiler/`): `TypstCompiler::Library` is this in-process
+  path; `TypstCompiler::Cli` shells out to a real `typst compile` in a temp
+  dir instead, selected via `MDCAST_TYPST=cli` (server) or `--typst-compiler
+  cli` (CLI). Both `render_to_bytes` (the markdown path) and
+  `template.rs`'s `render_template_with`/`render_template_html_with` (the
+  data-driven path) build the same `CompileInputs` and hand it to whichever
+  compiler is configured — see `compiler/mod.rs`'s module docs. Pandoc
+  remains the only *unconditional* external binary dependency; typst becomes
+  one too only when `cli` mode is chosen.
 - `DocMeta` / `BrandSpec` / `ResolvedDoc.assets` reach typst layouts via a
   synthetic `/context.typ` source (`typst/context.rs::build_context_source`),
   registered alongside the per-class layouts and imported opt-in (`#import
@@ -663,20 +725,34 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   and drops the content) surface through the same `tracing::warn!` path as
   every other typst diagnostic in this crate, not swallowed by
   `typst_html::html`'s own `SourceResult`. CLI: `mdcast render-template ...
-  --format html` (`bin/mdcast/render_template.rs::Format`; the `Html`
-  variant itself is `#[cfg(feature = "typst-html")]`, so clap simply
-  rejects `--format html` as an unknown value when the binary wasn't built
-  with the feature).
-- **`mdcast-server` has no compile time or memory limit.** A caller-supplied
-  typst template that loops forever wedges one `spawn_blocking` thread for the
-  life of the process: `spawn_blocking` cannot be cancelled, so a timeout
-  wrapped around the `.await` would free the request without reclaiming the
-  thread. This is a deliberate deferral, not an oversight — the trust boundary
-  is internal callers, and the real fix is a design change rather than a flag:
-  put the compile behind a `Compiler` trait and run it in a killable
-  subprocess with rlimits (`RLIMIT_CPU`/`RLIMIT_AS`). Take it when untrusted
-  templates become a requirement, or when a wedged thread is actually observed.
-  Do **not** paper over it with a `tokio::time::timeout`.
+  --format html` (`bin/mdcast/render_template.rs::Format`). The `Html`
+  variant is *not* feature-gated (issue #73): with the default
+  `--typst-compiler library`, selecting it without the `typst-html` cargo
+  feature still fails, but now at runtime (from
+  `compiler::library::compile`'s `CompileFormat::Html` arm) rather than at
+  clap's argument-parsing stage; `--typst-compiler cli` needs no such build
+  feature at all.
+- **`mdcast-server`'s default (`MDCAST_TYPST=library`) compiler has no
+  compile time or memory limit — mitigated by `MDCAST_TYPST=cli` (issue
+  #73).** A caller-supplied typst template that loops forever wedges one
+  `spawn_blocking` thread for the life of the process: `spawn_blocking`
+  cannot be cancelled, so a timeout wrapped around the `.await` would free
+  the request without reclaiming the thread. This was a deliberate deferral
+  in `library` mode, not an oversight — the trust boundary is internal
+  callers — and it is exactly what `cli` mode (`backends/typst/compiler/cli.rs`)
+  now offers: each compile is a real child process, so
+  `MDCAST_TYPST_TIMEOUT_SECS` bounds it with an actual kill+reap (verified by
+  `cli::tests::timeout_kills_and_reaps_a_non_terminating_compile` and
+  `routes::tests::a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request`
+  — both assert the process/thread count returns to baseline, the specific
+  check `library` mode structurally cannot pass), and
+  `MDCAST_TYPST_MAX_MEMORY_BYTES` can cap its address space via
+  `setrlimit(RLIMIT_AS)`. `library` mode is still the default — an existing
+  deployment that sets nothing sees byte-identical behaviour and keeps this
+  limitation; `cli` mode is the fix, opted into per-deployment. Still do
+  **not** paper over the `library`-mode limitation with a
+  `tokio::time::timeout` — it would free the request without reclaiming the
+  thread.
 - `mdcast-server`'s template route deliberately does *not* layer
   `EmbeddedAssets` under the request's blobs, unlike the markdown route.
   `render_template` discovers sibling files by listing the template's own

@@ -113,6 +113,13 @@ typst-html = { version = "0.14", optional = true }
 typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
+# `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap
+# (`backends/typst/compiler/cli.rs::apply_memory_limit`) — unix only, so it's
+# scoped here rather than behind a cargo feature; a non-unix build simply
+# never applies the cap (documented on `CliCompiler::max_memory_bytes`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 # Router-level tests drive `mdcast-server`'s axum `Router` through

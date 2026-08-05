@@ -1,13 +1,18 @@
-//! Typst backend, in-process. Uses the `typst` compiler crate via
-//! `typst-as-lib`'s templating wrapper — no subprocess, no `typst` binary on
-//! PATH, no temp-dir gymnastics for the typst source.
+//! Typst backend. Uses the `typst` compiler crate via `typst-as-lib`'s
+//! templating wrapper by default — no subprocess, no `typst` binary on PATH,
+//! no temp-dir gymnastics for the typst source — or, when `TypstCompiler::Cli`
+//! is selected (issue #73), shells out to a real `typst compile` in a temp
+//! dir. `render_to_bytes` doesn't know which: it always ends by handing a
+//! `compiler::CompileInputs` to `self.compiler.compile(...)`.
 //!
-//! Per-page layout templates are pulled from the `AssetProvider` and registered
-//! as static sources on the engine; the driver `main.typ` is built in memory
-//! and points at each layout via `#import`. Compilation runs on a blocking
-//! thread (`spawn_blocking`) so the executor stays responsive.
+//! Per-page layout templates are pulled from the `AssetProvider` and folded
+//! into `CompileInputs.sources`; the driver `main.typ` is built in memory and
+//! points at each layout via `#import`. In `Library` mode compilation runs on
+//! a blocking thread (`spawn_blocking`) so the executor stays responsive; in
+//! `Cli` mode it's a child process instead, which is what makes it killable
+//! (see `compiler/cli.rs`).
 //!
-//! Three kinds of files reach the engine: the per-class layout sources, the
+//! Three kinds of files reach the compiler: the per-class layout sources, the
 //! synthetic `/context.typ`, and virtual files resolved by `virtual_files` —
 //! images found by scanning page bodies plus `ResolvedDoc.assets`, the latter
 //! for chrome a layout owns directly (a logo, a background) rather than
@@ -17,35 +22,41 @@ use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures::future::try_join_all;
 use futures::try_join;
-use typst::syntax::{FileId, Source, VirtualPath};
-use typst_as_lib::TypstEngine;
 
 use crate::assets::{AssetProvider, BoxFuture};
 use crate::pages::Page;
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
+mod compiler;
 mod context;
 mod fonts;
 mod markdown;
 mod template;
 mod virtual_files;
+pub use compiler::{CliCompiler, TypstCompiler};
+use compiler::{CompileFormat, CompileInputs};
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
 #[cfg(feature = "typst-html")]
 pub use template::render_template_html;
-pub use template::{TemplateDoc, render_template};
+pub use template::{TemplateDoc, render_template, render_template_html_with, render_template_with};
 use virtual_files::{collect_images_for_typst, collect_layout_assets};
 
 pub struct TypstBackend {
     target: Target,
+    compiler: TypstCompiler,
 }
 
 impl TypstBackend {
     pub fn new(target: Target) -> Self {
+        Self::with_compiler(target, TypstCompiler::default())
+    }
+
+    pub fn with_compiler(target: Target, compiler: TypstCompiler) -> Self {
         assert!(matches!(target, Target::Pdf | Target::PdfPresentation));
-        Self { target }
+        Self { target, compiler }
     }
 
     /// Returns `(requested_class, bytes)` — the bytes may be from the fallback
@@ -131,10 +142,26 @@ impl Backend for TypstBackend {
             let driver = build_driver(&doc.pages, &typst_bodies, toc_depth);
             let context_source = build_context_source(&doc.meta, &doc.brand.0, &asset_map);
 
-            let pdf_bytes = spawn_compile(move || {
-                compile_pdf(driver, context_source, layouts, virtual_files, fonts)
-            })
-            .await?;
+            let mut sources: Vec<(String, String)> = Vec::with_capacity(layouts.len() + 2);
+            sources.push((CONTEXT_VIRTUAL_PATH.to_string(), context_source));
+            sources.push(("main.typ".to_string(), driver));
+            for (class, bytes) in layouts {
+                let path = format!("layouts/{}.typ", sanitize_class(&class));
+                let src = String::from_utf8(bytes)
+                    .with_context(|| format!("layout '{class}' is not valid UTF-8"))?;
+                sources.push((path, src));
+            }
+
+            let pdf_bytes = self
+                .compiler
+                .compile(CompileInputs {
+                    main: "main.typ".to_string(),
+                    sources,
+                    files: virtual_files,
+                    fonts,
+                    format: CompileFormat::Pdf,
+                })
+                .await?;
 
             Ok(RenderedArtifact {
                 primary: Bytes::from(pdf_bytes),
@@ -145,14 +172,15 @@ impl Backend for TypstBackend {
     }
 }
 
-/// Run a sync typst compile on a blocking thread. typst's compiler is sync
-/// and CPU-bound; everything is produced in memory — no temp file, nothing
-/// to clean up. `spawn_blocking` runs on its own OS thread and does not
-/// inherit the calling task's `tracing` dispatcher, so it's captured here
-/// and re-installed inside the closure — otherwise the compile's warnings
-/// would only surface under a process-wide `set_global_default` subscriber,
-/// never a task-scoped one. Shared by the markdown path (`compile_pdf`) and
-/// the template path (`template.rs`).
+/// Run a sync typst compile on a blocking thread — used by
+/// `TypstCompiler::Library` only (`Cli` runs a child process instead, which
+/// needs no blocking thread of its own). typst's compiler is sync and
+/// CPU-bound; everything is produced in memory — no temp file, nothing to
+/// clean up. `spawn_blocking` runs on its own OS thread and does not inherit
+/// the calling task's `tracing` dispatcher, so it's captured here and
+/// re-installed inside the closure — otherwise the compile's warnings would
+/// only surface under a process-wide `set_global_default` subscriber, never a
+/// task-scoped one.
 async fn spawn_compile<T, F>(compile: F) -> Result<T>
 where
     F: FnOnce() -> Result<T> + Send + 'static,
@@ -236,59 +264,6 @@ fn alias_for(class: &str) -> String {
 /// input domain, kept separate deliberately rather than reused.
 fn sanitize_class(class: &str) -> String {
     class.replace(['/', '\\'], "_")
-}
-
-/// Synchronous: builds the engine, compiles, exports to PDF bytes.
-fn compile_pdf(
-    driver: String,
-    context_source: String,
-    layouts: Vec<(String, Vec<u8>)>,
-    virtual_files: Vec<(String, Vec<u8>)>,
-    fonts: Vec<Vec<u8>>,
-) -> Result<Vec<u8>> {
-    // Pre-build owned `Source` values so we don't fight lifetimes against the
-    // `(&str, String)` IntoSource impl that requires the path to outlive the iterator.
-    let mut sources: Vec<Source> = Vec::with_capacity(layouts.len() + 1);
-    let context_id = FileId::new(None, VirtualPath::new(CONTEXT_VIRTUAL_PATH));
-    sources.push(Source::new(context_id, context_source));
-    for (class, bytes) in layouts {
-        let path = format!("layouts/{}.typ", sanitize_class(&class));
-        let src = String::from_utf8(bytes)
-            .with_context(|| format!("layout '{class}' is not valid UTF-8"))?;
-        let id = FileId::new(None, VirtualPath::new(path));
-        sources.push(Source::new(id, src));
-    }
-
-    // Materialise image/asset bytes for the engine. Keys (virtual paths) and
-    // bytes are stored in `virtual_files`; we build (&str, Vec<u8>) tuples by
-    // leaking the path strings — they live for the duration of the compile,
-    // which is fine because the engine itself is dropped at the end of this
-    // function.
-    let image_refs: Vec<(&str, Vec<u8>)> = virtual_files
-        .iter()
-        .map(|(p, b)| (p.as_str(), b.clone()))
-        .collect();
-
-    // Registered before `search_fonts_with`: `TypstEngine::builder().build()`
-    // pushes explicit `.fonts(...)` faces into the font book first, so an
-    // exact family match resolves to the provider-supplied font even when
-    // the same family is also discoverable on the host (FontBook::select's
-    // tie-break keeps the first-inserted candidate).
-    let engine = TypstEngine::builder()
-        .main_file(driver)
-        .with_static_source_file_resolver(sources)
-        .with_static_file_resolver(image_refs)
-        .fonts(fonts)
-        .search_fonts_with(typst_as_lib::typst_kit_options::TypstKitFontOptions::default())
-        .build();
-
-    let result = engine.compile();
-    forward_warnings(&result.warnings);
-    let doc = result.output.map_err(format_lib_error)?;
-
-    let options = typst_pdf::PdfOptions::default();
-    let pdf = typst_pdf::pdf(&doc, &options).map_err(format_diagnostics)?;
-    Ok(pdf)
 }
 
 fn format_lib_error(err: typst_as_lib::TypstAsLibError) -> anyhow::Error {
