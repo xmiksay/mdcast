@@ -1,18 +1,22 @@
 //! Data-driven template rendering: a user-supplied typst template + structured
-//! data → PDF (or, behind the `typst-html` feature, HTML — issue #53),
+//! data → PDF (or, on HTML-capable configurations, HTML — issue #53),
 //! bypassing the markdown pipeline (splitter, classifier, `md_to_typst`,
-//! driver) entirely. A parallel entry point into the same engine plumbing the
-//! markdown path uses — in-process compile, `AssetProvider`-only file access,
-//! `/context.typ` for `DocMeta`/`BrandSpec` — rather than a second
-//! `ResolvedDoc`-shaped IR. `Registry`/`Backend` stay untouched: they're
-//! `Target`-keyed and markdown-shaped, and there is no `Target` variant a
-//! data-driven render belongs under.
+//! driver) entirely. A parallel entry point into the same compiler plumbing
+//! the markdown path uses — `AssetProvider`-only file access, `/context.typ`
+//! for `DocMeta`/`BrandSpec`, the `TypstCompiler` seam (issue #73) — rather
+//! than a second `ResolvedDoc`-shaped IR. `Registry`/`Backend` stay
+//! untouched: they're `Target`-keyed and markdown-shaped, and there is no
+//! `Target` variant a data-driven render belongs under.
 //!
-//! [`render_template`] and [`render_template_html`] share everything up to
-//! the export step (`assemble` + `build_engine`) — same template, same data,
-//! same sibling/asset resolution. Only the final `typst_pdf::pdf(...)` vs
-//! `typst_html::html(...)` call differs, so a template author can point the
-//! same `.typ` file at both without maintaining two sources of truth.
+//! [`render_template`]/[`render_template_with`] and
+//! [`render_template_html`]/[`render_template_html_with`] share everything up
+//! to the export step (`assemble` produces the same [`CompileInputs`] shape
+//! either way) — same template, same data, same sibling/asset resolution.
+//! Only `CompileFormat::Pdf` vs `CompileFormat::Html` differs, so a template
+//! author can point the same `.typ` file at both without maintaining two
+//! sources of truth. The `_with` variants take an explicit `TypstCompiler`;
+//! the plain ones default to `Library`, matching every entry point's
+//! pre-issue-#73 behaviour.
 //!
 //! `data` is serialized to JSON and registered as a virtual `/data.json` the
 //! template reads with typst's own `json()` — no custom serialization dialect
@@ -36,12 +40,11 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
 use futures::future::try_join_all;
-use typst::syntax::{FileId, Source, VirtualPath};
-use typst_as_lib::TypstEngine;
 
 use crate::assets::AssetProvider;
 use crate::{BrandHandle, DocMeta, RenderedArtifact};
 
+use super::compiler::{CompileFormat, CompileInputs, TypstCompiler};
 use super::context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 
 /// Virtual path the serialized `TemplateDoc.data` is registered under. A
@@ -61,59 +64,90 @@ pub struct TemplateDoc {
     pub brand: BrandHandle,
 }
 
-/// Render `doc.template` against `doc.data` to a PDF. Reuses the same
-/// `/context.typ` (`doc-meta`, `brand`, and their accessor helpers) as the
-/// markdown pipeline; `asset-path` degrades every key to its `default:`
-/// since template mode has no `ResolvedDoc.assets` — a template reaches its
-/// own chrome via sibling files instead (see module docs).
+/// Render `doc.template` against `doc.data` to a PDF via the default
+/// (`Library`) compiler. Reuses the same `/context.typ` (`doc-meta`, `brand`,
+/// and their accessor helpers) as the markdown pipeline; `asset-path`
+/// degrades every key to its `default:` since template mode has no
+/// `ResolvedDoc.assets` — a template reaches its own chrome via sibling files
+/// instead (see module docs).
 pub async fn render_template(
     doc: &TemplateDoc,
     assets: &dyn AssetProvider,
 ) -> Result<RenderedArtifact> {
-    let (main_id, sources, binaries) = assemble(doc, assets).await?;
-
-    let pdf_bytes =
-        super::spawn_compile(move || compile_template_pdf(&main_id, sources, binaries)).await?;
-
-    Ok(RenderedArtifact {
-        primary: Bytes::from(pdf_bytes),
-        filename: "output.pdf".to_string(),
-        extras: vec![],
-    })
+    render_template_with(doc, assets, &TypstCompiler::default()).await
 }
 
-/// Render `doc.template` against `doc.data` to an HTML page — same template,
-/// same data, only the export step differs from [`render_template`] (issue
-/// #53). Experimental upstream: typst's HTML export and the `target()`
-/// function it relies on for dual-target branching are unstable and may
-/// shift across typst versions; see README's "Data-driven template
-/// rendering" section for the `target()` branching pattern a shared template
-/// needs.
+/// Same as [`render_template`], against an explicitly selected
+/// [`TypstCompiler`] rather than always `Library` (issue #73) — what
+/// `mdcast-server` and the CLI call once a compiler is configured.
+pub async fn render_template_with(
+    doc: &TemplateDoc,
+    assets: &dyn AssetProvider,
+    compiler: &TypstCompiler,
+) -> Result<RenderedArtifact> {
+    compile_template(doc, assets, CompileFormat::Pdf, compiler).await
+}
+
+/// Render `doc.template` against `doc.data` to an HTML page via the default
+/// (`Library`) compiler — same template, same data, only the export step
+/// differs from [`render_template`] (issue #53). Experimental upstream:
+/// typst's HTML export and the `target()` function it relies on for
+/// dual-target branching are unstable and may shift across typst versions;
+/// see README's "Data-driven template rendering" section for the `target()`
+/// branching pattern a shared template needs. Gated behind the `typst-html`
+/// cargo feature because the in-process compiler needs it (see
+/// `compiler/library.rs`'s module docs) — [`render_template_html_with`] has
+/// no such restriction.
 #[cfg(feature = "typst-html")]
 pub async fn render_template_html(
     doc: &TemplateDoc,
     assets: &dyn AssetProvider,
 ) -> Result<RenderedArtifact> {
-    let (main_id, sources, binaries) = assemble(doc, assets).await?;
+    render_template_html_with(doc, assets, &TypstCompiler::default()).await
+}
 
-    let html_bytes =
-        super::spawn_compile(move || compile_template_html(&main_id, sources, binaries)).await?;
+/// Same as [`render_template_html`], against an explicitly selected
+/// [`TypstCompiler`], and — unlike [`render_template_html`] — not gated
+/// behind the `typst-html` cargo feature: a `TypstCompiler::Cli` compile
+/// shells out to a real `typst` binary and needs no such build-time toggle
+/// (issue #73). This is what lets `mdcast-server` answer `format: "html"` in
+/// `cli` mode on a standard build. Passing `TypstCompiler::Library` without
+/// the `typst-html` feature still fails, from `compiler::library::compile`.
+pub async fn render_template_html_with(
+    doc: &TemplateDoc,
+    assets: &dyn AssetProvider,
+    compiler: &TypstCompiler,
+) -> Result<RenderedArtifact> {
+    compile_template(doc, assets, CompileFormat::Html, compiler).await
+}
 
+async fn compile_template(
+    doc: &TemplateDoc,
+    assets: &dyn AssetProvider,
+    format: CompileFormat,
+    compiler: &TypstCompiler,
+) -> Result<RenderedArtifact> {
+    let inputs = assemble(doc, assets, format).await?;
+    let bytes = compiler.compile(inputs).await?;
+    let filename = match format {
+        CompileFormat::Pdf => "output.pdf",
+        CompileFormat::Html => "output.html",
+    };
     Ok(RenderedArtifact {
-        primary: Bytes::from(html_bytes),
-        filename: "output.html".to_string(),
+        primary: Bytes::from(bytes),
+        filename: filename.to_string(),
         extras: vec![],
     })
 }
 
 /// Fetches the template, its siblings, and `doc.data`/`/context.typ` from the
-/// `AssetProvider` and turns them into the `(main file id, sources,
-/// binaries)` a `TypstEngine` needs to compile — shared by [`render_template`]
-/// and [`render_template_html`], which differ only in the export step.
+/// `AssetProvider` and turns them into the [`CompileInputs`] either compiler
+/// needs.
 async fn assemble(
     doc: &TemplateDoc,
     assets: &dyn AssetProvider,
-) -> Result<(String, Vec<Source>, Vec<(String, Vec<u8>)>)> {
+    format: CompileFormat,
+) -> Result<CompileInputs> {
     let Some(template_bytes) = assets.get(&doc.template).await? else {
         bail!(
             "typst template '{}' not found in asset provider",
@@ -142,18 +176,12 @@ async fn assemble(
         }))
         .await?;
 
-    let mut sources = Vec::with_capacity(siblings.len() + 2);
+    let mut sources: Vec<(String, String)> = Vec::with_capacity(siblings.len() + 2);
     let context_source = build_context_source(&doc.meta, &doc.brand.0, &BTreeMap::new());
-    sources.push(Source::new(
-        FileId::new(None, VirtualPath::new(CONTEXT_VIRTUAL_PATH)),
-        context_source,
-    ));
-    sources.push(Source::new(
-        FileId::new(None, VirtualPath::new(doc.template.as_str())),
-        template_src,
-    ));
+    sources.push((CONTEXT_VIRTUAL_PATH.to_string(), context_source));
+    sources.push((doc.template.clone(), template_src));
 
-    let mut binaries: Vec<(String, Vec<u8>)> = vec![(
+    let mut files: Vec<(String, Vec<u8>)> = vec![(
         DATA_VIRTUAL_PATH.to_string(),
         serde_json::to_vec(&doc.data).context("serialize TemplateDoc.data to JSON")?,
     )];
@@ -161,76 +189,21 @@ async fn assemble(
         if key.ends_with(".typ") {
             let src = String::from_utf8(bytes.to_vec())
                 .with_context(|| format!("template partial '{key}' is not valid UTF-8"))?;
-            sources.push(Source::new(
-                FileId::new(None, VirtualPath::new(key.as_str())),
-                src,
-            ));
+            sources.push((key, src));
         } else {
-            binaries.push((key, bytes.to_vec()));
+            files.push((key, bytes.to_vec()));
         }
     }
 
-    Ok((doc.template.clone(), sources, binaries))
-}
-
-/// Builds a `TypstEngine` over the assembled sources/binaries. Shared by both
-/// export paths — a template has no per-class layouts and brings its own
-/// fonts via the host/embedded search only (v1 scope; see module docs).
-fn build_engine(
-    sources: Vec<Source>,
-    binaries: Vec<(String, Vec<u8>)>,
-) -> TypstEngine<typst_as_lib::TypstTemplateCollection> {
-    let binary_refs: Vec<(&str, Vec<u8>)> = binaries
-        .iter()
-        .map(|(p, b)| (p.as_str(), b.clone()))
-        .collect();
-
-    TypstEngine::builder()
-        .with_static_source_file_resolver(sources)
-        .with_static_file_resolver(binary_refs)
-        .search_fonts_with(typst_as_lib::typst_kit_options::TypstKitFontOptions::default())
-        .build()
-}
-
-/// Synchronous: builds the engine, compiles, exports to PDF bytes. Mirrors
-/// `super::compile_pdf`, minus the driver/layouts/fonts the markdown path
-/// needs.
-fn compile_template_pdf(
-    main_id: &str,
-    sources: Vec<Source>,
-    binaries: Vec<(String, Vec<u8>)>,
-) -> Result<Vec<u8>> {
-    let engine = build_engine(sources, binaries);
-
-    let result = engine.compile(main_id);
-    super::forward_warnings(&result.warnings);
-    let compiled = result.output.map_err(super::format_lib_error)?;
-
-    let options = typst_pdf::PdfOptions::default();
-    let pdf = typst_pdf::pdf(&compiled, &options).map_err(super::format_diagnostics)?;
-    Ok(pdf)
-}
-
-/// Synchronous: builds the engine, compiles to typst's experimental
-/// `HtmlDocument`, exports to an HTML string. `typst-as-lib`'s `typst-html`
-/// cargo feature (enabled transitively by this crate's own `typst-html`
-/// feature) flips `typst::Feature::Html` on for the engine's library, which
-/// is what makes the `target()` function a template branches on available in
-/// the first place — see README's "writing a dual-target template" note.
-#[cfg(feature = "typst-html")]
-fn compile_template_html(
-    main_id: &str,
-    sources: Vec<Source>,
-    binaries: Vec<(String, Vec<u8>)>,
-) -> Result<Vec<u8>> {
-    let engine = build_engine(sources, binaries);
-
-    let result: typst::diag::Warned<Result<typst_html::HtmlDocument, _>> = engine.compile(main_id);
-    super::forward_warnings(&result.warnings);
-    let compiled = result.output.map_err(super::format_lib_error)?;
-
-    let html = typst_html::html(&compiled).map_err(super::format_diagnostics)?;
-    Ok(html.into_bytes())
+    Ok(CompileInputs {
+        main: doc.template.clone(),
+        sources,
+        files,
+        // A template has no per-class layouts and brings its own fonts via
+        // the host/embedded search only (v1 scope; see module docs).
+        fonts: Vec::new(),
+        format,
+    })
 }
 
 #[cfg(test)]

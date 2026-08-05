@@ -23,8 +23,9 @@ the LaTeX toolchain is slow and heavy. The value mdcast adds is the
 ## Quick start
 
 PDF targets need nothing extra — the Typst compiler is embedded in the
-library. Only the pandoc-backed targets (docx/odt/pptx/html-reveal) need the
-`pandoc` binary:
+library by default (a `typst` binary is an opt-in alternative — see
+"Selecting the Typst compiler" below). Only the pandoc-backed targets
+(docx/odt/pptx/html-reveal) need the `pandoc` binary:
 
 ```sh
 yay -S pandoc        # arch
@@ -560,6 +561,14 @@ feature, which flips `typst::Feature::Html` on for the whole process (every
 that's what makes the `target()` function below available at all. With the
 feature off, the dependency tree and every other code path are unchanged.
 
+That restriction is specific to the **in-process** compiler. Select the `cli`
+Typst compiler instead (see "Selecting the Typst compiler" below) and HTML
+export works with no `typst-html` cargo feature at all — a real `typst`
+binary either supports `--features html` or it doesn't, decided per
+invocation rather than per build. `render_template_html_with(doc, provider,
+&compiler)` is the compiler-explicit counterpart to `render_template_html`
+above and is always available, regardless of the `typst-html` feature.
+
 Typst's HTML export is **experimental** and semantic-first — it does not try
 to reproduce paged output in a browser:
 
@@ -611,14 +620,53 @@ keep the branch coarse (chrome vs. no chrome) rather than sprinkling
 ### CLI
 
 ```
-mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html]
+mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ```
 
 `--data` is a JSON file deserialized straight into `TemplateDoc.data`.
 `--assets DIR`/`--brand` work exactly as they do for `render` above.
-`--format` defaults to `pdf`; `html` is only a valid value when `mdcast` was
-built with the `typst-html` feature (`cargo build --features typst-html`) —
-otherwise clap rejects it as an unknown value.
+`--format` defaults to `pdf`; `html` with the default `--typst-compiler
+library` needs `mdcast` to have been built with the `typst-html` feature
+(`cargo build --features typst-html`) — otherwise it fails at compile time
+with a clear message. `--typst-compiler cli` needs no such build feature —
+see "Selecting the Typst compiler" below.
+
+## Selecting the Typst compiler (issue #73)
+
+Typst compiles **in-process by default** (`Library`): fast, no external
+binary, no temp directory. `--typst-compiler cli` (CLI) / `MDCAST_TYPST=cli`
+(server) instead shells out to a real `typst compile` per render, which
+trades a little speed for three things the in-process path structurally
+cannot offer:
+
+- **A killable compile.** A caller-supplied template with an infinite loop
+  wedges one `spawn_blocking` OS thread for the life of the process under
+  `library` mode — `spawn_blocking` cannot be cancelled. Under `cli` mode
+  it's a child process instead, bounded by a timeout (`--typst-timeout-secs`
+  / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it.
+- **A memory cap.** `--typst-timeout-secs`'s server-only sibling
+  `MDCAST_TYPST_MAX_MEMORY_BYTES` applies `setrlimit(RLIMIT_AS)` to the child
+  (unix only).
+- **HTML export without the `typst-html` cargo feature** — see above.
+
+`--typst-bin PATH` / `MDCAST_TYPST_BIN` (default `typst`) picks the binary;
+it is looked up on `PATH` if it isn't itself a path. The CLI binary's Typst
+version need not match the one `mdcast` links — that's the point of `cli`
+mode being able to run a newer or older release without a rebuild — but it
+does mean identical input can render slightly differently between `library`
+and `cli` mode, or between two `cli`-mode deployments pinned to different
+`typst` releases. `mdcast-server` logs the CLI binary's reported version at
+startup so that skew is visible rather than silently discovered later as a
+rendering difference.
+
+`library` is the default everywhere: a deployment or CLI invocation that sets
+none of `--typst-compiler`/`MDCAST_TYPST` sees exactly the pre-#73 behaviour.
+
+**Security note.** In-process, Typst's `World` is a virtual filesystem that
+cannot reach the host disk at all. `cli` mode's temp directory is real, with
+`--root` pointed at it explicitly and every path checked against
+directory-traversal (`..`) before it's written — but it is a real,
+if narrow, filesystem surface that `library` mode simply doesn't have.
 
 ## Library usage
 
@@ -788,9 +836,9 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]...
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]
-mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--format pdf|html]
+mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
@@ -817,7 +865,13 @@ above). Ignored by pandoc targets.
 `typst` feature) has no markdown involved — see "Data-driven template
 rendering" above. `TEMPLATE` is an `AssetProvider` key; `--data` is a JSON
 file deserialized into `TemplateDoc.data`. `--format` defaults to `pdf`;
-`html` needs the `typst-html` feature — see "HTML export" above.
+`html` with the default `--typst-compiler library` needs the `typst-html`
+feature — see "HTML export" above.
+
+`--typst-compiler`/`--typst-bin`/`--typst-timeout-secs` (shared by `render`
+and `render-template`) select the in-process compiler (default) or shell out
+to a `typst` binary instead — see "Selecting the Typst compiler" below.
+Ignored by pandoc targets.
 
 ## HTTP service (`server` feature)
 
@@ -847,6 +901,10 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
+| `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shell out to a `typst` binary per compile, killable and memory-boundable) — see "Selecting the Typst compiler" above |
+| `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode; the child is killed and reaped on expiry |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on the `cli`-mode child (unix only) |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
 An unset token doesn't just relax auth on a route — the `require_bearer`
@@ -975,18 +1033,26 @@ and frontmatter in the submitted markdown wins over the request's `meta`
 field. `POST /v1/render/template` is the `render-template` path: the template
 arrives as inline typst source, `data` is raw JSON text that becomes the
 virtual `/data.json`, and sibling files it `#import`s or `#image`s come from
-the manifest. `"format": "html"` needs a server built with `--features
-server,typst-html`; without it the request gets a `501` saying so, never a PDF
-with the wrong content type.
+the manifest. With `MDCAST_TYPST=library` (the default), `"format": "html"`
+needs a server built with `--features server,typst-html`; without it the
+request gets a `501` saying so, never a PDF with the wrong content type. With
+`MDCAST_TYPST=cli` it needs no such build feature at all — see "Selecting the
+Typst compiler" above.
 
 ### Known limitations
 
-- **No compile time or memory limit.** A template that loops forever wedges
-  one `spawn_blocking` thread for the life of the process — `spawn_blocking`
-  cannot be cancelled, so a timeout would free the request but not the thread.
-  This is a deliberate deferral given the internal trust boundary; the fix, if
-  it is ever needed, is to put the compile behind a `Compiler` trait and run
-  it in a killable subprocess with rlimits, not to wrap it in a timeout.
+- **`MDCAST_TYPST=library` (the default) has no compile time or memory
+  limit — mitigated by `MDCAST_TYPST=cli` (issue #73).** A template that
+  loops forever wedges one `spawn_blocking` thread for the life of the
+  process — `spawn_blocking` cannot be cancelled, so a timeout would free the
+  request but not the thread. This was a deliberate deferral given the
+  internal trust boundary; `MDCAST_TYPST=cli` (see "Selecting the Typst
+  compiler" above) is that fix, arrived at: each compile runs as a real child
+  process, bounded by `MDCAST_TYPST_TIMEOUT_SECS` (killed and reaped on
+  expiry — the server's thread/process counts return to baseline, which
+  `library` mode cannot offer) and optionally `MDCAST_TYPST_MAX_MEMORY_BYTES`.
+  `library` mode keeps this limitation by design — it is still the default,
+  for a deployment that hasn't opted into `cli` mode.
 - One instance, one node-local cache. Two instances behind a load balancer
   would each negotiate their own blobs (correct, just wasteful).
 - The response carries the primary artifact only. No current backend produces

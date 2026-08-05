@@ -18,8 +18,12 @@ use mdcast::{
 mod fs_assets;
 #[cfg(feature = "typst")]
 mod render_template;
+#[cfg(feature = "typst")]
+mod typst_compiler_args;
 
 use fs_assets::FsAssets;
+#[cfg(feature = "typst")]
+use typst_compiler_args::TypstCompilerArgs;
 
 #[derive(Parser)]
 #[command(name = "mdcast", about = "Markdown → DOCX/PDF/PPTX/HTML")]
@@ -71,6 +75,10 @@ enum Cmd {
         /// `--assets`/embedded provider; ignored by pandoc targets.
         #[arg(long = "layout-font")]
         layout_fonts: Vec<String>,
+        /// Ignored by pandoc targets.
+        #[cfg(feature = "typst")]
+        #[command(flatten)]
+        typst_compiler: TypstCompilerArgs,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
     /// auto-classifier and explicit-wrapper parsing.
@@ -104,11 +112,14 @@ enum Cmd {
         /// uses.
         #[arg(long)]
         assets: Option<PathBuf>,
-        /// Output format. `html` is only a valid value when the binary was
-        /// built with the `typst-html` feature (off by default — see
-        /// README's "Data-driven template rendering" section).
+        /// Output format. `html` always works with `--typst-compiler cli`;
+        /// with the default (`library`) it's only a valid value when the
+        /// binary was built with the `typst-html` feature (off by
+        /// default — see README's "Data-driven template rendering" section).
         #[arg(long, value_enum, default_value_t = render_template::Format::Pdf)]
         format: render_template::Format,
+        #[command(flatten)]
+        typst_compiler: TypstCompilerArgs,
     },
 }
 
@@ -157,6 +168,8 @@ async fn main() -> Result<()> {
             toc_depth,
             layout_assets,
             layout_fonts,
+            #[cfg(feature = "typst")]
+            typst_compiler,
         } => {
             let (doc, mermaid_svgs) = load_doc(
                 &input,
@@ -168,6 +181,9 @@ async fn main() -> Result<()> {
                 layout_fonts,
             )
             .await?;
+            #[cfg(feature = "typst")]
+            let registry = Registry::with_typst_compiler(typst_compiler.build().await);
+            #[cfg(not(feature = "typst"))]
             let registry = Registry::with_defaults();
             // Provider stack, innermost first: embedded catalog, `--assets`
             // dir override, rendered mermaid SVGs. Boxed because each layer
@@ -226,8 +242,11 @@ async fn main() -> Result<()> {
             brand,
             assets,
             format,
+            typst_compiler,
         } => {
-            let artifact = render_template::run(template, data, out, brand, assets, format).await?;
+            let compiler = typst_compiler.build().await;
+            let artifact =
+                render_template::run(template, data, out, brand, assets, format, &compiler).await?;
             println!("wrote {}", artifact.primary.display());
         }
     }

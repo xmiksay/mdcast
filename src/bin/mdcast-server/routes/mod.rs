@@ -22,6 +22,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use mdcast::RenderedArtifact;
 use mdcast::backends::Registry;
+use mdcast::backends::typst::TypstCompiler;
 use mdcast::mdcast_api::Target;
 
 use crate::auth::require_bearer;
@@ -34,6 +35,11 @@ mod template;
 pub struct AppState {
     pub store: Arc<BlobStore>,
     pub registry: Registry,
+    /// Used directly by `/v1/render/template`'s HTML arm, which — unlike
+    /// `/v1/render` — doesn't go through `Registry` (see `template.rs`'s
+    /// module docs on why the template path bypasses `Backend`/`Registry`
+    /// entirely).
+    pub typst_compiler: TypstCompiler,
 }
 
 /// Everything under `/v1` sits behind the bearer gate when `token` is
