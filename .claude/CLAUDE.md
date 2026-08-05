@@ -80,13 +80,14 @@ src/
 │  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
 │  └─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
 └─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
-   ├─ main.rs           wiring only: config → blob store → Registry → router → axum::serve
+   ├─ main.rs           wiring only: config → blob store → prefill → Registry → router → axum::serve
    ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
    ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
    ├─ blobs/
    │  ├─ store.rs       BlobStore/BlobWriter — in-memory, byte-budgeted, second-chance ("lives") LRU, sha256-verified, pin()/mirror_path() for #72/pandoc
-   │  └─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
+   │  ├─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
+   │  └─ prefill.rs     prefill() — MDCAST_PREFILL_DIR startup warmup: walk, hash, ingest, pin, mirror (issue #72)
    └─ routes/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
       ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
@@ -300,6 +301,7 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_CACHE_LIVES`      | `3`                      | Eviction-survival chances a newly-cached blob starts with |
 | `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to (startup fails if below `MDCAST_CACHE_LIVES`) |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Ceiling for **every** request body, not just uploads |
+| `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
 No `MDCAST_BLOB_DIR` — the blob cache is entirely in memory (issue #71) and
@@ -310,12 +312,33 @@ piece of disk it still touches is a lazily-populated, process-scratch mirror
 instead of rewriting them into every render's temp dir — a hard link (not a
 symlink) so the mirror's own eviction can never race a subprocess mid-read;
 see `store.rs`'s module doc comment for the full rationale. `BlobStore::pin`/
-`unpin`/`pinned_bytes` exist for a future prefill routine (issue #72) to
-exempt predefined/branded assets from eviction outright — no caller yet, so
-size `MDCAST_MAX_CACHE_BYTES` comfortably above whatever that predefined set
-ends up being once #72 lands, since pinned bytes exceeding the budget is a
-permanent (logged, non-fatal) overshoot rather than something eviction can
-fix.
+`unpin`/`pinned_bytes` back the prefill routine below, which pins predefined
+assets to exempt them from eviction outright; size `MDCAST_MAX_CACHE_BYTES`
+comfortably above whatever the prefilled set ends up being, since pinned
+bytes exceeding the budget is a permanent (logged, non-fatal) overshoot
+rather than something eviction can fix.
+
+**Startup prefill (`MDCAST_PREFILL_DIR`, issue #72).** When set, `main`
+calls `blobs::prefill::prefill` before the router is built: it walks the
+directory recursively, and for every regular file under it (the asset *key*
+namespace plays no role here — the blob store is purely content-addressed)
+computes its sha256, ingests it through the same digest-verifying
+`begin_write`/`write`/`finish` path a real `/v1/blobs` upload goes through,
+then unconditionally `pin()`s it and calls `mirror_path()` so the pandoc
+hard-link mirror is already materialised before any caller asks — a
+prefilled asset is known in advance to be reused, so there's no reason to
+make the first render pay either cost. A digest already present is skipped
+(but still (re-)pinned/mirrored, covering a crash between a previous run's
+insert and its pin), so restarting against the same directory ingests
+nothing new. A missing/unreadable directory, or a file that fails to read,
+fails startup with an error naming the offending path — a broken prefill
+source is a broken deployment, not a transient condition to warn past and
+continue. `main` logs one `tracing::info!` after prefill completes:
+`ingested`/`already_present` file counts, `bytes` ingested this run, and the
+store's resulting `pinned_bytes`. Nothing about the wire protocol changes —
+prefill only affects which digests are already present when a caller's
+manifest is checked, so a client that already knows the predefined digests
+sees a `200` on its very first request instead of a `409` round trip.
 
 | Endpoint | Auth | Success | Failure |
 |---|---|---|---|

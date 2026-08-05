@@ -846,6 +846,7 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_CACHE_LIVES`      | `3`                      | Eviction-survival chances a newly-cached blob starts with (second-chance eviction, not evict-oldest) |
 | `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
+| `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
 An unset token doesn't just relax auth on a route — the `require_bearer`
@@ -858,6 +859,46 @@ is no `MDCAST_BLOB_DIR`. A blob missing after a restart just means the next
 render referencing it gets a `409` and the caller re-uploads it, exactly as
 if it had never been cached; the negotiation protocol already treats
 eviction as invisible, so this needs no special handling on the client side.
+
+### Startup prefill
+
+Set `MDCAST_PREFILL_DIR` to warm the cache before the server accepts its
+first request, instead of letting every caller pay the `409`-then-upload
+negotiation for assets that are really static infrastructure — the corporate
+font set, the brand logo, a house `reference.docx`, shared
+`typst/layouts/*.typ`. This matters most right where an empty, RAM-only cache
+hurts most: a fresh rollout, where every caller would otherwise re-upload the
+same megabytes simultaneously.
+
+```sh
+mkdir -p prefill/typst/layouts/pdf
+cp brand/Inter-Regular.ttf prefill/
+cp brand/logo.png prefill/
+cp reference.docx prefill/reference/
+cp hero.typ prefill/typst/layouts/pdf/
+
+MDCAST_TOKEN=$(openssl rand -hex 32) \
+MDCAST_PREFILL_DIR=./prefill \
+  ./target/release/mdcast-server
+# INFO blob store prefill complete ingested=4 already_present=0 bytes=... pinned_bytes=...
+```
+
+Every file under the directory is walked recursively, hashed, ingested through
+the same digest-verifying path a real `/v1/blobs` upload goes through, then
+**unconditionally pinned** (exempt from eviction, `BlobStore::pin`) and
+eagerly mirrored for pandoc (`BlobStore::mirror_path`) — so the first render
+that references one pays no negotiation and no mirror-materialisation cost.
+The directory layout and file names are irrelevant to the store itself (it's
+purely content-addressed); a caller still needs to know the resulting digests
+to reference these blobs by an `AssetManifest` key of its choosing. Restarting
+against the same directory re-ingests nothing (already-hashed digests are
+skipped, though still re-pinned/re-mirrored in case a previous run crashed
+mid-way). A missing directory, or any file that can't be read, fails startup
+with an error naming the offending path — a broken prefill source is a broken
+deployment, not something to start up in a half-warm state and warn about.
+Size `MDCAST_MAX_CACHE_BYTES` comfortably above the prefilled set's total
+size, since pinned bytes are exempt from eviction and a permanent overshoot
+only logs a warning rather than resolving itself.
 
 ### Endpoints
 

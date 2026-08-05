@@ -14,11 +14,11 @@
 //! invalidation protocol, and eviction is invisible.
 //!
 //! ```text
-//! main.rs      wiring: config → blob store → registry → router → serve
+//! main.rs      wiring: config → blob store → prefill → registry → router → serve
 //! config.rs    MDCAST_* environment configuration
 //! auth.rs      shared-bearer-token gate for /v1
 //! error.rs     ApiError → ErrorResponse/status, with internal detail kept in the log
-//! blobs/       content-addressed store + the manifest-backed AssetProvider
+//! blobs/       content-addressed store + the manifest-backed AssetProvider + startup prefill
 //! routes/      router, /health, /v1/blobs*, /v1/render, /v1/render/template
 //! ```
 //!
@@ -61,6 +61,18 @@ async fn main() -> Result<()> {
         config.cache_lives,
         config.max_cache_lives,
     )?;
+    if let Some(prefill_dir) = &config.prefill_dir {
+        let summary = blobs::prefill::prefill(&store, prefill_dir)
+            .await
+            .with_context(|| format!("prefill blob store from {}", prefill_dir.display()))?;
+        tracing::info!(
+            ingested = summary.ingested,
+            already_present = summary.already_present,
+            bytes = summary.bytes,
+            pinned_bytes = store.pinned_bytes(),
+            "blob store prefill complete"
+        );
+    }
     let state = Arc::new(AppState {
         store: Arc::new(store),
         registry: Registry::with_defaults(),

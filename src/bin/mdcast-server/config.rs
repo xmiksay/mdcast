@@ -5,6 +5,7 @@
 //! when that happens.
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
 
@@ -14,6 +15,7 @@ pub const MAX_CACHE_BYTES: &str = "MDCAST_MAX_CACHE_BYTES";
 pub const MAX_UPLOAD_BYTES: &str = "MDCAST_MAX_UPLOAD_BYTES";
 pub const CACHE_LIVES: &str = "MDCAST_CACHE_LIVES";
 pub const MAX_CACHE_LIVES: &str = "MDCAST_MAX_CACHE_LIVES";
+pub const PREFILL_DIR: &str = "MDCAST_PREFILL_DIR";
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
@@ -39,6 +41,10 @@ pub struct Config {
     pub cache_lives: u32,
     /// Ceiling repeated hits can grow an entry's lives to.
     pub max_cache_lives: u32,
+    /// Directory of predefined assets to pin into the blob store at startup
+    /// (issue #72). `None` when `MDCAST_PREFILL_DIR` is unset — prefill is
+    /// entirely opt-in.
+    pub prefill_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -74,6 +80,9 @@ impl Config {
                 .unwrap_or(DEFAULT_MAX_UPLOAD_BYTES),
             cache_lives,
             max_cache_lives,
+            prefill_dir: get(PREFILL_DIR)
+                .filter(|s| !s.is_empty())
+                .map(PathBuf::from),
         })
     }
 }
@@ -121,6 +130,7 @@ mod tests {
         assert_eq!(cfg.max_upload_bytes, DEFAULT_MAX_UPLOAD_BYTES);
         assert_eq!(cfg.cache_lives, DEFAULT_CACHE_LIVES);
         assert_eq!(cfg.max_cache_lives, DEFAULT_MAX_CACHE_LIVES);
+        assert_eq!(cfg.prefill_dir, None);
     }
 
     #[test]
@@ -140,6 +150,7 @@ mod tests {
             (MAX_UPLOAD_BYTES, "2048"),
             (CACHE_LIVES, "5"),
             (MAX_CACHE_LIVES, "50"),
+            (PREFILL_DIR, "/srv/mdcast/prefill"),
         ])
         .unwrap();
 
@@ -148,6 +159,13 @@ mod tests {
         assert_eq!(cfg.max_upload_bytes, 2048);
         assert_eq!(cfg.cache_lives, 5);
         assert_eq!(cfg.max_cache_lives, 50);
+        assert_eq!(cfg.prefill_dir, Some(PathBuf::from("/srv/mdcast/prefill")));
+    }
+
+    #[test]
+    fn an_empty_prefill_dir_is_treated_as_unset() {
+        let cfg = config_from(&[(TOKEN, "t"), (PREFILL_DIR, "")]).unwrap();
+        assert_eq!(cfg.prefill_dir, None);
     }
 
     #[test]
