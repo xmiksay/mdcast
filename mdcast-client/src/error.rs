@@ -71,6 +71,16 @@ pub enum Error {
     #[error("asset key `{key}` is named by the manifest but the bundle holds no bytes for it")]
     MissingAsset { key: String },
 
+    /// A digest-only bundle entry's `fetch` closure failed to produce bytes at
+    /// all, while satisfying an upload the server actually asked for. Never a
+    /// silent skip — the retry would just `409` on the same digest again.
+    #[error("fetching asset `{key}` failed: {source}")]
+    BlobFetchFailed {
+        key: String,
+        #[source]
+        source: crate::bundle::BlobFetchError,
+    },
+
     /// A digest asked for by hand (via [`crate::Client::upload`]) that nothing
     /// in the bundle hashes to.
     #[error("no asset in the bundle hashes to {digest}")]
@@ -78,7 +88,9 @@ pub enum Error {
 
     /// A caller-supplied manifest that disagrees with the bundle's actual
     /// bytes. The upload would be rejected server-side anyway — the server
-    /// re-hashes every byte — so it fails before the round trip.
+    /// re-hashes every byte — so it fails before the round trip. Also raised
+    /// when a digest-only entry's `fetch` succeeds but the bytes it returns
+    /// hash to something other than the digest it was declared with.
     #[error("asset key `{key}` is declared as {declared} but its bundle bytes hash to {actual}")]
     DigestMismatch {
         key: String,
