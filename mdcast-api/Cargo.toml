@@ -11,8 +11,15 @@ documentation = "https://docs.rs/mdcast-api"
 keywords = ["markdown", "mdcast", "document", "http", "api"]
 categories = ["text-processing", "api-bindings"]
 
+[features]
+# BrandSpec::from_toml (issue #80) — a remote caller with a brand.toml but no
+# reason to compile mdcast. Off by default: the crate's contract is
+# serde-only unless a consumer opts in.
+toml = ["dep:toml"]
+
 [dependencies]
 serde = { workspace = true }
+toml = { version = "0.9", optional = true }
 
 # serde_json is a test-only dependency on purpose: the wire types are plain
 # serde structs, so nothing here needs a concrete format at build time.

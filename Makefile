@@ -1,7 +1,7 @@
 export CARGO_BUILD_JOBS ?= 4
 
 .DEFAULT_GOAL := help
-.PHONY: help build release check check-all fmt lint test test-unit test-integration test-typst-html test-remote-images test-server coverage verify demo run-server clean
+.PHONY: help build release check check-all fmt lint test test-unit test-integration test-api-toml test-typst-html test-remote-images test-server coverage verify demo run-server clean
 
 # Dev default for `make run-server` — an exported environment variable wins.
 # The token is a placeholder for local runs; a deployment must set its own.
@@ -26,6 +26,7 @@ check: ## Fast typecheck (default features)
 
 check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check -p mdcast-api
+	cargo check -p mdcast-api --features toml
 	cargo check -p mdcast-client
 	cargo check -p mdcast --no-default-features
 	cargo check -p mdcast --no-default-features --features pandoc
@@ -40,9 +41,10 @@ check-all: ## Typecheck all feature combinations (the CI contract)
 fmt: ## Apply formatting
 	cargo fmt --all
 
-lint: ## fmt-check + clippy (default + typst-html + remote-images + server features), warnings are errors (mirrors CI)
+lint: ## fmt-check + clippy (default + toml + typst-html + remote-images + server features), warnings are errors (mirrors CI)
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy -p mdcast-api --all-targets --features toml -- -D warnings
 	cargo clippy -p mdcast --all-targets --features typst-html -- -D warnings
 	cargo clippy -p mdcast --all-targets --features remote-images -- -D warnings
 	cargo clippy -p mdcast --all-targets --features server -- -D warnings
@@ -56,6 +58,9 @@ test-integration: ## Integration tests (tests/ — engine smoke tests, which ski
 
 test: ## All tests, whole workspace (default features)
 	cargo test --workspace
+
+test-api-toml: ## Tests for mdcast-api's off-by-default toml feature (BrandSpec::from_toml, issue #80)
+	cargo test -p mdcast-api --features toml
 
 test-typst-html: ## Tests for the off-by-default typst-html feature (issue #53's HTML export)
 	cargo test -p mdcast --features typst-html
@@ -71,7 +76,7 @@ coverage: ## Test coverage: lcov.info + terminal summary (needs cargo-llvm-cov)
 	cargo llvm-cov --workspace --lcov --output-path lcov.info
 	cargo llvm-cov report --summary-only
 
-verify: lint check-all test test-typst-html test-remote-images test-server ## Pre-"done" gate: lint + all feature combos + all tests
+verify: lint check-all test test-api-toml test-typst-html test-remote-images test-server ## Pre-"done" gate: lint + all feature combos + all tests
 
 demo: build ## Render the golden fixture to target/demo/ (html-reveal + pdf)
 	./target/debug/mdcast render tests/golden/cover-deck.md --target html-reveal --out target/demo/cover-deck.html

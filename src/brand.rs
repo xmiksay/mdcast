@@ -2,9 +2,14 @@
 //!
 //! The types themselves are pure data and live in `mdcast_api::brand` so a
 //! client can speak the protocol without building mdcast. What stays here is
-//! the part that cannot: [`from_toml`], which needs `toml` + `anyhow`. It is
-//! a free function rather than `BrandSpec::from_toml` because an inherent
-//! impl has to live in the crate that defines the type.
+//! the part that cannot: [`from_toml`], an `anyhow`-wrapped convenience for
+//! `mdcast` callers. It delegates to
+//! [`BrandSpec::from_toml`](mdcast_api::brand::BrandSpec::from_toml)
+//! (`mdcast-api`'s optional `toml` feature, enabled here — issue #80), the
+//! parse mdcast-client-only callers reach directly without building this
+//! crate. It stays a free function rather than living solely as the
+//! inherent method because `mdcast` re-exports every moved type from its
+//! original path, and existing callers already use `mdcast::brand::from_toml`.
 
 use anyhow::{Context, Result};
 
@@ -14,7 +19,7 @@ pub use mdcast_api::brand::{
 
 /// Parse a `brand.toml` into a [`BrandSpec`].
 pub fn from_toml(s: &str) -> Result<BrandSpec> {
-    toml::from_str(s).context("invalid brand.toml")
+    BrandSpec::from_toml(s).context("invalid brand.toml")
 }
 
 #[cfg(test)]

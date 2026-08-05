@@ -2,8 +2,11 @@
 //! the auto-layout rules. v1 only models what the page-layout system needs;
 //! richer projection (palette → typst/CSS/reference docs) lands in Phase 4.
 //!
-//! Type definitions only — the `brand.toml` loader lives in `mdcast`
-//! (`mdcast::brand::from_toml`), so this crate stays free of `toml`/`anyhow`.
+//! Type definitions only by default, so this crate stays free of
+//! `toml`/`anyhow`. `mdcast::brand::from_toml` is the `anyhow`-wrapped loader
+//! for `mdcast` consumers; a caller that must not compile `mdcast` (issue
+//! #80) can instead enable this crate's optional `toml` feature and call
+//! [`BrandSpec::from_toml`] directly.
 
 use std::collections::BTreeMap;
 
@@ -26,6 +29,21 @@ pub struct BrandSpec {
     /// this field existed.
     #[serde(default)]
     pub logo: Option<LogoSpec>,
+}
+
+#[cfg(feature = "toml")]
+impl BrandSpec {
+    /// Parse a `brand.toml` document. Requires the `toml` feature.
+    ///
+    /// This is the supported no-`mdcast` path: `mdcast::brand::from_toml`
+    /// wraps the same parse in `anyhow::Context` for CLI/library callers,
+    /// but a caller that must not compile `mdcast` (e.g. one built on
+    /// `mdcast-client`) can enable `mdcast-api`'s `toml` feature and call
+    /// this directly instead of relying on the undocumented fact that
+    /// `BrandSpec` derives `Deserialize`.
+    pub fn from_toml(s: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(s)
+    }
 }
 
 /// A brand logo to overlay on every reveal.js slide. `key` is an
@@ -179,5 +197,59 @@ mod tests {
             serde_json::from_str::<ShapePredicate>(&json).unwrap(),
             ShapePredicate::SingleH1Only
         );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn from_toml_parses_a_full_brand_toml_without_mdcast() {
+        let toml = r##"
+            name = "Acme"
+
+            [auto_layout]
+            first = "hero"
+            last = "thanks"
+            default = "content"
+
+            [palette]
+            primary = "#112233"
+
+            [fonts]
+            body = "Inter"
+
+            [logo]
+            key = "img/logo.svg"
+            position = "bottom-left"
+            width = "120px"
+        "##;
+
+        let spec = BrandSpec::from_toml(toml).unwrap();
+
+        assert_eq!(spec.name, "Acme");
+        assert_eq!(spec.auto_layout.first, Some("hero".to_string()));
+        assert_eq!(spec.palette.get("primary"), Some(&"#112233".to_string()));
+        assert_eq!(spec.fonts.get("body"), Some(&"Inter".to_string()));
+        let logo = spec.logo.expect("logo table should parse");
+        assert_eq!(logo.key, "img/logo.svg");
+        assert_eq!(logo.position, LogoPosition::BottomLeft);
+        assert_eq!(logo.width.as_deref(), Some("120px"));
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn from_toml_defaults_missing_fields() {
+        let spec = BrandSpec::from_toml("name = \"Acme\"").unwrap();
+        assert_eq!(
+            spec,
+            BrandSpec {
+                name: "Acme".to_string(),
+                ..BrandSpec::default()
+            }
+        );
+    }
+
+    #[cfg(feature = "toml")]
+    #[test]
+    fn from_toml_rejects_invalid_syntax() {
+        assert!(BrandSpec::from_toml("not = [valid toml").is_err());
     }
 }

@@ -89,7 +89,7 @@ bytes = "1"
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 lru = { version = "0.18", optional = true }
-mdcast-api = { workspace = true }
+mdcast-api = { workspace = true, features = ["toml"] }
 mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
 quick-xml = { version = "0.41", optional = true }
@@ -104,7 +104,6 @@ sha2 = { version = "0.10", optional = true }
 subtle = { version = "2", optional = true }
 tempfile = "3"
 tokio = { version = "1", features = ["fs", "process", "rt", "macros", "time", "io-util"] }
-toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 typst = { version = "0.14", optional = true }

@@ -53,6 +53,9 @@ jobs:
       - name: Test
         run: make test
 
+      - name: Test mdcast-api toml feature (BrandSpec::from_toml, issue #80)
+        run: make test-api-toml
+
       - name: Test typst-html feature (issue #53's HTML export)
         run: make test-typst-html
 

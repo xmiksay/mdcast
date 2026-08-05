@@ -8,10 +8,14 @@
 //! fat `tokio` — a price nobody should pay for a handful of structs. So the
 //! types both sides need live here, and depend on **serde and nothing else**.
 //!
-//! Nothing in here does IO or returns `anyhow::Result`. The loaders that do
-//! (`brand::from_toml`, `frontmatter::extract`, …) stay in `mdcast` and
-//! operate on these types, which `mdcast` re-exports from their original
-//! paths (`mdcast::Target`, `mdcast::BrandSpec`, `mdcast::DocMeta`, …).
+//! Nothing in here does IO or returns `anyhow::Result` by default. The
+//! loaders that do (`frontmatter::extract`, the `anyhow`-wrapped
+//! `brand::from_toml`, …) stay in `mdcast` and operate on these types, which
+//! `mdcast` re-exports from their original paths (`mdcast::Target`,
+//! `mdcast::BrandSpec`, `mdcast::DocMeta`, …). The one exception is
+//! [`BrandSpec::from_toml`](brand::BrandSpec::from_toml), gated behind this
+//! crate's optional `toml` feature (issue #80), for a caller that has a
+//! `brand.toml` but must not compile `mdcast` to parse it.
 //!
 //! ## Module map
 //!
