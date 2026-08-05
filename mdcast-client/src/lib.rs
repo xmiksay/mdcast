@@ -74,7 +74,7 @@ pub mod error;
 pub mod request;
 
 pub use artifact::Artifact;
-pub use bundle::{AssetBundle, sha256};
+pub use bundle::{AssetBundle, BlobFetchError, sha256};
 pub use client::{Client, ClientBuilder};
 pub use error::{Error, Result};
 

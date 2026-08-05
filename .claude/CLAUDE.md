@@ -40,7 +40,7 @@ mdcast-client/        async client for mdcast-server; mdcast-api + reqwest, NEVE
 ├─ src/lib.rs         crate docs + module wiring + flat re-exports
 ├─ src/client.rs      Client/ClientBuilder, render()/render_template(), the 409→upload→retry-once flow
 ├─ src/blobs.rs       check()/upload()/preflight() + upload-set selection (impl Client, split for file size)
-├─ src/bundle.rs      AssetBundle (key → bytes) + sha256() + manifest()/bind()
+├─ src/bundle.rs      AssetBundle (key → bytes, or key → digest with a lazy fetch) + sha256() + manifest()/bind()/resolve()
 ├─ src/artifact.rs    Artifact (bytes/filename/content_type) + Content-Disposition parsing
 ├─ src/request.rs     request::markdown()/template() — constructors for the wire bodies
 ├─ src/error.rs       Error (thiserror) + from_status() status/body → typed error
@@ -432,7 +432,18 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   every entry, `bind()` either fills an empty caller manifest from the bundle
   or verifies a caller-supplied one against it (missing key → `MissingAsset`,
   wrong digest → `DigestMismatch`, both *before* a round trip, since a `409`
-  can only name a digest).
+  can only name a digest). An entry can also be declared digest-only via
+  `.with_digest(key, digest, fetch)`/`.insert_digest(...)` (issue #79) —
+  `fetch` is an `Fn() -> Future<Output = Result<Bytes, E>>` that `manifest()`/
+  `bind()`/`check()` never call (the stored `digest` is enough); it runs only
+  from inside an upload (`upload_missing` for a `409`, or `Client::upload` by
+  explicit digest), and only for a key the server actually named — the
+  steady-state render for a caller whose storage is already content-addressed
+  (e.g. a DB keyed by sha256) never touches the bytes at all. A fetch that
+  errors becomes `Error::BlobFetchFailed`; bytes that hash to something other
+  than the declared digest become `Error::DigestMismatch` — never a silent
+  skip, since the retry would just `409` again. `AssetBundle::get` returns
+  `None` for a digest-only key (no bytes in hand to return).
 - `Client::render` / `render_template` — post, and on `409` upload exactly the
   named blobs (one multipart request, part name = digest) and post the
   identical body again. Once. `Client::check`/`upload`/`preflight` are the
@@ -444,7 +455,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   (413), `BlobsStillMissing` (the 409 that survived the retry),
   `Server { status, code: ErrorCode, message }` (the code is carried through,
   never flattened), `UnexpectedStatus`, `InvalidResponse`, `MissingAsset`,
-  `UnknownDigest`, `DigestMismatch`.
+  `UnknownDigest`, `DigestMismatch`, `BlobFetchFailed` (a digest-only entry's
+  `fetch` closure errored).
 
 ## Adding a new layout class
 

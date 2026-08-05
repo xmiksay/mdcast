@@ -183,6 +183,89 @@ async fn a_cold_cache_uploads_only_the_missing_blob_and_retries() {
 }
 
 #[tokio::test]
+async fn a_warm_cache_never_fetches_a_digest_only_entrys_bytes() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RENDER))
+        .respond_with(artifact_ok())
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&calls);
+    let bundle = AssetBundle::new().with_digest("img/chart.svg", sha256(CHART), move || {
+        let counted = std::sync::Arc::clone(&counted);
+        async move {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<bytes::Bytes, std::convert::Infallible>(bytes::Bytes::from_static(CHART))
+        }
+    });
+
+    client(&server)
+        .render(markdown(), &bundle)
+        .await
+        .expect("a warm cache renders straight through");
+
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a warm cache must never call a digest-only entry's fetch"
+    );
+}
+
+#[tokio::test]
+async fn a_409_naming_a_digest_only_entry_fetches_and_uploads_it_lazily() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(RENDER))
+        .respond_with(ResponseTemplate::new(409).set_body_json(chart_missing()))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(RENDER))
+        .respond_with(artifact_ok())
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(BLOBS))
+        .respond_with(ResponseTemplate::new(204))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = std::sync::Arc::clone(&calls);
+    let bundle = AssetBundle::new().with_digest("img/chart.svg", sha256(CHART), move || {
+        let counted = std::sync::Arc::clone(&counted);
+        async move {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok::<bytes::Bytes, std::convert::Infallible>(bytes::Bytes::from_static(CHART))
+        }
+    });
+
+    let artifact = client(&server)
+        .render(markdown(), &bundle)
+        .await
+        .expect("the retry after the lazily-fetched upload succeeds");
+
+    assert_eq!(&artifact.bytes[..], PDF);
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the fetch runs exactly once, only because the server named this digest"
+    );
+    let uploads = requests_to(&server, BLOBS).await;
+    let body = String::from_utf8_lossy(&uploads[0].body);
+    assert!(
+        body.contains("<svg id='chart'/>"),
+        "the lazily-fetched bytes ride along: {body}"
+    );
+}
+
+#[tokio::test]
 async fn a_second_409_surfaces_as_its_own_error_instead_of_looping() {
     let server = MockServer::start().await;
     mount_json(&server, RENDER, 409, chart_missing()).await;
