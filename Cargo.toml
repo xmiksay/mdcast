@@ -121,7 +121,12 @@ zip = { version = "2", optional = true, default-features = false, features = ["d
 libc = "0.2"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+# "sync" (Mutex) is test-only: it serializes `compiler/cli_tests.rs`'s
+# real-`typst`-process tests against each other, so their process-count
+# assertions aren't polluted by cargo's default intra-binary test
+# parallelism. Kept out of `[dependencies]` so it isn't pulled into every
+# consumer's build.
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"] }
 # Router-level tests drive `mdcast-server`'s axum `Router` through
 # `tower::ServiceExt::oneshot` — no socket, no live server.
 tower = { version = "0.5", features = ["util"] }
