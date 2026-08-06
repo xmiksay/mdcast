@@ -30,6 +30,10 @@ data:
   # template can't wedge a worker thread for the pod's lifetime.
   MDCAST_TYPST: "cli"
   MDCAST_TYPST_MAX_MEMORY_BYTES: "1073741824"
+  # Headroom for node CPU contention: a render measured at ~1s of CPU was
+  # observed stretching past the default 30s wall-clock kill when the node
+  # was loaded. Keep below the site client's 120s request timeout.
+  MDCAST_TYPST_TIMEOUT_SECS: "120"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -50,8 +54,12 @@ spec:
     spec:
       containers:
         - name: mdcast
-          image: ghcr.io/xmiksay/mdcast:latest
-          imagePullPolicy: Always
+          # Pinned to the release tag, not :latest — an Always-pull of
+          # :latest was observed resolving to a stale image through a
+          # registry-edge cache right after a push; a version tag makes the
+          # rollout deterministic. Bump on each release.
+          image: ghcr.io/xmiksay/mdcast:0.4.1
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           envFrom:
@@ -72,10 +80,12 @@ spec:
             timeoutSeconds: 5
           # Memory limit covers the in-memory blob cache (256 MiB default
           # budget) plus concurrent renders; the CPU limit keeps a burst of
-          # typst/pandoc compiles from starving the node.
+          # typst/pandoc compiles from starving the node. The 1-CPU request
+          # is the flip side: typst is CPU-bound, and a 100m guarantee let a
+          # loaded node throttle a ~1s compile past the 30s kill window.
           resources:
             requests:
-              cpu: 100m
+              cpu: "1"
               memory: 256Mi
             limits:
               cpu: "2"
