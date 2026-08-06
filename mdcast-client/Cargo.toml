@@ -21,10 +21,13 @@ categories = ["text-processing", "api-bindings"]
 [dependencies]
 bytes = "1"
 mdcast-api = { workspace = true }
-# Same reqwest configuration the root manifest uses: no default features, so
-# no native-tls and no OS certificate plumbing.
-reqwest = { version = "0.12", default-features = false, features = [
-    "rustls-tls",
+# No default features, so no native-tls. 0.13 (ahead of the root manifest's
+# optional 0.12) so consumers on current reqwest can hand
+# `ClientBuilder::http_client` their own pool instead of carrying a second
+# reqwest major just for this crate (issue #93). `rustls` is 0.12's
+# `rustls-tls`, renamed; roots come from rustls-platform-verifier now.
+reqwest = { version = "0.13", default-features = false, features = [
+    "rustls",
     "json",
     "multipart",
 ] }
