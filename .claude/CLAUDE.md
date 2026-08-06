@@ -90,12 +90,14 @@ src/
    ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
    ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
+   ├─ pandoc.rs          probe_pandoc() — startup `pandoc --version` check, feeds GET /v1/capabilities (issue #81)
    ├─ blobs/
    │  ├─ store.rs       BlobStore/BlobWriter — in-memory, byte-budgeted, second-chance ("lives") LRU, sha256-verified, pin()/mirror_path() for #72/pandoc
    │  ├─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
    │  └─ prefill.rs     prefill() — MDCAST_PREFILL_DIR startup warmup: walk, hash, ingest, pin, mirror (issue #72)
    └─ routes/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
+      ├─ capabilities.rs GET /v1/capabilities — unauthenticated deployment-shape probe (targets/template_formats/max_upload_bytes/version, issue #81)
       ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
       ├─ render.rs      POST /v1/render — resolve_doc()/provider_stack(), the CLI pipeline minus the filesystem
       └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest; Html arm needs the `typst-html` build feature in `library` mode, needs nothing extra in `cli` mode (issue #73)
@@ -411,10 +413,23 @@ sees a `200` on its very first request instead of a `409` round trip.
 | Endpoint | Auth | Success | Failure |
 |---|---|---|---|
 | `GET /health` | no | `200 ok` | — |
+| `GET /v1/capabilities` | no | `200 CapabilitiesResponse` | — |
 | `POST /v1/blobs/check` | if `MDCAST_TOKEN` set | `200 BlobCheckResponse` | `400`/`401`/`413` |
 | `POST /v1/blobs` | if `MDCAST_TOKEN` set | `204` | `400` (bad digest / hash mismatch), `401`, `413` |
 | `POST /v1/render` | if `MDCAST_TOKEN` set | `200` artifact bytes | `409 MissingBlobsError`, `400`, `401`, `413`, `422`, `500` |
 | `POST /v1/render/template` | if `MDCAST_TOKEN` set | `200` artifact bytes | as above, plus `501` for `format: "html"` without `typst-html` |
+
+`GET /v1/capabilities` (issue #81) sits outside the `require_bearer` layer
+entirely — added to the `/v1` router *after* `route_layer` is applied, so it
+is unauthenticated in both modes, same as `/health`. It reports
+`{targets, template_formats, max_upload_bytes, version}`:
+`targets`' typst entries (`pdf`, `pdf-presentation`) are always present, the
+pandoc entries (`docx`/`odt`/`pptx`/`html-reveal`) only when
+`pandoc::probe_pandoc` found a working binary at startup (`AppState.
+pandoc_available`, checked once, not per-request); `template_formats`
+includes `html` only when `state.typst_compiler` is `Cli` or the binary was
+built with `typst-html`; `max_upload_bytes` echoes `MDCAST_MAX_UPLOAD_BYTES`;
+`version` is `CARGO_PKG_VERSION`.
 
 Protocol: a render request carries an `AssetManifest` (asset key → sha256);
 the whole manifest is checked up front, and a request naming blobs the server
@@ -463,6 +478,10 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   named blobs (one multipart request, part name = digest) and post the
   identical body again. Once. `Client::check`/`upload`/`preflight` are the
   pessimistic path.
+- `Client::capabilities` (issue #81) — `GET /v1/capabilities`, decoded into
+  `CapabilitiesResponse`. No negotiation, no bundle — server-side the route
+  is unauthenticated, so this is the one call a caller can make before it has
+  a token wired up, to feature-gate a UI ahead of any render attempt.
 - `Artifact { bytes, filename, content_type }` — headers win; the fallbacks
   are derived (`output.<Target::extension()>`, `application/octet-stream`) and
   a filename carrying a path separator is discarded rather than sanitised.

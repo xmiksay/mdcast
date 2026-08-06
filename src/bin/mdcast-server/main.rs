@@ -18,8 +18,9 @@
 //! config.rs    MDCAST_* environment configuration
 //! auth.rs      shared-bearer-token gate for /v1
 //! error.rs     ApiError → ErrorResponse/status, with internal detail kept in the log
+//! pandoc.rs    startup probe for a working `pandoc` binary (issue #81)
 //! blobs/       content-addressed store + the manifest-backed AssetProvider + startup prefill
-//! routes/      router, /health, /v1/blobs*, /v1/render, /v1/render/template
+//! routes/      router, /health, /v1/blobs*, /v1/render, /v1/render/template, /v1/capabilities
 //! ```
 //!
 //! **Known limitation, mitigated by `MDCAST_TYPST=cli` (issue #73; see
@@ -44,6 +45,7 @@ mod auth;
 mod blobs;
 mod config;
 mod error;
+mod pandoc;
 mod routes;
 
 use blobs::BlobStore;
@@ -66,6 +68,9 @@ async fn main() -> Result<()> {
     // rather than discovered as a rendering difference (issue #73). A no-op
     // when `typst_compiler` is `Library`.
     config.typst_compiler.log_startup_info().await;
+    // Feeds GET /v1/capabilities (issue #81): the pandoc-backed targets only
+    // advertise as available when a real binary answered at startup.
+    let pandoc_available = pandoc::probe_pandoc().await;
     let store = BlobStore::new(
         config.max_cache_bytes,
         config.cache_lives,
@@ -87,6 +92,8 @@ async fn main() -> Result<()> {
         store: Arc::new(store),
         registry: Registry::with_typst_compiler(config.typst_compiler.clone()),
         typst_compiler: config.typst_compiler.clone(),
+        pandoc_available,
+        max_upload_bytes: config.max_upload_bytes as u64,
     });
     let app = routes::router(state, config.token.as_deref(), config.max_upload_bytes);
 
@@ -100,6 +107,7 @@ async fn main() -> Result<()> {
         cache_lives = config.cache_lives,
         max_cache_lives = config.max_cache_lives,
         typst_compiler = ?config.typst_compiler,
+        pandoc_available,
         "mdcast-server listening"
     );
     axum::serve(listener, app).await.context("serve http")

@@ -13,7 +13,8 @@
 //! large upload discovered mid-render.
 
 use mdcast_api::wire::{
-    MissingBlob, MissingBlobsError, RenderMarkdownRequest, RenderTemplateRequest, TemplateFormat,
+    CapabilitiesResponse, MissingBlob, MissingBlobsError, RenderMarkdownRequest,
+    RenderTemplateRequest, TemplateFormat,
 };
 use reqwest::{Response, StatusCode};
 use serde::Serialize;
@@ -27,6 +28,7 @@ pub(crate) const RENDER: &str = "/v1/render";
 pub(crate) const RENDER_TEMPLATE: &str = "/v1/render/template";
 pub(crate) const BLOBS: &str = "/v1/blobs";
 pub(crate) const BLOBS_CHECK: &str = "/v1/blobs/check";
+pub(crate) const CAPABILITIES: &str = "/v1/capabilities";
 
 /// A handle on one `mdcast-server`. Cheap to clone — the underlying
 /// `reqwest::Client` is a shared connection pool.
@@ -111,6 +113,15 @@ impl Client {
         };
         self.negotiate(RENDER_TEMPLATE, &request, bundle, fallback)
             .await
+    }
+
+    /// What this server can actually render right now — targets, template
+    /// formats, and its upload size ceiling. Unauthenticated server-side
+    /// (`GET /v1/capabilities` sits outside the bearer gate), so this is
+    /// useful for feature-gating a UI before a render is ever attempted.
+    pub async fn capabilities(&self) -> Result<CapabilitiesResponse> {
+        let response = self.http.get(self.url(CAPABILITIES)).send().await?;
+        self.json_response(response).await
     }
 
     /// Post `body`, upload what came back missing, post it again. Exactly one

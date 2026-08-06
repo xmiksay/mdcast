@@ -27,6 +27,8 @@ fn app_with_compiler(typst_compiler: TypstCompiler) -> (Router, Arc<BlobStore>) 
         store: store.clone(),
         registry: Registry::with_typst_compiler(typst_compiler.clone()),
         typst_compiler,
+        pandoc_available: true,
+        max_upload_bytes: 1 << 20,
     });
     (router(state, Some(TOKEN), 1 << 20), store)
 }
@@ -150,6 +152,8 @@ async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
             store,
             registry: Registry::with_defaults(),
             typst_compiler: TypstCompiler::Library,
+            pandoc_available: true,
+            max_upload_bytes: 1 << 20,
         }),
         None,
         1 << 20,
@@ -376,6 +380,9 @@ async fn a_manifest_with_a_bogus_digest_is_a_400() {
 #[path = "template_tests.rs"]
 mod template_tests;
 
+#[path = "capabilities_tests.rs"]
+mod capabilities_tests;
+
 #[tokio::test]
 async fn a_body_over_the_limit_is_a_413() {
     let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
@@ -384,6 +391,8 @@ async fn a_body_over_the_limit_is_a_413() {
             store,
             registry: Registry::with_defaults(),
             typst_compiler: TypstCompiler::Library,
+            pandoc_available: true,
+            max_upload_bytes: 64,
         }),
         Some(TOKEN),
         64,

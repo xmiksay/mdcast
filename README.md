@@ -963,10 +963,31 @@ only logs a warning rather than resolving itself.
 | Method + path              | Auth | Request → response |
 |----------------------------|------|--------------------|
 | `GET /health`              | no   | → `ok` (for load balancers and container health checks) |
+| `GET /v1/capabilities`     | no   | → `CapabilitiesResponse` — which targets/formats this deployment can actually produce |
 | `POST /v1/blobs/check`     | if `MDCAST_TOKEN` is set  | `BlobCheckRequest` → `BlobCheckResponse` — which digests am I missing? |
 | `POST /v1/blobs`           | if `MDCAST_TOKEN` is set  | `multipart/form-data`, one part per blob → `204` |
 | `POST /v1/render`          | if `MDCAST_TOKEN` is set  | `RenderMarkdownRequest` → artifact bytes |
 | `POST /v1/render/template` | if `MDCAST_TOKEN` is set  | `RenderTemplateRequest` → artifact bytes |
+
+`GET /v1/capabilities` (issue #81) is unauthenticated in both modes, same as
+`/health` — a client can feature-gate its UI (hide a "download PPTX" button,
+reject an oversized upload before it happens) before it even has credentials
+wired up:
+
+```sh
+curl -sS localhost:8080/v1/capabilities
+# {"targets":["pdf","pdf-presentation","docx","odt","pptx","html-reveal"],
+#  "template_formats":["pdf","html"],"max_upload_bytes":268435456,"version":"0.3.0"}
+```
+
+`targets` reflects runtime reality, not build features: the typst-backed
+entries (`pdf`, `pdf-presentation`) are always present, and the pandoc-backed
+ones (`docx`, `odt`, `pptx`, `html-reveal`) appear only when the server found
+a working `pandoc` binary at startup. `template_formats` includes `html`
+only when this deployment can actually export it — `MDCAST_TYPST=cli`, or a
+`library`-mode build with `--features typst-html`. `max_upload_bytes` echoes
+`MDCAST_MAX_UPLOAD_BYTES`, so a client can reject an oversized bundle before
+any round trip instead of discovering the limit via `413`.
 
 Status codes: `400` malformed request, `401` missing/wrong token, `409`
 missing blobs (see below), `413` body over the limit, `422` the render itself
@@ -1105,6 +1126,18 @@ let artifact = client.render(request, &bundle).await?;  // cannot 409
 
 `preflight` returns the digests it uploaded. `check` and `upload` are exposed
 separately if you want to drive the two halves yourself.
+
+### Feature-gating on capabilities
+
+```rust
+let caps = client.capabilities().await?;
+if caps.targets.contains(&Target::Pptx) { /* show the "export PPTX" button */ }
+if bundle_bytes.len() as u64 > caps.max_upload_bytes { /* reject before uploading */ }
+```
+
+`Client::capabilities()` hits `GET /v1/capabilities`, which is unauthenticated
+server-side — useful for feature-gating a UI before credentials are even
+wired up, or before a render attempt discovers a target isn't supported.
 
 ### Errors
 

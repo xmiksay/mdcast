@@ -38,6 +38,7 @@ pub use digest::{Digest, DigestError};
 pub use doc::{DocMeta, Target};
 pub use manifest::AssetManifest;
 pub use wire::{
-    BlobCheckRequest, BlobCheckResponse, ErrorCode, ErrorResponse, MissingBlob, MissingBlobsError,
-    RenderMarkdownRequest, RenderOptions, RenderTemplateRequest, TemplateFormat,
+    BlobCheckRequest, BlobCheckResponse, CapabilitiesResponse, ErrorCode, ErrorResponse,
+    MissingBlob, MissingBlobsError, RenderMarkdownRequest, RenderOptions, RenderTemplateRequest,
+    TemplateFormat,
 };
