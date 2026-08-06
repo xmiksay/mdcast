@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "Shared data types and HTTP wire protocol for mdcast — serde-only, no engine dependencies"
 documentation = "https://docs.rs/mdcast-api"
+readme = "README.md"
 keywords = ["markdown", "mdcast", "document", "http", "api"]
 categories = ["text-processing", "api-bindings"]
 

@@ -7,7 +7,7 @@
 members = ["mdcast-api", "mdcast-client"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 authors = ["Martin Miksanik <miksanik@gmail.com>"]
@@ -15,7 +15,7 @@ repository = "https://github.com/xmiksay/mdcast"
 homepage = "https://github.com/xmiksay/mdcast"
 
 [workspace.dependencies]
-mdcast-api = { version = "0.3.0", path = "mdcast-api" }
+mdcast-api = { version = "0.4.0", path = "mdcast-api" }
 serde = { version = "1", features = ["derive"] }
 
 [package]

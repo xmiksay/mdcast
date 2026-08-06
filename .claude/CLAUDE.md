@@ -314,10 +314,15 @@ Publishing (OIDC, `rust-lang/crates-io-auth-action`) — no registry token
 secret, and no `make verify` re-run (`cargo publish` performs its own
 verification build). All three crates take their version from
 `[workspace.package]`, so one bump covers them and the tag check asserts it
-for each. `mdcast-api` and `mdcast-client` each need their **own** (pending)
-trusted publisher configured on crates.io before their first release — one
-publisher does not cover a workspace. Release flow: bump the workspace
-version, merge, tag `vX.Y.Z`, push the tag.
+for each. Each crate needs its **own** trusted publisher configured on
+crates.io — one publisher does not cover a workspace — and trusted
+publishing **cannot create a crate that doesn't exist yet**: a brand-new
+crate's first publish is a one-time manual `cargo publish` with an API
+token, after which its trusted publisher can be configured and the workflow
+takes over. The workflow's publish step skips any crate whose tagged version
+is already on crates.io (sparse-index check), so a tag run right after such
+a manual bootstrap — or a re-run of a partially failed one — is safe.
+Release flow: bump the workspace version, merge, tag `vX.Y.Z`, push the tag.
 
 ## Run
 

@@ -8,6 +8,7 @@ repository.workspace = true
 homepage.workspace = true
 description = "Async HTTP client for mdcast-server — content-addressed asset negotiation handled for you"
 documentation = "https://docs.rs/mdcast-client"
+readme = "README.md"
 keywords = ["markdown", "mdcast", "document", "http", "client"]
 categories = ["text-processing", "api-bindings"]
 
