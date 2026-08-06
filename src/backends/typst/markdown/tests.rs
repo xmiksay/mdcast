@@ -27,6 +27,36 @@ fn code_block_without_language_falls_back_to_bare_fence() {
     assert!(out.starts_with("```\n"));
 }
 
+// A rustdoc example inside a fenced block: CommonMark keeps the outer fence
+// open (the inner ``` are not at line start), but typst would close the raw
+// block at the first inner run — the emitted fence must outgrow the content
+// (issue #88).
+#[test]
+fn code_block_containing_backtick_runs_gets_a_longer_fence() {
+    let md = "````rust\n/// # Examples\n/// ```\n/// let x = 1;\n/// ```\npub fn f() {}\n````\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert!(
+        out.starts_with("````rust\n"),
+        "fence must be strictly longer than the inner ``` runs, got: {out}"
+    );
+    assert!(
+        out.contains("/// ```\n"),
+        "inner backticks survive verbatim"
+    );
+    assert!(
+        out.trim_end().ends_with("````"),
+        "closing fence matches: {out}"
+    );
+}
+
+#[test]
+fn longest_backtick_run_counts_the_longest_consecutive_run() {
+    assert_eq!(longest_backtick_run(""), 0);
+    assert_eq!(longest_backtick_run("no ticks"), 0);
+    assert_eq!(longest_backtick_run("a ` b `` c"), 2);
+    assert_eq!(longest_backtick_run("x ``` y ````` z ``"), 5);
+}
+
 #[test]
 fn prose_outside_code_block_still_escaped() {
     let md = "1 < 2 and a # b\n";

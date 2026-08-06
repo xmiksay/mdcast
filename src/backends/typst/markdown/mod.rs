@@ -40,7 +40,12 @@ fn render_events(
 ) -> (String, BTreeMap<String, String>) {
     let mut out = String::new();
     let mut in_image = 0i32;
-    let mut in_code_block = false;
+    // `Some((lang, body))` while inside a code block: the body is buffered
+    // rather than streamed, because the emitted fence must be sized to the
+    // content — typst ends a raw block at the first matching backtick run
+    // anywhere (it has no notion of CommonMark's line-start-only closing),
+    // so a body containing ``` needs a longer fence.
+    let mut code_block: Option<(String, String)> = None;
     // Generic capture stack: while non-empty, inline content (text/emphasis/
     // code/links/…) is appended to its top buffer instead of `out`. Table
     // cells, link text, and footnote-definition bodies each push one frame at
@@ -138,19 +143,25 @@ fn render_events(
             }
 
             Event::Start(Tag::CodeBlock(kind)) => {
-                in_code_block = true;
-                match kind {
-                    CodeBlockKind::Fenced(lang) if !lang.is_empty() => {
-                        out.push_str("```");
-                        out.push_str(lang);
-                        out.push('\n');
-                    }
-                    _ => out.push_str("```\n"),
-                }
+                let lang = match kind {
+                    CodeBlockKind::Fenced(lang) => lang.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                code_block = Some((lang, String::new()));
             }
             Event::End(TagEnd::CodeBlock) => {
-                in_code_block = false;
-                out.push_str("```\n\n");
+                if let Some((lang, body)) = code_block.take() {
+                    let fence = "`".repeat((longest_backtick_run(&body) + 1).max(3));
+                    out.push_str(&fence);
+                    out.push_str(&lang);
+                    out.push('\n');
+                    out.push_str(&body);
+                    if !body.ends_with('\n') {
+                        out.push('\n');
+                    }
+                    out.push_str(&fence);
+                    out.push_str("\n\n");
+                }
             }
 
             Event::Start(Tag::Table(alignments)) => {
@@ -186,8 +197,8 @@ fn render_events(
             }
 
             Event::Text(t) => {
-                if in_code_block {
-                    out.push_str(t);
+                if let Some((_, body)) = code_block.as_mut() {
+                    body.push_str(t);
                 } else if in_image == 0 {
                     push_str(&mut out, &mut stack, &escape_typst_inline(t));
                 }
@@ -222,6 +233,22 @@ fn push_char(out: &mut String, stack: &mut [String], c: char) {
         Some(buf) => buf.push(c),
         None => out.push(c),
     }
+}
+
+/// Longest run of consecutive backticks in `s`. The raw fence emitted around
+/// a code block must be strictly longer than this, or typst would close the
+/// block at the first inner run (issue #88).
+fn longest_backtick_run(s: &str) -> usize {
+    let (mut max, mut run) = (0usize, 0usize);
+    for c in s.chars() {
+        if c == '`' {
+            run += 1;
+            max = max.max(run);
+        } else {
+            run = 0;
+        }
+    }
+    max
 }
 
 fn heading_depth(level: HeadingLevel) -> usize {
