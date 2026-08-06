@@ -52,6 +52,7 @@ fn doc() -> TemplateDoc {
         data: serde_json::json!({"number": "INV-042"}),
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
+        fonts: Vec::new(),
     }
 }
 
@@ -111,6 +112,7 @@ async fn html_unsupported_construct_warning_is_not_swallowed() {
         data: serde_json::json!({}),
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
+        fonts: Vec::new(),
     };
 
     let log_buf = LogBuf::default();

@@ -62,6 +62,11 @@ pub struct TemplateDoc {
     pub data: serde_json::Value,
     pub meta: DocMeta,
     pub brand: BrandHandle,
+    /// `AssetProvider` keys of font faces to register with the compile, in
+    /// declaration order (typst tie-breaks by it) — the template path's
+    /// counterpart to `ResolvedDoc.fonts` (issue #93). Empty means host /
+    /// embedded font search only, the pre-#93 behaviour.
+    pub fonts: Vec<String>,
 }
 
 /// Render `doc.template` against `doc.data` to a PDF via the default
@@ -195,13 +200,23 @@ async fn assemble(
         }
     }
 
+    // Sibling discovery above may have registered the same font keys as plain
+    // binary `files` — harmless duplication; what makes them *fonts* is being
+    // listed here, in `doc.fonts` declaration order. Same helper and
+    // missing-key semantics (warn + degrade to host/embedded search) as the
+    // markdown path's `ResolvedDoc.fonts`.
+    let font_refs: Vec<crate::AssetRef> = doc
+        .fonts
+        .iter()
+        .map(|key| crate::AssetRef { key: key.clone() })
+        .collect();
+    let fonts = super::fonts::collect_fonts(&font_refs, assets).await?;
+
     Ok(CompileInputs {
         main: doc.template.clone(),
         sources,
         files,
-        // A template has no per-class layouts and brings its own fonts via
-        // the host/embedded search only (v1 scope; see module docs).
-        fonts: Vec::new(),
+        fonts,
         format,
     })
 }
@@ -219,7 +234,38 @@ mod tests {
             data,
             meta: DocMeta::default(),
             brand: BrandHandle(Arc::new(BrandSpec::default())),
+            fonts: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn fonts_resolve_into_compile_inputs_in_declaration_order() {
+        let assets = sync_provider(|key| {
+            Ok(match key {
+                "t.typ" => Some(bytes::Bytes::from_static(b"= Hi")),
+                "fonts/b.ttf" => Some(bytes::Bytes::from_static(b"BBB")),
+                "fonts/a.ttf" => Some(bytes::Bytes::from_static(b"AAA")),
+                _ => None,
+            })
+        });
+        let mut d = doc("t.typ", serde_json::json!({}));
+        d.fonts = vec!["fonts/b.ttf".to_string(), "fonts/a.ttf".to_string()];
+
+        let inputs = assemble(&d, &assets, CompileFormat::Pdf).await.unwrap();
+
+        assert_eq!(inputs.fonts, vec![b"BBB".to_vec(), b"AAA".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn missing_font_key_degrades_to_host_search_not_an_error() {
+        let assets =
+            sync_provider(|key| Ok((key == "t.typ").then(|| bytes::Bytes::from_static(b"= Hi"))));
+        let mut d = doc("t.typ", serde_json::json!({}));
+        d.fonts = vec!["fonts/gone.ttf".to_string()];
+
+        let inputs = assemble(&d, &assets, CompileFormat::Pdf).await.unwrap();
+
+        assert!(inputs.fonts.is_empty(), "missing font warns and is skipped");
     }
 
     #[tokio::test]

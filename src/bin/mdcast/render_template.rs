@@ -47,6 +47,9 @@ pub async fn run(
         data,
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(brand_spec)),
+        // The CLI reads templates from a real filesystem, where host font
+        // search already sees any face the user cares about — no flag yet.
+        fonts: Vec::new(),
     };
 
     let rendered = match assets {

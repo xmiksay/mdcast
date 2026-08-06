@@ -48,6 +48,7 @@ pub fn template(
         brand: None,
         format: Default::default(),
         assets: AssetManifest::new(),
+        fonts: Vec::new(),
     }
 }
 
@@ -78,5 +79,6 @@ mod tests {
         assert_eq!(req.format, TemplateFormat::Pdf);
         assert_eq!(req.data, r#"{"number":"INV-042"}"#);
         assert!(req.assets.is_empty());
+        assert!(req.fonts.is_empty());
     }
 }

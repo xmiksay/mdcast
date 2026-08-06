@@ -85,6 +85,13 @@ pub struct RenderTemplateRequest {
     /// keys it references them by.
     #[serde(default)]
     pub assets: AssetManifest,
+    /// Font faces to register with the typst compile, as manifest keys into
+    /// `assets`, in declaration order (typst tie-breaks by it). The template
+    /// path's counterpart to [`RenderOptions::layout_fonts`]: without it a
+    /// brand's non-system faces silently fall back to whatever the server
+    /// host has installed.
+    #[serde(default)]
+    pub fonts: Vec<String>,
 }
 
 /// Output format for a template render. `Html` needs a server built with the
@@ -156,6 +163,7 @@ mod tests {
             brand: None,
             format: TemplateFormat::Html,
             assets: manifest(),
+            fonts: vec!["fonts/Brand-Regular.ttf".to_string()],
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -173,5 +181,9 @@ mod tests {
 
         assert_eq!(req.format, TemplateFormat::Pdf);
         assert_eq!(serde_json::to_string(&req.format).unwrap(), "\"pdf\"");
+        assert!(
+            req.fonts.is_empty(),
+            "fonts default to none (0.4.1 wire compat)"
+        );
     }
 }

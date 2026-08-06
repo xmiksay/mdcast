@@ -98,6 +98,7 @@ async fn renders_invoice_shaped_pdf_from_template_and_data() {
             ..Default::default()
         },
         brand: BrandHandle(Arc::new(brand)),
+        fonts: Vec::new(),
     };
 
     let artifact = render_template(&doc, &invoice_assets())
@@ -123,6 +124,7 @@ async fn missing_template_key_names_it_in_the_error() {
         data: serde_json::json!({}),
         meta: DocMeta::default(),
         brand: BrandHandle(Arc::new(BrandSpec::default())),
+        fonts: Vec::new(),
     };
 
     let err = render_template(&doc, &invoice_assets()).await.unwrap_err();
