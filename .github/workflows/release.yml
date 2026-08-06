@@ -10,10 +10,13 @@ env:
 jobs:
   # Publish to crates.io on every version tag. Authenticates via crates.io
   # Trusted Publishing (OIDC) — no long-lived registry token in secrets.
-  # (`mdcast-api` and `mdcast-client` each need their *own* trusted publisher
-  # configured on crates.io — a pending publisher per crate, since neither
-  # exists there until its first tagged release. One publisher does not cover
-  # a whole workspace.)
+  # (Each crate needs its *own* trusted publisher configured on crates.io —
+  # one publisher does not cover a whole workspace. Trusted publishing cannot
+  # create a crate that doesn't exist yet: a brand-new crate's first publish
+  # is a one-time manual `cargo publish` with an API token, after which its
+  # trusted publisher can be configured and this workflow takes over. The
+  # skip-if-published guard below is what lets a tag run cleanly right after
+  # such a bootstrap — and makes re-running a partially failed run safe.)
   #
   # Three crates, published in dependency order: both `mdcast` and
   # `mdcast-client` depend on `mdcast-api` by version, so the API crate must
@@ -67,17 +70,19 @@ jobs:
         id: auth
         uses: rust-lang/crates-io-auth-action@v1
 
-      - name: Publish mdcast-api
-        run: cargo publish --locked -p mdcast-api
+      # All three names share the `md/ca/` sparse-index prefix. A 404 from
+      # the index means the crate has never been published — fall through to
+      # `cargo publish`, which is where a missing trusted publisher (or a
+      # crate awaiting its manual bootstrap) surfaces as an auth error.
+      - name: Publish (dependency order, skipping already-published versions)
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-
-      - name: Publish mdcast
-        run: cargo publish --locked -p mdcast
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-
-      - name: Publish mdcast-client
-        run: cargo publish --locked -p mdcast-client
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          for crate in mdcast-api mdcast mdcast-client; do
+            if curl -sf "https://index.crates.io/md/ca/${crate}" | jq -r '.vers' | grep -qx "$version"; then
+              echo "${crate} ${version} is already on crates.io — skipping"
+              continue
+            fi
+            cargo publish --locked -p "$crate"
+          done
