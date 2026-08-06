@@ -49,6 +49,7 @@ pub async fn render(
         brand,
         format,
         assets,
+        fonts,
     } = json_body(body)?;
 
     // `data` travels as raw JSON text and ends up in the virtual /data.json.
@@ -72,6 +73,7 @@ pub async fn render(
         data,
         meta,
         brand: BrandHandle(Arc::new(brand.unwrap_or_default())),
+        fonts,
     };
 
     tracing::info!(format = ?format, "rendering template");

@@ -47,6 +47,33 @@ async fn a_template_can_import_a_partial_from_the_manifest() {
 }
 
 #[tokio::test]
+async fn a_template_render_threads_font_keys_into_the_compile() {
+    let (app, _) = app();
+    // Not a parseable face — registration warns and skips it (the same
+    // degrade semantics as the markdown path's brand fonts), so the render
+    // still succeeds; what this pins down is the wire field flowing through
+    // blob resolution into the compile without an error. Face-level
+    // resolution is covered by `tests/typst_fonts.rs` and the `assemble`
+    // unit tests.
+    const FONT: &[u8] = b"not-a-real-font";
+    let digest = sha256(FONT);
+    send(&app, multipart(&[(digest.as_str(), FONT)])).await;
+
+    let request = json_request(
+        "/v1/render/template",
+        serde_json::json!({
+            "template_source": "= Hi\n",
+            "data": "{}",
+            "assets": { "fonts/brand.ttf": digest.as_str() },
+            "fonts": ["fonts/brand.ttf"],
+        }),
+    );
+    let (status, response) = send(&app, request).await;
+
+    assert_eq!(status, StatusCode::OK, "{:?}", body_bytes(response).await);
+}
+
+#[tokio::test]
 async fn a_template_render_with_malformed_data_is_a_400() {
     let (app, _) = app();
 
