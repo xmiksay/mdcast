@@ -4,6 +4,7 @@
 //! | Method + path        | Auth | Body → response |
 //! |----------------------|------|-----------------|
 //! | `GET /health`        | no   | `ok` |
+//! | `GET /v1/capabilities` | no | → `CapabilitiesResponse` |
 //! | `POST /v1/blobs/check` | if configured | `BlobCheckRequest` → `BlobCheckResponse` |
 //! | `POST /v1/blobs`     | if configured  | multipart upload → `204` |
 //! | `POST /v1/render`    | if configured  | `RenderMarkdownRequest` → artifact bytes |
@@ -11,7 +12,8 @@
 //!
 //! "if configured" means `MDCAST_TOKEN` was set at startup — see `config.rs`
 //! and `main::warn_if_unauthenticated`. When it wasn't, every `/v1` route is
-//! open, same as `/health`.
+//! open, same as `/health`. `GET /v1/capabilities` is never gated, in either
+//! mode — see `capabilities.rs`'s module docs for why.
 
 use std::sync::Arc;
 
@@ -29,6 +31,7 @@ use crate::auth::require_bearer;
 use crate::blobs::BlobStore;
 
 mod blobs;
+mod capabilities;
 mod render;
 mod template;
 
@@ -38,8 +41,16 @@ pub struct AppState {
     /// Used directly by `/v1/render/template`'s HTML arm, which — unlike
     /// `/v1/render` — doesn't go through `Registry` (see `template.rs`'s
     /// module docs on why the template path bypasses `Backend`/`Registry`
-    /// entirely).
+    /// entirely). Also read by `capabilities.rs` to report whether `html`
+    /// template export is currently available.
     pub typst_compiler: TypstCompiler,
+    /// Whether a working `pandoc` binary was found at startup
+    /// (`pandoc::probe_pandoc`) — gates the pandoc-backed targets reported by
+    /// `GET /v1/capabilities`.
+    pub pandoc_available: bool,
+    /// Echoed by `GET /v1/capabilities` — `MDCAST_MAX_UPLOAD_BYTES`, so a
+    /// client can reject an oversized bundle before any round trip.
+    pub max_upload_bytes: u64,
 }
 
 /// Everything under `/v1` sits behind the bearer gate when `token` is
@@ -62,6 +73,11 @@ pub fn router(state: Arc<AppState>, token: Option<&str>, max_body_bytes: usize) 
             require_bearer,
         ));
     }
+    // Added after `route_layer` so it is never wrapped by the bearer gate —
+    // `route_layer` only wraps routes already registered on the router at
+    // the point it's called, not ones added afterward. See `capabilities.rs`
+    // for why this endpoint is deliberately unauthenticated.
+    v1 = v1.route("/capabilities", get(capabilities::capabilities));
 
     Router::new()
         .route("/health", get(health))

@@ -13,11 +13,19 @@
 //!    [`BlobCheckRequest`]/[`BlobCheckResponse`] let a client skip a doomed
 //!    render round-trip and ask up front.
 //! 4. Any other failure answers with an [`ErrorResponse`].
+//!
+//! Separately, `GET /v1/capabilities` ([`CapabilitiesResponse`]) is an
+//! unauthenticated, cacheable read of deployment shape — which targets and
+//! template formats this instance can actually produce, and its upload size
+//! ceiling — so a client can feature-gate its UI before attempting any of
+//! the above.
 
 pub mod blob;
+pub mod capabilities;
 pub mod error;
 pub mod render;
 
 pub use blob::{BlobCheckRequest, BlobCheckResponse, MissingBlob, MissingBlobsError};
+pub use capabilities::CapabilitiesResponse;
 pub use error::{ErrorCode, ErrorResponse};
 pub use render::{RenderMarkdownRequest, RenderOptions, RenderTemplateRequest, TemplateFormat};
