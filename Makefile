@@ -86,5 +86,12 @@ run-server: ## Run the HTTP service (override MDCAST_TOKEN / MDCAST_BIND / MDCAS
 	MDCAST_TOKEN=$(MDCAST_TOKEN) \
 	  cargo run -p mdcast --features server --bin mdcast-server
 
+deploy: ## Apply the k8s manifests (services namespace; keep the real MDCAST_TOKEN only in your local deploy.yml)
+	kubectl apply -f deploy.yml
+
+deploy-restart: ## Re-roll the mdcast pods (pulls the current ghcr.io/xmiksay/mdcast image)
+	kubectl -n services rollout restart deployment/mdcast
+	kubectl -n services rollout status deployment/mdcast
+
 clean: ## Remove build artifacts
 	cargo clean

@@ -1,0 +1,95 @@
+# k8s deployment for mdcast-server: Secret + ConfigMap + Deployment + Service
+# in the `services` namespace, image from GHCR. Deliberately **no Ingress** —
+# the renderer is internal-only; consumers reach it at
+# http://mdcast.services (port 80 → 8080) inside the cluster.
+#
+#   make deploy           # kubectl apply -f deploy.yml
+#   make deploy-restart   # re-roll the pods after pushing a new image
+#
+# The committed Secret is a placeholder — keep the real MDCAST_TOKEN only in
+# your local copy (kubectl apply overwrites the in-cluster secret with this
+# file). Rotate: edit locally, `make deploy`, `make deploy-restart`.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mdcast
+  namespace: services
+type: Opaque
+stringData:
+  MDCAST_TOKEN: "change-me"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mdcast
+  namespace: services
+data:
+  RUST_LOG: "info"
+  # cli mode (issue #73): every typst compile is a killable subprocess with
+  # the default 30s timeout and the address-space cap below — a pathological
+  # template can't wedge a worker thread for the pod's lifetime.
+  MDCAST_TYPST: "cli"
+  MDCAST_TYPST_MAX_MEMORY_BYTES: "1073741824"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mdcast
+  namespace: services
+  labels:
+    app: mdcast
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mdcast
+  template:
+    metadata:
+      labels:
+        app: mdcast
+    spec:
+      containers:
+        - name: mdcast
+          image: ghcr.io/xmiksay/mdcast:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          envFrom:
+            - secretRef:
+                name: mdcast
+            - configMapRef:
+                name: mdcast
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 30
+            timeoutSeconds: 5
+          # Memory limit covers the in-memory blob cache (256 MiB default
+          # budget) plus concurrent renders; the CPU limit keeps a burst of
+          # typst/pandoc compiles from starving the node.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mdcast
+  namespace: services
+spec:
+  selector:
+    app: mdcast
+  ports:
+    - name: http
+      port: 80
+      targetPort: 8080

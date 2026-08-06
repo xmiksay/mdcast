@@ -273,7 +273,19 @@ make lint                # cargo fmt --all --check + cargo clippy --workspace --
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
 make run-server          # MDCAST_TOKEN=dev-token cargo run --bin mdcast-server
+make deploy              # kubectl apply -f deploy.yml — mdcast-server into the k8s `services` namespace
+make deploy-restart      # re-roll + wait for the mdcast deployment (pulls the current image)
 ```
+
+Container/deployment: `Dockerfile` builds the `mdcast-server` image (debian
+runtime with `pandoc` and a pinned musl `typst` binary, so `MDCAST_TYPST=cli`
+works out of the box; `MDCAST_BIND=0.0.0.0:8080` baked in);
+`.github/workflows/docker.yml` pushes `ghcr.io/xmiksay/mdcast` on every `v*`
+tag (plus `workflow_dispatch`), tagged sha/semver/latest. `deploy.yml` is the
+k8s manifest set (Secret + ConfigMap + Deployment + Service in the
+`services` namespace, **no Ingress** — internal-only at
+`http://mdcast.services`); the committed `MDCAST_TOKEN` is a placeholder,
+keep the real one only in your local copy.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
 `mermaid` and `rt-multi-thread` itself (a render service without engines is
