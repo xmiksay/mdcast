@@ -497,7 +497,9 @@ reaches mdcast.
 
 mdcast never validates or transcodes image bytes — they flow from the
 `AssetProvider` straight to the target engine, so what "attaching an image"
-supports is whatever that engine/viewer accepts. Verified against typst
+supports is whatever that engine/viewer accepts. The one exception is SVG on
+the typst targets, which is re-serialised with its text outlined (see
+[SVG text on the typst targets](#svg-text-on-the-typst-targets) below). Verified against typst
 0.14's format table and pandoc's pass-through behaviour:
 
 | Format | pdf / pdf-presentation (typst) | docx (Word) | odt (LibreOffice) | pptx | html-reveal |
@@ -531,6 +533,37 @@ only for LibreOffice, say). Combinations the table leaves ambiguous
 WebP) are left un-warned rather than guessed at. This is a detection sniff
 only — no transcoding (e.g. WebP → PNG re-encode) is performed; fix the
 source image if a warning fires.
+
+### SVG text on the typst targets
+
+Before typst sees any SVG — a markdown body image, a declared layout asset,
+a template sibling or a `generated` entry, in both `library` and `cli`
+compiler modes — mdcast parses it with `usvg` (the same parser and version
+typst uses) and re-serialises it with every `<text>` converted to outlined
+paths. typst's own SVG-text pipeline can deadlock when text needs mixed font
+fallbacks (e.g. a mermaid label containing `↔`; upstream typst
+[#6052](https://github.com/typst/typst/issues/6052),
+[#7178](https://github.com/typst/typst/issues/7178),
+[#6783](https://github.com/typst/typst/issues/6783),
+[#7279](https://github.com/typst/typst/issues/7279)), so any SVG with text
+would otherwise be a way to hang the render.
+
+- **Fonts:** glyphs are outlined with typst's bundled fonts (Libertinus
+  Serif, New Computer Modern, DejaVu Sans Mono) plus the document's declared
+  fonts (`ResolvedDoc.fonts` / `TemplateDoc.fonts`) — never system fonts, so
+  output doesn't depend on the host. A `font-family` naming none of them
+  falls back to Libertinus Serif; characters it lacks fall back to any
+  bundled/declared face that has them.
+- **Consequence:** SVG text in the PDF is vector shapes, not text — it can't
+  be selected, searched or copied. Image size is unchanged.
+- **Detection:** by content (a root `<svg` element) or by a `.svg`/`.svgz`
+  extension.
+- **Unparseable SVG:** warns (`SVG could not be parsed; dropping it`, naming
+  the key) and is dropped — typst's own import would have failed on the same
+  bytes. A markdown body image then disappears like an unresolved one and a
+  layout's `asset-path` falls back to its `default:`; a template that
+  references the file fails on the missing file.
+- pandoc targets get the SVG bytes untouched.
 
 ## Table of contents
 

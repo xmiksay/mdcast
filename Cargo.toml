@@ -57,7 +57,14 @@ qr = ["dep:qrcode"]
 # `generated` fen/pgn entries) to SVG chess boards via `generators::chess`.
 # Default-on and opt-in per call, same reasoning as `mermaid`.
 chess = ["dep:chess-diagram"]
-typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
+typst = [
+    "dep:typst",
+    "dep:typst-pdf",
+    "dep:typst-as-lib",
+    "dep:typst-assets",
+    "dep:usvg",
+    "dep:serde_json",
+]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
 # `TypstEngine` in the process (typst-as-lib's `typst-html` feature is a
@@ -123,6 +130,11 @@ typst = { version = "0.14", optional = true }
 typst-pdf = { version = "0.14", optional = true }
 typst-html = { version = "0.14", optional = true }
 typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+# Both already in the graph via `typst` (same versions, so no second copy):
+# `backends/typst/svg_outline.rs` uses them to outline SVG `<text>` to paths
+# with typst's own bundled fonts before typst sees the SVG (issue #92).
+typst-assets = { version = "0.14", optional = true, features = ["fonts"] }
+usvg = { version = "0.45", optional = true, default-features = false, features = ["text"] }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
 # `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap

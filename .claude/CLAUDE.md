@@ -80,6 +80,7 @@ src/
 │     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler — temp-dir materialisation + `typst compile` subprocess, timeout+kill, safe_join path-traversal guard, optional RLIMIT_AS cap
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
+│     ├─ svg_outline.rs   outline_svgs() — every SVG headed for a typst compile re-serialised by usvg with <text> → paths (issue #92); svg_outline_tests.rs
 │     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
@@ -278,7 +279,7 @@ make test                # cargo test --workspace — default features only; uni
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 81 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 85 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -708,7 +709,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   feature gates a new `reqwest` dependency (`rustls-tls`, no native-tls) —
   off by default, no new dependency and byte-identical output for documents
   without remote images.
-- mdcast never validates or transcodes image bytes — the per-target format
+- mdcast never validates or transcodes image bytes (except SVG on the typst
+  targets, next bullet) — the per-target format
   support matrix (issue #55, documented in README's "Image formats" section)
   is whatever the target engine/viewer accepts. `image_format.rs::sniff`
   detects a format from magic bytes only (no `image`-crate dependency — a
@@ -723,6 +725,29 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   document destined only for LibreOffice). Combinations the matrix leaves
   ambiguous (TIFF in html-reveal is browser-dependent, WebP in odt needs
   LibreOffice ≥ 7.4) are deliberately left un-warned rather than guessed at.
+- **SVG text never reaches typst (issue #92).** typst's SVG-text pipeline
+  can deadlock on mixed font fallbacks (upstream typst #6052/#7178/#6783/
+  #7279, still in 0.14 — a mermaid label with `↔` hung production renders in
+  both compiler modes). `backends/typst/svg_outline.rs::outline_svgs` parses
+  every SVG among the compile files (detected by `image_format::sniff` or a
+  `.svg`/`.svgz` extension) with `usvg` 0.45 — the exact version typst
+  depends on, so no second copy; `cargo tree -d` must not list `usvg` — and
+  replaces it with `Tree::to_string`'s output, which writes text as outlined
+  paths. It runs on a blocking thread at the two sites that assemble
+  `CompileInputs.files` *before* the compile: `mod.rs::render_to_bytes`
+  (after the image/asset/font fetch, before `md_to_typst`, so it can prune
+  `image_map`/`asset_map`) and `template.rs::assemble`. Not inside
+  `TypstCompiler::compile` on purpose: by then the driver already names
+  every body image, so a dropped SVG could only become a missing-file
+  compile error instead of degrading like an unresolved image. Fonts:
+  `typst_assets::fonts()` (cached in a `OnceLock` fontdb, `serif` mapped to
+  Libertinus Serif so unknown families still outline) plus the render's
+  declared fonts, built once per render and only if an SVG is present —
+  never system fonts. An unparseable SVG warns and is dropped (typst would
+  have failed on the same bytes). Relative `<image href>`s inside an SVG
+  resolve against the other compile files, mirroring typst's resolver.
+  Consequence: SVG text in a PDF is not selectable. Pandoc targets are
+  untouched. Revisit (and possibly delete) once typst ships a fix.
 - Typst runs **in-process by default** (`typst-as-lib`) — no `typst` binary is
   needed to render PDF targets. As of issue #73, the compiler is a seam
   (`backends/typst/compiler/`): `TypstCompiler::Library` is this in-process

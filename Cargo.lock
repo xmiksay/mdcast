@@ -2067,8 +2067,10 @@ dependencies = [
  "tracing-subscriber",
  "typst",
  "typst-as-lib",
+ "typst-assets",
  "typst-html",
  "typst-pdf",
+ "usvg",
  "zip",
 ]
 

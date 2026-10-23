@@ -212,11 +212,16 @@ async fn assemble(
         .collect();
     let fonts = super::fonts::collect_fonts(&font_refs, assets).await?;
 
+    // A dropped (unparseable) SVG sibling just vanishes: a template that
+    // references it fails on the missing file, as it would have failed on
+    // typst parsing the same bytes.
+    let outlined = super::svg_outline::outline_svgs(files, fonts).await?;
+
     Ok(CompileInputs {
         main: doc.template.clone(),
         sources,
-        files,
-        fonts,
+        files: outlined.files,
+        fonts: outlined.fonts,
         format,
     })
 }
