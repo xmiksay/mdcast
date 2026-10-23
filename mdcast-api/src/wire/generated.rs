@@ -111,6 +111,12 @@ pub enum Generator {
     Qr,
     Fen,
     Pgn,
+    /// A kind this build doesn't know — what a newer server's generator
+    /// decodes to, so an older client still reads the rest of
+    /// `CapabilitiesResponse` instead of failing the whole decode. A server
+    /// never reports it.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -219,6 +225,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value([Generator::Qr, Generator::Fen, Generator::Pgn]).unwrap(),
             serde_json::json!(["qr", "fen", "pgn"])
+        );
+    }
+
+    #[test]
+    fn unknown_generator_decodes_as_unknown() {
+        assert_eq!(
+            serde_json::from_str::<Vec<Generator>>(r#"["qr", "barcode"]"#).unwrap(),
+            [Generator::Qr, Generator::Unknown]
         );
     }
 

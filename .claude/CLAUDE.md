@@ -273,7 +273,7 @@ already use.
 
 ```
 make build              # cargo build --workspace — default = pandoc + typst + mermaid + qr + chess (+ rt-multi-thread for the bin)
-make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / qr / chess / bin-without-mermaid-qr-and-chess / default / +typst-html / +remote-images / +server / +server,typst-html)
+make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / qr / chess / bin-without-mermaid-qr-and-chess / bin-with-only-qr / bin-with-only-chess / default / +typst-html / +remote-images / +server / +server,typst-html)
 make test                # cargo test --workspace — default features only; unit suite runs in <1s
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)

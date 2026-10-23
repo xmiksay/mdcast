@@ -55,6 +55,18 @@ mod tests {
     }
 
     #[test]
+    fn a_newer_servers_unknown_generator_does_not_fail_the_decode() {
+        let json = r#"{
+            "targets": ["pdf"], "template_formats": ["pdf"],
+            "generators": ["qr", "barcode"],
+            "max_upload_bytes": 1024, "version": "9.9.9"
+        }"#;
+        let res: CapabilitiesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(res.generators, [Generator::Qr, Generator::Unknown]);
+        assert_eq!(res.max_upload_bytes, 1024);
+    }
+
+    #[test]
     fn targets_serialize_as_their_kebab_case_strings() {
         let res = CapabilitiesResponse {
             targets: vec![Target::HtmlReveal],

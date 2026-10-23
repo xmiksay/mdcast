@@ -88,7 +88,9 @@ pub fn render_spec(spec: &GeneratedSpec) -> Result<Bytes> {
 #[derive(Debug, Clone, Default)]
 pub struct Generated {
     pub markdown: String,
-    /// `(asset key, SVG bytes)` per rendered block, in document order.
+    /// `(asset key, SVG bytes)` per rendered block — grouped by generator
+    /// when one pre-step runs several (chess: every `fen`, then every `pgn`),
+    /// in document order within each group.
     pub svgs: Vec<(String, Bytes)>,
 }
 

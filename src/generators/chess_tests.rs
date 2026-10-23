@@ -232,4 +232,5 @@ fn render_spec_renders_fen_and_pgn_entries() {
 fn chess_generators_are_advertised() {
     let gens = available();
     assert!(gens.contains(&Generator::Fen) && gens.contains(&Generator::Pgn));
+    assert!(!gens.contains(&Generator::Unknown));
 }

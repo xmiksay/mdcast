@@ -23,7 +23,9 @@ const BASE_CM: f32 = 8.0;
 
 /// Replace every `fen`/`pgn` fence and tag in `markdown` with an image
 /// reference to its rendered board. Keys are `chess/fen-N.svg` and
-/// `chess/pgn-N.svg`, each numbered separately in document order.
+/// `chess/pgn-N.svg`, each numbered separately in document order; the
+/// returned `svgs` are grouped by generator (all `fen`, then all `pgn`),
+/// document order within each.
 pub async fn render_chess(markdown: &str, assets: &dyn AssetProvider) -> Generated {
     let fens = expand(markdown, "fen", "chess/fen", assets, |fen, attrs| {
         fen_svg(fen, &board_from_attrs(attrs)?, Size::from_attrs(attrs)?)

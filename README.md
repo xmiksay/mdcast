@@ -449,8 +449,13 @@ stays in the document as written. Opt-in per call: CLI `--chess` on
 `render`/`explain`, wire `RenderOptions.chess`, library
 `generators::chess::render_chess(md, &provider)`.
 
-**Templates** — `generated` entries of kind `fen` and `pgn`, always at the
-8 cm size; every board option is optional (`move` absent = final position):
+**Templates** — `generated` entries of kind `fen` and `pgn`. Besides `path`
+and `kind`, an entry accepts exactly these JSON fields: `fen` (the `fen`
+kind) or `pgn` plus an optional `move` (the `pgn` kind; absent = final
+position), and the optional board options `flip` (bool, default `false`),
+`theme` (`brown`/`blue`/`green`, default `brown`) and `coordinates` (bool,
+default `true`). There is no `size` — a template board is always the normal
+8 cm size. Any other field is ignored, not rejected:
 
 ```json
 [
@@ -1305,7 +1310,7 @@ list them:
 |-------------------------|-----------------------------------------------------------------|
 | `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid + qr + chess) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, qr-only, chess-only, bin-without-mermaid/qr/chess, default, +typst-html, +remote-images, +server, +server/typst-html) |
+| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, qr-only, chess-only, bin-without-mermaid/qr/chess, bin with only qr, bin with only chess, default, +typst-html, +remote-images, +server, +server/typst-html) |
 | `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images + server features) |
 | `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |
