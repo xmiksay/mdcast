@@ -45,7 +45,8 @@ pub struct RenderTemplateArgs {
     assets: Option<PathBuf>,
     /// JSON array of generated images (`[{"path": "qr.svg", "kind": "qr",
     /// "data": "…"}]`), each served at its `path` relative to the template's
-    /// directory. Needs the `qr` feature for `qr` entries.
+    /// directory. Needs the `qr` feature for `qr` entries,
+    /// `chess` for `fen`/`pgn` ones.
     #[arg(long)]
     generated: Option<PathBuf>,
     /// Output format. `html` always works with `--typst-compiler cli`;
@@ -140,12 +141,12 @@ async fn load_generated(
     Ok(MemoryAssets(files))
 }
 
-#[cfg(feature = "qr")]
+#[cfg(any(feature = "qr", feature = "chess"))]
 fn generate(spec: &mdcast::mdcast_api::wire::GeneratedSpec) -> Result<bytes::Bytes> {
     mdcast::generators::render_spec(spec)
 }
 
-#[cfg(not(feature = "qr"))]
+#[cfg(not(any(feature = "qr", feature = "chess")))]
 fn generate(spec: &mdcast::mdcast_api::wire::GeneratedSpec) -> Result<bytes::Bytes> {
     bail!("generator {spec:?} is not available: this mdcast build has no generator features")
 }

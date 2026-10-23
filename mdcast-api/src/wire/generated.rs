@@ -1,10 +1,11 @@
-//! Server-side generated images — a QR code today — that a template render
-//! asks for by *content* instead of uploading as a blob.
+//! Server-side generated images — QR codes and chess boards — that a
+//! template render asks for by *content* instead of uploading as a blob.
 //!
 //! A [`GeneratedAsset`] names the virtual path the template references
 //! (`#image("qr.svg")`) and a [`GeneratedSpec`] saying what to draw there. The
-//! server renders it with the same code the markdown pre-step uses (`qr`
-//! fences and `<qr>` tags), so a caller needs no QR library of its own.
+//! server renders it with the same code the markdown pre-step uses (`qr`,
+//! `fen` and `pgn` fences and tags), so a caller needs no QR or chess library
+//! of its own.
 
 use serde::{Deserialize, Serialize};
 
@@ -35,6 +36,58 @@ pub enum GeneratedSpec {
         #[serde(default)]
         ec: QrEcLevel,
     },
+    /// A chess board showing the position `fen` (full FEN or just its
+    /// placement field), as SVG.
+    ///
+    /// ```json
+    /// {"path": "board.svg", "kind": "fen", "fen": "8/8/8/4k3/8/8/8/4K3", "flip": true}
+    /// ```
+    Fen {
+        fen: String,
+        #[serde(flatten)]
+        board: BoardOptions,
+    },
+    /// A chess board showing a PGN game's mainline after half-move `move`
+    /// (`0` = the starting position); absent means the final position.
+    Pgn {
+        pgn: String,
+        #[serde(default, rename = "move")]
+        ply: Option<usize>,
+        #[serde(flatten)]
+        board: BoardOptions,
+    },
+}
+
+/// How a `fen`/`pgn` board is drawn — the same knobs the markdown fences and
+/// tags take as attributes. Every field is optional on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BoardOptions {
+    /// Draw the board from Black's side.
+    pub flip: bool,
+    pub theme: BoardTheme,
+    /// File/rank labels along the edges.
+    pub coordinates: bool,
+}
+
+impl Default for BoardOptions {
+    fn default() -> Self {
+        Self {
+            flip: false,
+            theme: BoardTheme::default(),
+            coordinates: true,
+        }
+    }
+}
+
+/// Board square colours.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BoardTheme {
+    #[default]
+    Brown,
+    Blue,
+    Green,
 }
 
 /// QR error-correction level. `M` is the default, and what SPAYD ("QR
@@ -56,6 +109,8 @@ pub enum QrEcLevel {
 #[non_exhaustive]
 pub enum Generator {
     Qr,
+    Fen,
+    Pgn,
 }
 
 #[cfg(test)]
@@ -92,6 +147,78 @@ mod tests {
                 data: "x".to_string(),
                 ec: QrEcLevel::M
             }
+        );
+    }
+
+    #[test]
+    fn chess_entries_are_flat_json_with_wire_name_move() {
+        let asset = GeneratedAsset {
+            path: "game.svg".to_string(),
+            spec: GeneratedSpec::Pgn {
+                pgn: "1. e4 e5".to_string(),
+                ply: Some(1),
+                board: BoardOptions {
+                    flip: true,
+                    theme: BoardTheme::Green,
+                    coordinates: false,
+                },
+            },
+        };
+        let json = serde_json::to_value(&asset).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "path": "game.svg", "kind": "pgn", "pgn": "1. e4 e5", "move": 1,
+                "flip": true, "theme": "green", "coordinates": false
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<GeneratedAsset>(json).unwrap(),
+            asset
+        );
+    }
+
+    #[test]
+    fn chess_board_options_default() {
+        let fen: GeneratedAsset =
+            serde_json::from_str(r#"{"path": "a.svg", "kind": "fen", "fen": "8/8/8/8/8/8/8/4K3"}"#)
+                .unwrap();
+        assert_eq!(
+            fen.spec,
+            GeneratedSpec::Fen {
+                fen: "8/8/8/8/8/8/8/4K3".to_string(),
+                board: BoardOptions {
+                    flip: false,
+                    theme: BoardTheme::Brown,
+                    coordinates: true,
+                },
+            }
+        );
+        let pgn: GeneratedAsset =
+            serde_json::from_str(r#"{"path": "a.svg", "kind": "pgn", "pgn": "1. e4"}"#).unwrap();
+        assert_eq!(
+            pgn.spec,
+            GeneratedSpec::Pgn {
+                pgn: "1. e4".to_string(),
+                ply: None,
+                board: BoardOptions::default(),
+            }
+        );
+    }
+
+    #[test]
+    fn unknown_board_theme_is_rejected() {
+        let err = serde_json::from_str::<GeneratedAsset>(
+            r#"{"path": "a.svg", "kind": "fen", "fen": "8/8/8/8/8/8/8/8", "theme": "pink"}"#,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn generators_serialize_kebab_case() {
+        assert_eq!(
+            serde_json::to_value([Generator::Qr, Generator::Fen, Generator::Pgn]).unwrap(),
+            serde_json::json!(["qr", "fen", "pgn"])
         );
     }
 

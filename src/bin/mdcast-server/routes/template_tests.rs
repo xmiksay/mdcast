@@ -233,3 +233,49 @@ async fn a_generated_path_colliding_with_the_manifest_is_a_400_before_any_409() 
             .contains("collides")
     );
 }
+
+fn board_request(generated: serde_json::Value) -> Request<Body> {
+    json_request(
+        "/v1/render/template",
+        serde_json::json!({
+            "template_source": "#image(\"board.svg\")\n",
+            "data": "{}",
+            "generated": generated,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn generated_fen_and_pgn_boards_are_served_at_their_paths() {
+    let (app, _) = app();
+    for generated in [
+        serde_json::json!([{"path": "board.svg", "kind": "fen",
+            "fen": "8/8/8/4k3/8/8/8/4K3", "flip": true, "theme": "green"}]),
+        serde_json::json!([{"path": "board.svg", "kind": "pgn",
+            "pgn": "1. e4 e5 2. Nf3", "move": 2}]),
+    ] {
+        let (status, response) = send(&app, board_request(generated)).await;
+
+        let body = body_bytes(response).await;
+        assert_eq!(status, StatusCode::OK, "{body:?}");
+        assert!(body.starts_with(b"%PDF-"));
+    }
+}
+
+#[tokio::test]
+async fn an_invalid_generated_board_is_a_400_naming_it() {
+    let (app, _) = app();
+    for generated in [
+        serde_json::json!([{"path": "board.svg", "kind": "fen", "fen": "not a fen"}]),
+        serde_json::json!([{"path": "board.svg", "kind": "pgn", "pgn": "1. e4", "move": 5}]),
+    ] {
+        let (status, response) = send(&app, board_request(generated)).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body_json(response).await["message"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(message.contains("\"board.svg\""), "{message}");
+    }
+}

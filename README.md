@@ -407,6 +407,60 @@ error from the CLI — and so does a `path` the manifest/asset directory
 already provides, rather than silently shadowing it. `GET /v1/capabilities`
 lists available kinds under `generators`.
 
+## Chess diagrams (`chess` feature)
+
+With the `chess` feature (on by default), mdcast draws static chess boards to
+SVG itself (via [`chess-diagram`](https://crates.io/crates/chess-diagram),
+MIT, whose PGN support pulls in only `cozy-chess`, also MIT), in markdown and
+in template renders. Two names: `fen` draws a position, `pgn` replays a game.
+
+**Markdown** — fences or tags, the same conventions as QR codes:
+
+````markdown
+```fen flip theme=green
+r1bqkbnr/pppp1ppp/2n5/4p3/4P3/5N2/PPPP1PPP/RNBQKB1R b KQkq - 3 3
+```
+
+After four half-moves: <pgn move="4">1. e4 e5 2. Nf3 Nc6 3. Bb5 a6</pgn>
+
+<fen path="puzzles/42.fen" size="small">
+<pgn path="games/immortal.pgn" move="20" coordinates="false">
+````
+
+| Attribute | Values | Default |
+|---|---|---|
+| `move` | half-move (ply) to show, `0` = starting position (`pgn` only) | the game's final position |
+| `flip` | bare `flip`, or `flip="true\|false"` — draw from Black's side | not flipped |
+| `orientation` | `white`, `black` (`flip` turns the board relative to it) | `white` |
+| `theme` | `brown`, `blue`, `green` | `brown` |
+| `coordinates` | `true`, `false` — file/rank labels | `true` |
+| `size` | `small` (4 cm), `large` (12 cm) | 8 cm |
+| `path` | asset key whose text content is the FEN / PGN (tags only) | — |
+
+A `fen` block takes a full FEN or just its placement field. A `pgn` block
+walks the game's mainline (comments, variations and NAGs are skipped; a
+`[FEN "…"]` header sets the starting position) and draws one static board.
+Each block becomes `![](chess/fen-N.svg)` / `![](chess/pgn-N.svg)` — the two
+names are numbered separately, in document order — and resolves through the
+normal asset pipeline in every target, at its physical size. A block that
+fails (invalid FEN, illegal or unparseable move, a `move` past the end of the
+game or not a number, an unknown attribute value, missing `path`) warns and
+stays in the document as written. Opt-in per call: CLI `--chess` on
+`render`/`explain`, wire `RenderOptions.chess`, library
+`generators::chess::render_chess(md, &provider)`.
+
+**Templates** — `generated` entries of kind `fen` and `pgn`, always at the
+8 cm size; every board option is optional (`move` absent = final position):
+
+```json
+[
+  {"path": "board.svg", "kind": "fen", "fen": "8/8/8/4k3/8/8/8/4K3", "flip": true, "theme": "green"},
+  {"path": "game.svg", "kind": "pgn", "pgn": "1. e4 e5 2. Nf3", "move": 2, "coordinates": false}
+]
+```
+
+As with QR entries, a bad entry fails the request (`400` naming it).
+
 ## Remote images (`remote-images` feature, issue #54)
 
 A page-body `![alt](http://…)` / `![alt](https://…)` reference is never
@@ -843,16 +897,17 @@ first.
 
 ```toml
 [features]
-default         = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr"]
+default         = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr", "chess"]
 pandoc          = []   # DOCX, ODT, PPTX, html-reveal
 typst           = []   # PDF, PDF-presentation
 typst-html      = []   # render_template_html — experimental HTML export (issue #53), off by default
 remote-images   = []   # fetch http(s) page-body images through collect_images (issue #54), off by default
 mermaid         = []   # render ```mermaid fences to SVG via mermaid-svg (pure Rust)
 qr              = []   # render ```qr fences / <qr> tags / generated template entries to SVG QR codes
+chess           = []   # render ```fen / ```pgn fences, <fen> / <pgn> tags and generated entries to SVG chess boards
 rt-multi-thread = []   # tokio multi-threaded runtime; required by the mdcast binary,
                        # library-only consumers can drop it via default-features = false
-server          = []   # the mdcast-server binary (axum); implies pandoc + typst + mermaid + qr
+server          = []   # the mdcast-server binary (axum); implies pandoc + typst + mermaid + qr + chess
 ```
 
 Build with only what you need:
@@ -887,8 +942,8 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
-mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr] [--chess]
 mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ```
 
@@ -901,7 +956,8 @@ both engines see real image nodes.
 
 `--mermaid` renders ```` ```mermaid ```` fenced code blocks to SVG diagrams —
 see "Mermaid diagrams" above. `--qr` does the same for ```` ```qr ```` fences
-and `<qr>` tags — see "QR codes" above.
+and `<qr>` tags — see "QR codes" above — and `--chess` for `fen`/`pgn`
+fences and tags — see "Chess diagrams" above.
 
 `--layout-asset KEY` (repeatable) declares a `ResolvedDoc.assets` entry —
 resolved through `--assets`/the embedded provider and reachable from a typst
@@ -1033,7 +1089,7 @@ wired up:
 ```sh
 curl -sS localhost:8080/v1/capabilities
 # {"targets":["pdf","pdf-presentation","docx","odt","pptx","html-reveal"],
-#  "template_formats":["pdf","html"],"generators":["qr"],
+#  "template_formats":["pdf","html"],"generators":["qr","fen","pgn"],
 #  "max_upload_bytes":268435456,"version":"0.5.0"}
 ```
 
@@ -1106,12 +1162,12 @@ there is no invalidation protocol, and eviction is invisible — a `409` for
 something uploaded last week just means uploading it again.
 
 `POST /v1/render` takes the same options the CLI's `render` does
-(`html_image_tags`, `mermaid`, `qr`, `toc_depth`, `layout_assets`, `layout_fonts`),
+(`html_image_tags`, `mermaid`, `qr`, `chess`, `toc_depth`, `layout_assets`, `layout_fonts`),
 and frontmatter in the submitted markdown wins over the request's `meta`
 field. `POST /v1/render/template` is the `render-template` path: the template
 arrives as inline typst source, `data` is raw JSON text that becomes the
 virtual `/data.json`, and sibling files it `#import`s or `#image`s come from
-the manifest — plus any `generated` entries (see "QR codes" above). With `MDCAST_TYPST=library` (the default), `"format": "html"`
+the manifest — plus any `generated` entries (see "QR codes" and "Chess diagrams" above). With `MDCAST_TYPST=library` (the default), `"format": "html"`
 needs a server built with `--features server,typst-html`; without it the
 request gets a `501` saying so, never a PDF with the wrong content type. With
 `MDCAST_TYPST=cli` it needs no such build feature at all — see "Selecting the
@@ -1247,9 +1303,9 @@ list them:
 
 | Target                  | What it does                                                    |
 |-------------------------|-----------------------------------------------------------------|
-| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid + qr) |
+| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid + qr + chess) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, qr-only, bin-without-mermaid/qr, default, +typst-html, +remote-images, +server, +server/typst-html) |
+| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, qr-only, chess-only, bin-without-mermaid/qr/chess, default, +typst-html, +remote-images, +server, +server/typst-html) |
 | `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images + server features) |
 | `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |

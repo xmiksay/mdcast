@@ -74,8 +74,9 @@ enum Cmd {
         #[arg(long)]
         brand: Option<PathBuf>,
         /// Same flags as `render` — lets the auto-classifier see a diagram or
-        /// QR code as an image (e.g. a diagram-only page classifies image-full).
-        /// `<qr path="…">` resolves against the embedded catalog only.
+        /// QR code or chess board as an image (e.g. a diagram-only page
+        /// classifies image-full). `<qr path="…">` / `<fen path="…">` resolve
+        /// against the embedded catalog only.
         #[command(flatten)]
         steps: PreSteps,
     },

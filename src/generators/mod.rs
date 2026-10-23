@@ -1,5 +1,6 @@
-//! Generated images: markdown blocks mdcast draws itself (a QR code today),
-//! plus the same renderers for `RenderTemplateRequest.generated` entries.
+//! Generated images: markdown blocks mdcast draws itself (QR codes with the
+//! `qr` feature, chess boards with `chess`), plus the same renderers for
+//! `RenderTemplateRequest.generated` entries.
 //!
 //! A generator answers to one name, written either as a fence or as a tag —
 //! the tag form being the convention the F13 sites already use:
@@ -13,6 +14,10 @@
 //! <qr path="payments/invoice-42.txt" size="small">
 //! ````
 //!
+//! Attributes are `name="value"`, `name=value` (fences), or a bare `name`,
+//! which reads as an empty value — how boolean attributes like a chess
+//! board's `flip` are written.
+//!
 //! A fence's body is its content minus the closing newline; a tag's body is
 //! trimmed. `path="KEY"` reads the content through the [`AssetProvider`]
 //! instead (trailing whitespace trimmed), which is why this pre-step is async
@@ -25,9 +30,14 @@
 //! render. The template path ([`render_spec`]) fails hard instead, since the
 //! caller asked for that exact file.
 
-#[cfg(test)]
+#[cfg(all(test, feature = "chess"))]
+mod chess_tests;
+#[cfg(all(test, feature = "qr"))]
 mod tests;
 
+#[cfg(feature = "chess")]
+pub mod chess;
+#[cfg(feature = "qr")]
 pub mod qr;
 
 use std::collections::HashMap;
@@ -45,14 +55,30 @@ use crate::AssetProvider;
 
 /// The generators this build can render, for `GET /v1/capabilities`.
 pub fn available() -> Vec<Generator> {
-    vec![Generator::Qr]
+    Vec::from([
+        #[cfg(feature = "qr")]
+        Generator::Qr,
+        #[cfg(feature = "chess")]
+        Generator::Fen,
+        #[cfg(feature = "chess")]
+        Generator::Pgn,
+    ])
 }
 
 /// Render one `RenderTemplateRequest.generated` entry. Errors name nothing
 /// but the reason — the caller adds which entry it was.
 pub fn render_spec(spec: &GeneratedSpec) -> Result<Bytes> {
     match spec {
+        #[cfg(feature = "qr")]
         GeneratedSpec::Qr { data, ec } => Ok(Bytes::from(qr::svg(data, *ec, Size::Normal)?)),
+        #[cfg(feature = "chess")]
+        GeneratedSpec::Fen { fen, board } => {
+            Ok(Bytes::from(chess::fen_svg(fen, board, Size::Normal)?))
+        }
+        #[cfg(feature = "chess")]
+        GeneratedSpec::Pgn { pgn, ply, board } => {
+            Ok(Bytes::from(chess::pgn_svg(pgn, *ply, board, Size::Normal)?))
+        }
         other => bail!("generator {other:?} is not available in this build"),
     }
 }
@@ -173,7 +199,7 @@ async fn content(source: &Source, assets: &dyn AssetProvider) -> Result<String> 
 }
 
 static ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"([a-zA-Z_:-]+)\s*=\s*(?:"([^"]*)"|([^\s"]+))"#).expect("static regex")
+    Regex::new(r#"([a-zA-Z_:-]+)(?:\s*=\s*(?:"([^"]*)"|([^\s"]+)))?"#).expect("static regex")
 });
 
 fn parse_attrs(s: &str) -> Attrs {
@@ -229,7 +255,7 @@ fn scan(markdown: &str, name: &str) -> Vec<Block> {
     }
 
     let open = Regex::new(&format!(
-        r#"(?i)<{name}(?P<attrs>(?:\s+[a-zA-Z_:-]+\s*=\s*"[^"]*")*)\s*(?P<selfclose>/)?>"#
+        r#"(?i)<{name}(?P<attrs>(?:\s+[a-zA-Z_:-]+(?:\s*=\s*"[^"]*")?)*)\s*(?P<selfclose>/)?>"#
     ))
     .expect("generator names are plain identifiers");
     let close =

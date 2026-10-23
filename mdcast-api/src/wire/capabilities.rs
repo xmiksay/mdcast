@@ -42,7 +42,7 @@ mod tests {
         let res = CapabilitiesResponse {
             targets: vec![Target::Pdf, Target::PdfPresentation, Target::Docx],
             template_formats: vec![TemplateFormat::Pdf, TemplateFormat::Html],
-            generators: vec![Generator::Qr],
+            generators: vec![Generator::Qr, Generator::Fen, Generator::Pgn],
             max_upload_bytes: 268_435_456,
             version: "0.3.0".to_string(),
         };
