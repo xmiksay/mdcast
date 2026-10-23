@@ -132,7 +132,7 @@ async fn compile_template(
     format: CompileFormat,
     compiler: &TypstCompiler,
 ) -> Result<RenderedArtifact> {
-    let inputs = assemble(doc, assets, format).await?;
+    let inputs = assemble(doc, assets, format, compiler).await?;
     let bytes = compiler.compile(inputs).await?;
     let filename = match format {
         CompileFormat::Pdf => "output.pdf",
@@ -152,6 +152,7 @@ async fn assemble(
     doc: &TemplateDoc,
     assets: &dyn AssetProvider,
     format: CompileFormat,
+    compiler: &TypstCompiler,
 ) -> Result<CompileInputs> {
     let Some(template_bytes) = assets.get(&doc.template).await? else {
         bail!(
@@ -215,7 +216,7 @@ async fn assemble(
     // A dropped (unparseable) SVG sibling just vanishes: a template that
     // references it fails on the missing file, as it would have failed on
     // typst parsing the same bytes.
-    let outlined = super::svg_outline::outline_svgs(files, fonts).await?;
+    let outlined = super::svg_outline::outline_svgs(files, fonts, compiler).await?;
 
     Ok(CompileInputs {
         main: doc.template.clone(),
@@ -256,7 +257,9 @@ mod tests {
         let mut d = doc("t.typ", serde_json::json!({}));
         d.fonts = vec!["fonts/b.ttf".to_string(), "fonts/a.ttf".to_string()];
 
-        let inputs = assemble(&d, &assets, CompileFormat::Pdf).await.unwrap();
+        let inputs = assemble(&d, &assets, CompileFormat::Pdf, &TypstCompiler::Library)
+            .await
+            .unwrap();
 
         assert_eq!(inputs.fonts, vec![b"BBB".to_vec(), b"AAA".to_vec()]);
     }
@@ -268,7 +271,9 @@ mod tests {
         let mut d = doc("t.typ", serde_json::json!({}));
         d.fonts = vec!["fonts/gone.ttf".to_string()];
 
-        let inputs = assemble(&d, &assets, CompileFormat::Pdf).await.unwrap();
+        let inputs = assemble(&d, &assets, CompileFormat::Pdf, &TypstCompiler::Library)
+            .await
+            .unwrap();
 
         assert!(inputs.fonts.is_empty(), "missing font warns and is skipped");
     }

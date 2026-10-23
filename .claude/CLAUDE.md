@@ -74,14 +74,18 @@ src/
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
+│     ├─ process.rs     run_bounded() — the shared child runner: piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, optional RLIMIT_AS (typst compile child and SVG-outline child)
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
-│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler — temp-dir materialisation + `typst compile` subprocess, timeout+kill, safe_join path-traversal guard, optional RLIMIT_AS cap
+│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand) — temp-dir materialisation + `typst compile` via process::run_bounded, safe_join path-traversal guard
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
 │     ├─ svg_outline/     outline_svgs() — every SVG file headed for a typst compile that may contain text re-serialised by usvg with <text> → paths (issue #92)
-│     │  ├─ mod.rs      outline_files()/process()/outline(), svg_kind() (typst's format rule), may_contain_text(), the caps
+│     │  ├─ mod.rs      outline_svgs() dispatch (child in cli mode / in-process), classify()/apply()/process()/outline(), svg_kind() (typst's format rule), may_contain_text(), the byte caps
+│     │  ├─ child.rs    outline_in_child() (parent: spawn OutlineCommand via process::run_bounded) + run_child() (the hidden `__outline-svg` mode's body)
+│     │  ├─ ipc.rs      length-prefixed parent↔child framing (request: files+fonts; response: Keep/Replace/Drop/Unparsed per file), every length validated
+│     │  ├─ child_tests.rs  run_child in-memory, timeout+reap / garbage / no-spawn tests against stand-in programs
 │     │  ├─ resolve.rs  capped single-layer gzip inflate, Tree::from_str parse, output Budget, the data-URI + linked-file <image href> resolvers (typst 0.14.2's rules)
 │     │  ├─ font_db.rs  bundled + declared fontdb, brand-font fallback family
 │     │  └─ tests.rs / tests_images.rs
@@ -93,13 +97,13 @@ src/
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() (Library-default) and render_template_with()/render_template_html_with() (explicit TypstCompiler) — user template + data → PDF/HTML, no markdown
 ├─ bin/mdcast/
-│  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, provider stack
+│  ├─ main.rs           CLI (render / explain / render-template, + hidden `__outline-svg` child mode dispatched before the runtime starts), Cli/Cmd, provider stack
 │  ├─ load_doc.rs        load_doc()/load_brand() + PreSteps (--html-image-tags/--mermaid/--qr, flattened onto render and explain)
 │  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
 │  ├─ render_template.rs #[cfg(feature = "typst")] render-template subcommand: RenderTemplateArgs, Format enum (--format pdf|html), --generated FILE.json
 │  └─ typst_compiler_args.rs #[cfg(feature = "typst")] TypstCompilerArgs — --typst-compiler/--typst-bin/--typst-timeout-secs, `#[command(flatten)]`d onto both `render` and `render-template` (issue #73)
 └─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
-   ├─ main.rs           wiring only: config → blob store → prefill → Registry → router → axum::serve
+   ├─ main.rs           wiring only: hidden `__outline-svg` child mode check (argv[1], before config/runtime) → config → blob store → prefill → Registry → router → axum::serve
    ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
    ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
@@ -434,8 +438,8 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shells out to a `typst` binary per compile — issue #73). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode. Exceeded → the child is killed and reaped before the request's error response is returned |
-| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to the `cli`-mode child. Unix-only; a no-op elsewhere |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92). Exceeded → the child is killed and reaped before the request's error response is returned |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to each `cli`-mode child (typst compile and SVG outline). Unix-only; a no-op elsewhere |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
 No `MDCAST_BLOB_DIR` — the blob cache is entirely in memory (issue #71) and
@@ -761,10 +765,34 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   `image_map`/`asset_map`) and `template.rs::assemble`. Not inside
   `TypstCompiler::compile` on purpose: by then the driver already names
   every body image, so a dropped SVG could only become a missing-file
-  compile error instead of degrading like an unresolved image. Because it
-  runs in-process (uncancellable `spawn_blocking`), it is **outside**
-  `cli` mode's timeout/`RLIMIT_AS`, so `resolve.rs` keeps usvg's unbounded
-  `decompress_svgz` off the path entirely: gzip is inflated by
+  compile error instead of degrading like an unresolved image. *Where* it
+  runs follows the compiler (`svg_outline/mod.rs::outline_svgs`), because
+  parse/layout cost is as unbounded as a compile (nested `<use>` fan-out of
+  a long label → tens of millions of glyph outlines from ~2 KB): with
+  `TypstCompiler::Cli` and an `OutlineCommand` (`CliCompiler::with_outline`)
+  the whole step — detection, inflate, validation parse, outlining, caps —
+  runs in a child process (`svg_outline/child.rs`) under the compile's own
+  timeout + kill/reap + `RLIMIT_AS` (`process.rs::run_bounded`, shared with
+  the typst child), spawned only if some file is an SVG candidate. The child
+  is our own binary in its hidden `__outline-svg` mode
+  (`backends::typst::OUTLINE_CHILD_ARG`; a hidden clap subcommand in
+  `mdcast`, an `argv[1]` check at the very top of `mdcast-server`'s sync
+  `main`, both before any runtime/log subscriber since stdout is the
+  response channel), calling `backends::typst::run_outline_child`; both
+  binaries set `OutlineCommand::current_exe()` when building a `Cli`
+  compiler. Parent↔child framing is `svg_outline/ipc.rs` (no new deps):
+  all files + declared fonts go over (a linked `<image href>` resolves
+  against siblings), one `Keep`/`Replace`/`Drop(reason)`/`Unparsed(reason)`
+  comes back per file; the parent caps the child's stdout at
+  `response_cap(n, MAX_OUTLINED_SVG)` and checks every length against the
+  remaining buffer, and logs drops itself (same messages as in-process).
+  Timeout, a killed/non-zero child, or a malformed response fails the render
+  like a failed `cli` compile (server: `render_failed`). `Library` mode — and
+  a library embedder's `Cli` without an outline command, which warns once —
+  runs it in-process on `spawn_blocking`, unbounded in time and memory like
+  the library compile itself. In either mode `resolve.rs` keeps usvg's
+  unbounded `decompress_svgz` off the path entirely — the byte caps below
+  bound inflate/payload/output size only, not parse time or memory: gzip is inflated by
   `inflate_capped` (`MAX_INFLATED_SVG`, 32 MiB) for the top-level file and
   for SVG data URIs (`image/svg+xml`, or `text/plain` that isn't raster —
   the two mimes usvg loads as SVG; raster mimes are never inflated), exactly

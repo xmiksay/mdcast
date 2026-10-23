@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use mdcast::backends::Registry;
 use mdcast::{EmbeddedAssets, LayeredAssets, RenderRequest, Target};
@@ -91,6 +91,11 @@ enum Cmd {
         #[command(flatten)]
         typst_compiler: TypstCompilerArgs,
     },
+    /// Internal: the bounded SVG-outline child `--typst-compiler cli` spawns
+    /// (framed request on stdin, response on stdout).
+    #[cfg(feature = "typst")]
+    #[command(name = mdcast::backends::typst::OUTLINE_CHILD_ARG, hide = true)]
+    OutlineSvg,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -116,16 +121,32 @@ impl From<TargetArg> for Target {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Sync on purpose: the outline child must neither start a runtime (worker
+/// threads and their arenas count against its `RLIMIT_AS`) nor install the
+/// stdout log subscriber (stdout is its response channel).
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    #[cfg(feature = "typst")]
+    if let Cmd::OutlineSvg = cli.cmd {
+        return mdcast::backends::typst::run_outline_child(
+            std::io::stdin().lock(),
+            std::io::stdout().lock(),
+        );
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
         )
         .init();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("start the tokio runtime")?
+        .block_on(run(cli))
+}
 
-    let cli = Cli::parse();
+async fn run(cli: Cli) -> Result<()> {
     match cli.cmd {
         Cmd::Render {
             input,
@@ -161,7 +182,7 @@ async fn main() -> Result<()> {
             )
             .await?;
             #[cfg(feature = "typst")]
-            let registry = Registry::with_typst_compiler(typst_compiler.build().await);
+            let registry = Registry::with_typst_compiler(typst_compiler.build().await?);
             #[cfg(not(feature = "typst"))]
             let registry = Registry::with_defaults();
             if !generated.is_empty() {
@@ -207,10 +228,12 @@ async fn main() -> Result<()> {
             args,
             typst_compiler,
         } => {
-            let compiler = typst_compiler.build().await;
+            let compiler = typst_compiler.build().await?;
             let artifact = render_template::run(args, &compiler).await?;
             println!("wrote {}", artifact.primary.display());
         }
+        #[cfg(feature = "typst")]
+        Cmd::OutlineSvg => unreachable!("dispatched in main before the runtime starts"),
     }
     Ok(())
 }

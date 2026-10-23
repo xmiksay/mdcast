@@ -14,25 +14,39 @@
 //!
 //! The font database is built once per render, and only when the render
 //! actually carries an SVG that may contain text.
+//!
+//! Where it runs follows the compiler mode, because parsing is exactly as
+//! unbounded as a typst compile (a 2 KB SVG of nested `<use>` fan-out can ask
+//! for tens of millions of glyph outlines): `TypstCompiler::Cli` with an
+//! [`OutlineCommand`] runs the whole step in a child process (`child.rs`)
+//! under the compile's own timeout and `RLIMIT_AS`, spawned only when a file
+//! is an SVG candidate at all; `Library` — and `Cli` without an outline
+//! command, which warns once — runs it in-process on a blocking thread with
+//! no time or memory bound, the same as `Library`'s typst compile itself.
 
+mod child;
 mod font_db;
+mod ipc;
 mod resolve;
 
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsStr;
 use std::path::Path;
+use std::sync::Once;
 
 use anyhow::Result;
 
+use super::compiler::{CliCompiler, TypstCompiler};
 use crate::image_format::{ImageFormat, sniff};
+pub use child::run_child;
 use font_db::{Fonts, font_db};
 use resolve::{Budget, href_resolver, is_gzip, no_images, parse, plain};
 
-/// Outlining runs in the server process on an uncancellable blocking thread —
-/// outside `cli` mode's timeout and `RLIMIT_AS` — so it gets its own fixed
-/// ceilings. usvg inflates `.svgz` with an unbounded `read_to_end`, so a few
-/// MiB of gzip bomb would otherwise OOM the whole process; 32 MiB of inflated
-/// SVG is far beyond any real diagram.
+/// These caps bound bytes only — the inflated `.svgz`/data-URI input usvg
+/// would otherwise `read_to_end` unbounded, and the re-serialised output —
+/// not parse or layout *time/memory*; that is the child's timeout and
+/// `RLIMIT_AS` in `cli` mode, and unbounded in-process (see module docs).
+/// 32 MiB of inflated SVG is far beyond any real diagram.
 const MAX_INFLATED_SVG: usize = 32 << 20;
 /// The writer re-inlines every linked raster as base64 at every reference, so
 /// N `<image>`s pointing at one large sibling multiply it N times.
@@ -58,12 +72,29 @@ pub(super) struct Outlined {
     pub dropped: HashSet<String>,
 }
 
-/// Outline every SVG in `files` on a blocking thread (parsing and glyph
-/// outlining are CPU-bound).
+/// Outline every SVG in `files`, in a bounded child or in-process depending
+/// on `compiler` (see module docs). A child that times out, is killed or
+/// answers garbage fails the render, like a failed `cli` compile.
 pub(super) async fn outline_svgs(
     files: Vec<(String, Vec<u8>)>,
     fonts: Vec<Vec<u8>>,
+    compiler: &TypstCompiler,
 ) -> Result<Outlined> {
+    if let TypstCompiler::Cli(cli) = compiler {
+        match &cli.outline {
+            Some(cmd) => {
+                if !files.iter().any(|(p, b)| svg_kind(p, b).is_some()) {
+                    return Ok(Outlined {
+                        files,
+                        fonts,
+                        dropped: HashSet::new(),
+                    });
+                }
+                return child::outline_in_child(cmd, cli.bounds(), files, fonts).await;
+            }
+            None => warn_unbounded_once(cli),
+        }
+    }
     super::spawn_compile(move || {
         let (files, dropped) = outline_files(files, &fonts, LIMITS);
         Ok(Outlined {
@@ -75,10 +106,27 @@ pub(super) async fn outline_svgs(
     .await
 }
 
+fn warn_unbounded_once(cli: &CliCompiler) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            bin = %cli.bin,
+            "typst CLI compiler has no SVG-outline command; outlining SVGs in-process, \
+             outside the compile timeout and memory cap"
+        );
+    });
+}
+
+/// What became of one file. The reasons are rendered error messages rather
+/// than errors so an outcome can cross the child boundary (`ipc.rs`) and be
+/// logged by the parent exactly as an in-process one is (`apply`).
+#[derive(Debug, PartialEq)]
 enum Outcome {
     Keep,
     Replace(Vec<u8>),
-    Drop,
+    Drop(String),
+    /// Sniffed-as-SVG, failed to parse, passed through untouched.
+    Unparsed(String),
 }
 
 enum Failure {
@@ -95,6 +143,15 @@ impl std::fmt::Display for Failure {
     }
 }
 
+fn outline_files(
+    files: Vec<(String, Vec<u8>)>,
+    fonts: &[Vec<u8>],
+    limits: Limits,
+) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
+    let outcomes = classify(&files, fonts, limits);
+    apply(files, outcomes)
+}
+
 /// An SVG usvg cannot parse is dropped with a warning: typst's own SVG import
 /// is usvg too, so it would have failed on the same bytes anyway. The one
 /// exception is a file that is SVG only by content sniff (no svg/svgz
@@ -102,45 +159,46 @@ impl std::fmt::Display for Failure {
 /// data file a template `read()`s — so it passes through untouched; if it
 /// *is* imaged, typst fails on it exactly as usvg just did. Exceeding a cap
 /// always drops: passing it on would hand typst the same bomb.
-fn outline_files(
-    files: Vec<(String, Vec<u8>)>,
-    fonts: &[Vec<u8>],
-    limits: Limits,
-) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
-    let outcomes: Vec<Outcome> = {
-        let lookup: HashMap<&str, &[u8]> = files
-            .iter()
-            .map(|(p, b)| (p.as_str(), b.as_slice()))
-            .collect();
-        let mut db = None;
-        files
-            .iter()
-            .map(|(path, bytes)| {
-                let Some(by_ext) = svg_kind(path, bytes) else {
-                    return Outcome::Keep;
-                };
-                match process(path, bytes, &lookup, &mut db, fonts, limits) {
-                    Ok(outcome) => outcome,
-                    Err(Failure::Parse(e)) if !by_ext => {
-                        tracing::debug!(key = %path, error = %e, "sniffed-as-SVG file did not parse; passing it through");
-                        Outcome::Keep
-                    }
-                    Err(e) => {
-                        tracing::warn!(key = %path, error = %e, "SVG could not be parsed; dropping it");
-                        Outcome::Drop
-                    }
-                }
-            })
-            .collect()
-    };
+fn classify(files: &[(String, Vec<u8>)], fonts: &[Vec<u8>], limits: Limits) -> Vec<Outcome> {
+    let lookup: HashMap<&str, &[u8]> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let mut db = None;
+    files
+        .iter()
+        .map(|(path, bytes)| {
+            let Some(by_ext) = svg_kind(path, bytes) else {
+                return Outcome::Keep;
+            };
+            match process(path, bytes, &lookup, &mut db, fonts, limits) {
+                Ok(outcome) => outcome,
+                Err(Failure::Parse(e)) if !by_ext => Outcome::Unparsed(e.to_string()),
+                Err(e) => Outcome::Drop(e.to_string()),
+            }
+        })
+        .collect()
+}
 
+/// Folds `outcomes` (one per file, same order) back into `files`, logging
+/// each drop/pass-through — always in the parent, whichever process
+/// classified them.
+fn apply(
+    files: Vec<(String, Vec<u8>)>,
+    outcomes: Vec<Outcome>,
+) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
     let mut dropped = HashSet::new();
     let mut out = Vec::with_capacity(files.len());
     for ((path, bytes), outcome) in files.into_iter().zip(outcomes) {
         match outcome {
             Outcome::Keep => out.push((path, bytes)),
             Outcome::Replace(svg) => out.push((path, svg)),
-            Outcome::Drop => {
+            Outcome::Unparsed(error) => {
+                tracing::debug!(key = %path, %error, "sniffed-as-SVG file did not parse; passing it through");
+                out.push((path, bytes));
+            }
+            Outcome::Drop(error) => {
+                tracing::warn!(key = %path, %error, "SVG could not be parsed; dropping it");
                 dropped.insert(path);
             }
         }

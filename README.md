@@ -593,15 +593,26 @@ own name and bytes, not the `image()` call.
   content sniff and fails to parse (corrupt gzip included) is passed through
   untouched instead (it may be a gzipped data file a template `read()`s).
   Gzip inside gzip counts as unparseable — typst inflates only once.
-- **Resource limits:** outlining runs **in-process** (in `mdcast-server`, in
-  the server process) on a blocking thread, *before* the compile — so it is
-  **not** covered by `MDCAST_TYPST_TIMEOUT_SECS` or
-  `MDCAST_TYPST_MAX_MEMORY_BYTES`, even in `cli` mode. It is bounded by two
-  fixed caps instead: a gzipped SVG (`.svgz`, or an SVG data URI) may
-  inflate to at most 32 MiB, and all embedded images together (raster data
-  URIs and linked rasters at their raw size, nested SVGs inflated) as well
-  as the re-serialised SVG may be at most 64 MiB. Exceeding either warns and
-  drops the SVG, whatever its name.
+- **Resource limits:** parsing and laying out an SVG costs as much as a
+  typst compile can — a 2 KB SVG of nested `<use>` fan-out over a long label
+  asks for tens of millions of glyph outlines — so outlining follows the
+  compiler mode. With `--typst-compiler cli` / `MDCAST_TYPST=cli` the whole
+  step runs in a short-lived child process (the `mdcast`/`mdcast-server`
+  binary itself, in a hidden mode) under the **same**
+  `--typst-timeout-secs` / `MDCAST_TYPST_TIMEOUT_SECS` and
+  `MDCAST_TYPST_MAX_MEMORY_BYTES` as the typst compile child, spawned only
+  when the render carries an SVG at all; a child that times out, hits the
+  memory cap or answers garbage fails the render exactly like a failed
+  `cli` compile (`render_failed` from the server). In the default `library`
+  mode it runs in-process on a blocking thread with **no** time or memory
+  bound — the same as the in-process typst compile itself. A library
+  embedder building `CliCompiler` without `with_outline(...)` also gets the
+  in-process path, with a one-time warning. Independently of mode, two
+  fixed caps bound *bytes* only — not parse time or memory: a gzipped SVG
+  (`.svgz`, or an SVG data URI) may inflate to at most 32 MiB, and all
+  embedded images together (raster data URIs and linked rasters at their
+  raw size, nested SVGs inflated) as well as the re-serialised SVG may be at
+  most 64 MiB. Exceeding either warns and drops the SVG, whatever its name.
 - pandoc targets get the SVG bytes untouched.
 
 ## Table of contents
@@ -829,6 +840,10 @@ cannot offer:
   `MDCAST_TYPST_MAX_MEMORY_BYTES` applies `setrlimit(RLIMIT_AS)` to the child
   (unix only).
 - **HTML export without the `typst-html` cargo feature** — see above.
+
+The SVG-outline pre-step (see "SVG text on the typst targets" above) runs under the same timeout
+and memory cap in `cli` mode, as a second short-lived child: the `mdcast` /
+`mdcast-server` binary re-executes itself in a hidden `__outline-svg` mode.
 
 `--typst-bin PATH` / `MDCAST_TYPST_BIN` (default `typst`) picks the binary;
 it is looked up on `PATH` if it isn't itself a path. The CLI binary's Typst
@@ -1088,8 +1103,8 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shell out to a `typst` binary per compile, killable and memory-boundable) — see "Selecting the Typst compiler" above |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode; the child is killed and reaped on expiry |
-| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on the `cli`-mode child (unix only) |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline); the child is killed and reaped on expiry |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on each `cli`-mode child — typst compile and SVG outline (unix only) |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
 An unset token doesn't just relax auth on a route — the `require_bearer`

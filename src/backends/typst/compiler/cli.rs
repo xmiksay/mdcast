@@ -28,13 +28,12 @@
 //! this module writes.
 
 use std::path::{Component, Path, PathBuf};
-use std::process::Stdio;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
+use super::super::process::{Bounds, run_bounded};
 use super::{CompileFormat, CompileInputs};
 
 const FONTS_DIR: &str = ".mdcast-fonts";
@@ -45,14 +44,41 @@ const FONTS_DIR: &str = ".mdcast-fonts";
 #[derive(Clone, Debug, PartialEq)]
 pub struct CliCompiler {
     pub bin: String,
-    /// Wall-clock budget for one compile. Exceeded → the child is killed and
-    /// reaped before the error is returned, so the caller never sees a
-    /// lingering process.
+    /// Wall-clock budget for one child — the compile, and separately the
+    /// SVG-outline child when `outline` is set. Exceeded → the child is
+    /// killed and reaped before the error is returned, so the caller never
+    /// sees a lingering process.
     pub timeout: Duration,
-    /// Address-space cap applied to the child via `setrlimit(RLIMIT_AS)`.
+    /// Address-space cap applied to each child via `setrlimit(RLIMIT_AS)`.
     /// Unix-only (see `Cargo.toml`'s `cfg(unix)` `libc` dependency) — `None`,
     /// or any value on a non-unix target, leaves the child unbounded.
     pub max_memory_bytes: Option<u64>,
+    /// The child that runs the SVG-outline step (issue #92) under the same
+    /// `timeout`/`max_memory_bytes` as the compile. `None` outlines
+    /// in-process instead — unbounded, with a one-time warning; the `mdcast`
+    /// and `mdcast-server` binaries always set it to themselves.
+    pub outline: Option<OutlineCommand>,
+}
+
+/// A program that, run with `args`, speaks the SVG-outline child protocol on
+/// stdin/stdout — in practice one of mdcast's own binaries in its hidden
+/// [`OUTLINE_CHILD_ARG`](crate::backends::typst::OUTLINE_CHILD_ARG) mode.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OutlineCommand {
+    pub program: PathBuf,
+    pub args: Vec<String>,
+}
+
+impl OutlineCommand {
+    /// The running executable in its hidden outline-child mode — what a
+    /// binary that dispatches [`OUTLINE_CHILD_ARG`](crate::backends::typst::OUTLINE_CHILD_ARG)
+    /// itself passes to [`CliCompiler::with_outline`].
+    pub fn current_exe() -> Result<Self> {
+        Ok(Self {
+            program: std::env::current_exe().context("locate the running executable")?,
+            args: vec![crate::backends::typst::OUTLINE_CHILD_ARG.to_string()],
+        })
+    }
 }
 
 impl CliCompiler {
@@ -61,12 +87,25 @@ impl CliCompiler {
             bin: bin.into(),
             timeout,
             max_memory_bytes: None,
+            outline: None,
         }
     }
 
     pub fn with_max_memory_bytes(mut self, bytes: Option<u64>) -> Self {
         self.max_memory_bytes = bytes;
         self
+    }
+
+    pub fn with_outline(mut self, outline: Option<OutlineCommand>) -> Self {
+        self.outline = outline;
+        self
+    }
+
+    pub(in crate::backends::typst) fn bounds(&self) -> Bounds {
+        Bounds {
+            timeout: self.timeout,
+            max_memory_bytes: self.max_memory_bytes,
+        }
     }
 
     /// Runs `<bin> --version` and logs the result — see `mod.rs`'s
@@ -127,47 +166,13 @@ impl CliCompiler {
                 .arg("html");
         }
         cmd.arg(main_rel).arg(output_name);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        cmd.kill_on_drop(true);
-        #[cfg(unix)]
-        apply_memory_limit(&mut cmd, self.max_memory_bytes);
 
-        let mut child = cmd
-            .spawn()
-            .with_context(|| format!("spawn typst compiler `{}`", self.bin))?;
-        let mut stdout = child.stdout.take().expect("stdout was piped");
-        let mut stderr = child.stderr.take().expect("stderr was piped");
-
-        // stdout/stderr must be drained *concurrently* with `wait()`, not
-        // after — the child can block on a full pipe (typst diagnostics can
-        // exceed the OS pipe buffer) while nobody is reading it, which would
-        // otherwise deadlock `wait()` under the very timeout meant to bound
-        // it.
-        let drain = async {
-            let mut out = Vec::new();
-            let mut err = Vec::new();
-            let _ = tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err),);
-            err
-        };
-        let run = futures::future::join(child.wait(), drain);
-
-        let (status, stderr) = match tokio::time::timeout(self.timeout, run).await {
-            Ok((status, stderr)) => (status.context("wait for typst compile")?, stderr),
-            Err(_elapsed) => {
-                let _ = child.kill().await; // sends the kill and reaps it
-                bail!(
-                    "typst compile timed out after {:?} and was killed",
-                    self.timeout
-                );
-            }
-        };
-
-        if !status.success() {
+        let done = run_bounded(cmd, None, self.bounds(), 0, "typst compile").await?;
+        if !done.status.success() {
             bail!(
-                "typst compile failed ({status}):\n{}",
-                String::from_utf8_lossy(&stderr)
+                "typst compile failed ({}):\n{}",
+                done.status,
+                String::from_utf8_lossy(&done.stderr)
             );
         }
 
@@ -253,35 +258,6 @@ fn restrict_to_owner(path: &Path) -> Result<()> {
 #[cfg(not(unix))]
 fn restrict_to_owner(_path: &Path) -> Result<()> {
     Ok(())
-}
-
-/// `setrlimit(RLIMIT_AS)` in the child, applied via `pre_exec` (runs after
-/// `fork`, before `exec`) — the only place a per-process memory cap can be
-/// installed for an arbitrary binary. `RLIMIT_AS` bounds the whole address
-/// space (heap, stacks, mmap'd files), which is what actually stops an
-/// unbounded Typst compile from exhausting host memory; it is not a precise
-/// "bytes of document data" cap.
-#[cfg(unix)]
-fn apply_memory_limit(cmd: &mut Command, max_memory_bytes: Option<u64>) {
-    let Some(limit) = max_memory_bytes else {
-        return;
-    };
-    // SAFETY: the closure only calls `libc::setrlimit`, an async-signal-safe
-    // syscall wrapper that performs no allocation — the constraint `pre_exec`
-    // documents (it runs post-fork, pre-exec, in a single-threaded child
-    // where most of the standard library is unsafe to use).
-    unsafe {
-        cmd.pre_exec(move || {
-            let rl = libc::rlimit {
-                rlim_cur: limit as libc::rlim_t,
-                rlim_max: limit as libc::rlim_t,
-            };
-            if libc::setrlimit(libc::RLIMIT_AS, &rl) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
-    }
 }
 
 #[cfg(test)]
