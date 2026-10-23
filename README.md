@@ -964,6 +964,10 @@ middleware layer is left out of the router entirely, so there's no
 half-applied gate to regress into "always authorised" by accident. `/health`
 is unauthenticated in both modes.
 
+On SIGTERM or Ctrl-C the server stops accepting connections and lets
+in-flight requests finish before exiting, so a container rollout drains
+renders instead of cutting them off.
+
 The blob cache is entirely in memory and does not survive a restart — there
 is no `MDCAST_BLOB_DIR`. A blob missing after a restart just means the next
 render referencing it gets a `409` and the caller re-uploads it, exactly as

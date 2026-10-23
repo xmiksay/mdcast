@@ -55,7 +55,7 @@ jobs:
               exit 1
             fi
           done
-          if ! grep -q "image: ghcr.io/xmiksay/mdcast:${tag}$" deploy.yml; then
+          if ! grep -qxF "          image: ghcr.io/xmiksay/mdcast:${tag}" deploy.yml; then
             echo "deploy.yml does not pin ghcr.io/xmiksay/mdcast:${tag}" >&2
             exit 1
           fi

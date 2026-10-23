@@ -55,9 +55,10 @@ spec:
       labels:
         app: mdcast
     spec:
-      # The server drains in-flight renders on SIGTERM; give the longest one
-      # (MDCAST_TYPST_TIMEOUT_SECS) time to finish before the SIGKILL.
-      terminationGracePeriodSeconds: 110
+      # The server drains in-flight renders on SIGTERM; give the preStop
+      # delay plus the longest compile (MDCAST_TYPST_TIMEOUT_SECS) time to
+      # finish before the SIGKILL.
+      terminationGracePeriodSeconds: 115
       containers:
         - name: mdcast
           # Pinned to the release tag, not :latest — an Always-pull of
@@ -67,6 +68,14 @@ spec:
           # once the tag's image is published.
           image: ghcr.io/xmiksay/mdcast:0.4.2
           imagePullPolicy: IfNotPresent
+          # axum stops accepting the moment SIGTERM lands, while the pod's
+          # removal from the Service endpoints propagates asynchronously;
+          # the delay lets kube-proxy stop routing here first, so a rollout
+          # doesn't refuse connections mdcast-client won't retry.
+          lifecycle:
+            preStop:
+              exec:
+                command: ["sleep", "5"]
           ports:
             - containerPort: 8080
           envFrom:
@@ -89,7 +98,8 @@ spec:
           # budget) plus concurrent renders; the CPU limit keeps a burst of
           # typst/pandoc compiles from starving the node. The 1-CPU request
           # is the flip side: typst is CPU-bound, and a 100m guarantee let a
-          # loaded node throttle a ~1s compile past the 30s kill window.
+          # loaded node throttle a ~1s compile past the then-default 30s kill
+          # window.
           resources:
             requests:
               cpu: "1"

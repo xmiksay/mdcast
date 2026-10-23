@@ -300,9 +300,9 @@ through a registry-edge cache right after a push. It requests a full CPU
 compile past the kill window) and sets `MDCAST_TYPST_TIMEOUT_SECS=100` —
 well below the site client's 120s request timeout, since it bounds only the
 typst child. `mdcast-server` drains in-flight requests on SIGTERM/Ctrl-C
-(`axum::serve(..).with_graceful_shutdown`), and the Deployment's
-`terminationGracePeriodSeconds: 110` gives the longest compile time to
-finish before the SIGKILL.
+(`axum::serve(..).with_graceful_shutdown`); the Deployment's 5s `preStop`
+sleep lets the Service drop the pod before the listener closes, and
+`terminationGracePeriodSeconds: 115` covers that plus the longest compile.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
 `mermaid`, `qr` and `rt-multi-thread` itself (a render service without engines is
