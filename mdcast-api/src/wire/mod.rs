@@ -29,5 +29,7 @@ pub mod render;
 pub use blob::{BlobCheckRequest, BlobCheckResponse, MissingBlob, MissingBlobsError};
 pub use capabilities::CapabilitiesResponse;
 pub use error::{ErrorCode, ErrorResponse};
-pub use generated::{GeneratedAsset, GeneratedSpec, Generator, QrEcLevel};
+pub use generated::{
+    BoardOptions, BoardTheme, GeneratedAsset, GeneratedSpec, Generator, QrEcLevel,
+};
 pub use render::{RenderMarkdownRequest, RenderOptions, RenderTemplateRequest, TemplateFormat};

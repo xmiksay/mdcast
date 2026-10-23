@@ -42,7 +42,7 @@ mod tests {
         let res = CapabilitiesResponse {
             targets: vec![Target::Pdf, Target::PdfPresentation, Target::Docx],
             template_formats: vec![TemplateFormat::Pdf, TemplateFormat::Html],
-            generators: vec![Generator::Qr],
+            generators: vec![Generator::Qr, Generator::Fen, Generator::Pgn],
             max_upload_bytes: 268_435_456,
             version: "0.3.0".to_string(),
         };
@@ -52,6 +52,18 @@ mod tests {
             serde_json::from_str::<CapabilitiesResponse>(&json).unwrap(),
             res
         );
+    }
+
+    #[test]
+    fn a_newer_servers_unknown_generator_does_not_fail_the_decode() {
+        let json = r#"{
+            "targets": ["pdf"], "template_formats": ["pdf"],
+            "generators": ["qr", "barcode"],
+            "max_upload_bytes": 1024, "version": "9.9.9"
+        }"#;
+        let res: CapabilitiesResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(res.generators, [Generator::Qr, Generator::Unknown]);
+        assert_eq!(res.max_upload_bytes, 1024);
     }
 
     #[test]

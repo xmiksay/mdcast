@@ -49,9 +49,17 @@ pub struct RenderOptions {
     #[serde(default)]
     pub mermaid: bool,
     /// `--qr`: render ```` ```qr ```` fences and `<qr>` tags to SVG QR codes
-    /// before splitting.
+    /// before splitting. Advertised as `qr` in
+    /// `CapabilitiesResponse::generators`; a server without it ignores the
+    /// flag.
     #[serde(default)]
     pub qr: bool,
+    /// `--chess`: render ```` ```fen ```` / ```` ```pgn ```` fences and
+    /// `<fen>` / `<pgn>` tags to SVG chess boards before splitting.
+    /// Advertised as `fen`/`pgn` in `CapabilitiesResponse::generators`; a
+    /// server without them ignores the flag and leaves the fences as code.
+    #[serde(default)]
+    pub chess: bool,
     /// `--toc-depth N`: request a table of contents at heading depth 1-6.
     #[serde(default)]
     pub toc_depth: Option<u8>,
@@ -140,6 +148,7 @@ mod tests {
                 html_image_tags: true,
                 mermaid: true,
                 qr: true,
+                chess: true,
                 toc_depth: Some(3),
                 layout_assets: vec!["img/logo.png".to_string()],
                 layout_fonts: vec!["fonts/Brand-Regular.ttf".to_string()],

@@ -4,7 +4,7 @@ pub mod assets;
 pub mod backends;
 pub mod brand;
 pub mod frontmatter;
-#[cfg(feature = "qr")]
+#[cfg(any(feature = "qr", feature = "chess"))]
 pub mod generators;
 mod image_format;
 pub mod images;

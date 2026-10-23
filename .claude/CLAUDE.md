@@ -32,7 +32,7 @@ mdcast-api/           serde-only shared types + wire protocol; no anyhow/tokio/I
    ├─ mod.rs          protocol overview (manifest → 409 → upload → retry)
    ├─ render.rs       RenderMarkdownRequest/RenderOptions, RenderTemplateRequest/TemplateFormat
    ├─ blob.rs         BlobCheckRequest/Response, MissingBlob, MissingBlobsError (the 409 body)
-   ├─ generated.rs    GeneratedAsset/GeneratedSpec (non-exhaustive, `kind`-tagged), QrEcLevel, Generator (capabilities)
+   ├─ generated.rs    GeneratedAsset/GeneratedSpec (non-exhaustive, `kind`-tagged: qr/fen/pgn), QrEcLevel, BoardOptions/BoardTheme, Generator (capabilities)
    └─ error.rs        ErrorResponse + ErrorCode (every other 4xx/5xx: bad_request,
                       unauthorized, payload_too_large, unsupported_target,
                       render_failed, internal)
@@ -57,10 +57,12 @@ src/
 │  ├─ mod.rs           resolve_images() — async per-page image rewriter
 │  └─ tests.rs         unit tests for image_refs()/collect_images()/resolve_images()
 ├─ mermaid.rs         #[cfg(feature = "mermaid")] render_diagrams() — ```mermaid fences → SVG via mermaid-svg (pure Rust), pre-splitter
-├─ generators/        #[cfg(feature = "qr")] images mdcast draws itself
-│  ├─ mod.rs          expand() — shared fence/tag scanner (```name / <name>…</name> / <name path="KEY">), async path= resolution, splice; render_spec() for template `generated` entries; available()
-│  ├─ qr.rs           render_qr_codes() + svg() — hand-built SVG from the qrcode module matrix
-│  └─ tests.rs        unit tests for the scanner and the QR renderer
+├─ generators/        #[cfg(any(feature = "qr", feature = "chess"))] images mdcast draws itself
+│  ├─ mod.rs          expand() — shared fence/tag scanner (```name / <name>…</name> / <name path="KEY">, bare boolean attrs), async path= resolution, splice; render_spec() for template `generated` entries; available()
+│  ├─ qr.rs           #[cfg(feature = "qr")] render_qr_codes() + svg() — hand-built SVG from the qrcode module matrix
+│  ├─ chess.rs        #[cfg(feature = "chess")] render_chess() + fen_svg()/pgn_svg() — chess-diagram boards, px → cm root size rewrite
+│  ├─ tests.rs        unit tests for the scanner and the QR renderer
+│  └─ chess_tests.rs  unit tests for fen/pgn blocks, attrs, ply selection, sizing
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
@@ -252,6 +254,7 @@ happens to mirror them.
 | `reference/reference.{docx,odt,pptx}` | pandoc (matching target) |
 | `mermaid/diagram-{N}.svg`             | mermaid pre-step output (`mermaid::render_diagrams`, `mermaid` feature) — the caller layers these over their provider |
 | `qr/qr-{N}.svg`                       | QR pre-step output (`generators::qr::render_qr_codes`, `qr` feature) — layered like mermaid's |
+| `chess/fen-{N}.svg`, `chess/pgn-{N}.svg` | chess pre-step output (`generators::chess::render_chess`, `chess` feature) — `fen` and `pgn` blocks numbered separately, layered like mermaid's |
 | anything else (e.g. `img/...`)        | image refs in markdown |
 
 ## Build / test
@@ -269,8 +272,8 @@ its own `-p mdcast-api --features toml` target rather than folded into
 already use.
 
 ```
-make build              # cargo build --workspace — default = pandoc + typst + mermaid + qr (+ rt-multi-thread for the bin)
-make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / qr / bin-without-mermaid-and-qr / default / +typst-html / +remote-images / +server / +server,typst-html)
+make build              # cargo build --workspace — default = pandoc + typst + mermaid + qr + chess (+ rt-multi-thread for the bin)
+make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / qr / chess / bin-without-mermaid-qr-and-chess / bin-with-only-qr / bin-with-only-chess / default / +typst-html / +remote-images / +server / +server,typst-html)
 make test                # cargo test --workspace — default features only; unit suite runs in <1s
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
@@ -305,7 +308,7 @@ sleep lets the Service drop the pod before the listener closes, and
 `terminationGracePeriodSeconds: 115` covers that plus the longest compile.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
-`mermaid`, `qr` and `rt-multi-thread` itself (a render service without engines is
+`mermaid`, `qr`, `chess` and `rt-multi-thread` itself (a render service without engines is
 useless) plus axum/sha2/subtle; the `[[bin]] mdcast-server`
 `required-features` spells the whole set out again, so `cargo build` without
 the feature simply skips the binary.
@@ -359,8 +362,8 @@ merge, tag `vX.Y.Z`, push the tag; once `docker.yml` has pushed the image,
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
-./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr]  # prints per-page (class, origin)
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr] [--chess]  # prints per-page (class, origin)
 ./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--generated generated.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]  # typst-only, no markdown
 ```
 
@@ -379,7 +382,17 @@ tags (attrs `ec`, `size`) become `![](qr/qr-N.svg)`; unlike mermaid it is
 async because `path=` reads through the provider stack (`--assets` /
 embedded on the CLI, blobs over embedded on the server), so `load_doc`/
 `resolve_doc` build the base provider *before* the pre-steps and layer the
-SVGs over it after; a failing block warns and stays as written.
+SVGs over it after; a failing block warns and stays as written. `--chess`
+runs the chess pre-step (`generators::chess::render_chess`, `chess` feature,
+after qr) through the same `expand` scanner twice: ```` ```fen ```` /
+`<fen>` blocks draw a position, ```` ```pgn ```` / `<pgn move="N">` blocks
+replay a mainline to ply N (absent = final position — `chess-diagram`'s
+`pgn::board_at` only reports the game length by rejecting a too-large ply,
+so `pgn_svg` asks for `usize::MAX` and replays to the `available` count it
+names). Attrs `flip` (bare boolean), `orientation`, `theme`, `coordinates`,
+`size`; the root `<svg>`'s px width/height are rewritten to cm (8 cm base) so
+DOCX/PDF embed size is deterministic. Template `generated` entries of kind
+`fen`/`pgn` render at 8 cm and fail the request on error, like `qr`.
 `render-template --generated FILE.json` takes the wire's `GeneratedAsset`
 array, paths relative to the template's directory; a bad entry or a path
 the provider already serves is an error. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
@@ -469,7 +482,8 @@ sees a `200` on its very first request instead of a `409` round trip.
 entirely — added to the `/v1` router *after* `route_layer` is applied, so it
 is unauthenticated in both modes, same as `/health`. It reports
 `{targets, template_formats, generators, max_upload_bytes, version}`:
-`generators` lists `generators::available()` (today `["qr"]`);
+`generators` lists `generators::available()` (`["qr", "fen", "pgn"]` in a
+default build — each only when its `qr`/`chess` feature is compiled in);
 `targets`' typst entries (`pdf`, `pdf-presentation`) are always present, the
 pandoc entries (`docx`/`odt`/`pptx`/`html-reveal`) only when
 `pandoc::probe_pandoc` found a working binary at startup (`AppState.

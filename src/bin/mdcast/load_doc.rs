@@ -1,5 +1,5 @@
 //! Markdown file → `ResolvedDoc`: frontmatter, the string preprocessors, the
-//! image-producing pre-steps (mermaid, QR), splitting and classification.
+//! image-producing pre-steps (mermaid, QR, chess), splitting and classification.
 //! Shared by `render` and `explain`.
 
 use std::path::Path;
@@ -36,6 +36,13 @@ pub struct PreSteps {
     /// stays as written.
     #[arg(long, default_value_t = false)]
     pub qr: bool,
+    /// Render ```fen / ```pgn fences and `<fen>`, `<pgn move="N">` (and
+    /// `path="KEY"`) tags to SVG chess boards before splitting (`flip`,
+    /// `theme="brown|blue|green"`, `coordinates="false"`,
+    /// `size="small|large"`). Needs the `chess` feature (on by default). A
+    /// block that fails warns and stays as written.
+    #[arg(long, default_value_t = false)]
+    pub chess: bool,
 }
 
 /// Shared by `load_doc` (markdown pipeline) and `render_template::run`
@@ -53,7 +60,7 @@ pub async fn load_brand(brand: Option<&Path>) -> Result<BrandSpec> {
 }
 
 /// Returns the document plus the SVGs the pre-steps produced, for the caller
-/// to layer over `assets`. `assets` is also what `<qr path="…">` reads.
+/// to layer over `assets`. `assets` is also what `<qr path="…">` / `<fen path="…">` read.
 pub async fn load_doc(
     input: &Path,
     brand: Option<&Path>,
@@ -81,7 +88,10 @@ pub async fn load_doc(
     // Image-producing pre-steps: after the plain-string preprocessors (an
     // <img> tag rewrite can't affect a fence), before splitting, so the
     // classifier and both engines see each result as a real image node.
-    #[cfg_attr(not(any(feature = "mermaid", feature = "qr")), allow(unused_mut))]
+    #[cfg_attr(
+        not(any(feature = "mermaid", feature = "qr", feature = "chess")),
+        allow(unused_mut)
+    )]
     let mut svgs = Vec::new();
     #[cfg(feature = "mermaid")]
     let md = if steps.mermaid {
@@ -105,13 +115,25 @@ pub async fn load_doc(
         md
     };
     #[cfg(not(feature = "qr"))]
-    {
-        let _ = assets;
-        anyhow::ensure!(
-            !steps.qr,
-            "this mdcast build does not include the `qr` feature"
-        );
-    }
+    anyhow::ensure!(
+        !steps.qr,
+        "this mdcast build does not include the `qr` feature"
+    );
+    #[cfg(feature = "chess")]
+    let md = if steps.chess {
+        let rendered = mdcast::generators::chess::render_chess(&md, assets).await;
+        svgs.extend(rendered.svgs);
+        rendered.markdown
+    } else {
+        md
+    };
+    #[cfg(not(feature = "chess"))]
+    anyhow::ensure!(
+        !steps.chess,
+        "this mdcast build does not include the `chess` feature"
+    );
+    #[cfg(not(any(feature = "qr", feature = "chess")))]
+    let _ = assets;
 
     let raw = DefaultSplitter.split(&md);
     let pages = classify(raw, &brand_spec.auto_layout);
@@ -184,5 +206,25 @@ mod tests {
         let (doc, svgs) = load(md, steps, Vec::new(), Vec::new()).await;
         assert!(doc.pages[0].body.contains("![](qr/qr-0.svg)"));
         assert_eq!(svgs[0].0, "qr/qr-0.svg");
+    }
+
+    #[cfg(feature = "chess")]
+    #[tokio::test]
+    async fn chess_flag_turns_fen_and_pgn_blocks_into_image_refs() {
+        let md = "```fen\n8/8/8/4k3/8/8/8/4K3\n```\n\n<pgn move=\"2\">1. e4 e5 2. Nf3</pgn>\n";
+        let (plain, none) = load(md, PreSteps::default(), Vec::new(), Vec::new()).await;
+        assert!(plain.pages[0].body.contains("```fen"));
+        assert!(none.is_empty());
+
+        let steps = PreSteps {
+            chess: true,
+            ..PreSteps::default()
+        };
+        let (doc, svgs) = load(md, steps, Vec::new(), Vec::new()).await;
+        let body = &doc.pages[0].body;
+        assert!(body.contains("![](chess/fen-0.svg)"), "{body}");
+        assert!(body.contains("![](chess/pgn-0.svg)"), "{body}");
+        let keys: Vec<_> = svgs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["chess/fen-0.svg", "chess/pgn-0.svg"]);
     }
 }

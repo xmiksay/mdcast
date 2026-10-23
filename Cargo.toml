@@ -41,7 +41,7 @@ exclude = [
 ]
 
 [features]
-default = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr"]
+default = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr", "chess"]
 pandoc = ["dep:zip", "dep:quick-xml"]
 # Render ```mermaid fenced code blocks to SVG (pure Rust, no Node/Chromium)
 # via `mermaid::render_diagrams` — a pre-step ahead of the page splitter.
@@ -53,6 +53,10 @@ mermaid = ["dep:mermaid-svg"]
 # entries) to SVG via `generators::qr`. Default-on and opt-in per call, same
 # reasoning as `mermaid`.
 qr = ["dep:qrcode"]
+# Render ```fen / ```pgn fences and <fen> / <pgn> tags (and template
+# `generated` fen/pgn entries) to SVG chess boards via `generators::chess`.
+# Default-on and opt-in per call, same reasoning as `mermaid`.
+chess = ["dep:chess-diagram"]
 typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
@@ -73,6 +77,7 @@ server = [
     "typst",
     "mermaid",
     "qr",
+    "chess",
     "rt-multi-thread",
     "dep:axum",
     "dep:sha2",
@@ -92,6 +97,7 @@ remote-images = ["dep:reqwest"]
 anyhow = "1"
 axum = { version = "0.8", optional = true, features = ["multipart"] }
 bytes = "1"
+chess-diagram = { version = "0.3.1", optional = true, default-features = false, features = ["svg", "pgn"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
 lru = { version = "0.18", optional = true }
@@ -145,7 +151,7 @@ required-features = ["rt-multi-thread"]
 [[bin]]
 name = "mdcast-server"
 path = "src/bin/mdcast-server/main.rs"
-required-features = ["server", "pandoc", "typst", "mermaid", "qr", "rt-multi-thread"]
+required-features = ["server", "pandoc", "typst", "mermaid", "qr", "chess", "rt-multi-thread"]
 
 [package.metadata.docs.rs]
 all-features = true

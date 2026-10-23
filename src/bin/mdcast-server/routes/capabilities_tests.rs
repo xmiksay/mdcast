@@ -135,7 +135,7 @@ async fn generators_compiled_in_are_advertised() {
 
     assert_eq!(
         body_json(response).await["generators"],
-        serde_json::json!(["qr"])
+        serde_json::json!(["qr", "fen", "pgn"])
     );
 }
 

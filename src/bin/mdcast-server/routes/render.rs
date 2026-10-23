@@ -75,7 +75,7 @@ pub async fn markdown(
 }
 
 /// The CLI's `load_doc`, minus the filesystem. Returns the document plus any
-/// SVGs the mermaid/QR pre-steps produced, which the caller has to layer over
+/// SVGs the mermaid/QR/chess pre-steps produced, which the caller has to layer over
 /// the provider stack for the render to resolve them.
 async fn resolve_doc(
     markdown: &str,
@@ -105,6 +105,13 @@ async fn resolve_doc(
     };
     let markdown = if options.qr {
         let rendered = mdcast::generators::qr::render_qr_codes(&markdown, assets).await;
+        generated.extend(rendered.svgs);
+        rendered.markdown
+    } else {
+        markdown
+    };
+    let markdown = if options.chess {
+        let rendered = mdcast::generators::chess::render_chess(&markdown, assets).await;
         generated.extend(rendered.svgs);
         rendered.markdown
     } else {
@@ -302,6 +309,30 @@ mod tests {
         assert!(body.contains("![](qr/qr-1.svg)"), "{body}");
         let keys: Vec<_> = svgs.iter().map(|(k, _)| k.as_str()).collect();
         assert_eq!(keys, ["qr/qr-0.svg", "qr/qr-1.svg"]);
+    }
+
+    #[tokio::test]
+    async fn chess_blocks_render_only_when_asked_and_read_paths_through_the_provider() {
+        let markdown = "```fen\n8/8/8/4k3/8/8/8/4K3\n```\n\n<pgn path=\"game.pgn\" move=\"1\">\n";
+        let assets = mdcast::sync_provider(|key| {
+            Ok((key == "game.pgn").then(|| Bytes::from_static(b"1. e4 e5")))
+        });
+
+        let (plain, none) = resolve(markdown, RenderOptions::default()).await;
+        assert!(plain.pages[0].body.contains("```fen"));
+        assert!(none.is_empty());
+
+        let options = RenderOptions {
+            chess: true,
+            ..RenderOptions::default()
+        };
+        let (rendered, svgs) =
+            resolve_doc(markdown, DocMeta::default(), None, &options, &assets).await;
+        let body = &rendered.pages[0].body;
+        assert!(body.contains("![](chess/fen-0.svg)"), "{body}");
+        assert!(body.contains("![](chess/pgn-0.svg)"), "{body}");
+        let keys: Vec<_> = svgs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["chess/fen-0.svg", "chess/pgn-0.svg"]);
     }
 
     #[tokio::test]
