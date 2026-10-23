@@ -57,8 +57,9 @@ spec:
           # Pinned to the release tag, not :latest — an Always-pull of
           # :latest was observed resolving to a stale image through a
           # registry-edge cache right after a push; a version tag makes the
-          # rollout deterministic. Bump on each release.
-          image: ghcr.io/xmiksay/mdcast:0.4.1
+          # rollout deterministic. Bump in each release PR, `make deploy`
+          # once the tag's image is published.
+          image: ghcr.io/xmiksay/mdcast:0.4.2
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080

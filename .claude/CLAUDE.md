@@ -281,7 +281,7 @@ make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-l
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
 make run-server          # MDCAST_TOKEN=dev-token cargo run --bin mdcast-server
 make deploy              # kubectl apply -f deploy.yml — mdcast-server into the k8s `services` namespace
-make deploy-restart      # re-roll + wait for the mdcast deployment (pulls the current image)
+make deploy-restart      # re-roll + wait for the mdcast deployment — picks up Secret/ConfigMap edits, never a new image (the tag is pinned)
 ```
 
 Container/deployment: `Dockerfile` builds the `mdcast-server` image (debian
@@ -292,7 +292,13 @@ tag (plus `workflow_dispatch`), tagged sha/semver/latest. `deploy.yml` is the
 k8s manifest set (Secret + ConfigMap + Deployment + Service in the
 `services` namespace, **no Ingress** — internal-only at
 `http://mdcast.services`); the committed `MDCAST_TOKEN` is a placeholder,
-keep the real one only in your local copy.
+keep the real one only in your local copy. The Deployment pins the image to
+the release tag (`ghcr.io/xmiksay/mdcast:X.Y.Z`, `IfNotPresent`), not
+`:latest` — an `Always` pull of `:latest` once resolved to a stale image
+through a registry-edge cache right after a push. It requests a full CPU
+(typst is CPU-bound; a `100m` request let a loaded node stretch a ~1s
+compile past the kill window) and sets `MDCAST_TYPST_TIMEOUT_SECS=120`,
+kept under the site client's 120s request timeout.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
 `mermaid`, `qr` and `rt-multi-thread` itself (a render service without engines is
@@ -341,7 +347,9 @@ token, after which its trusted publisher can be configured and the workflow
 takes over. The workflow's publish step skips any crate whose tagged version
 is already on crates.io (sparse-index check), so a tag run right after such
 a manual bootstrap — or a re-run of a partially failed one — is safe.
-Release flow: bump the workspace version, merge, tag `vX.Y.Z`, push the tag.
+Release flow: bump the workspace version and `deploy.yml`'s image tag,
+merge, tag `vX.Y.Z`, push the tag; once `docker.yml` has pushed the image,
+`make deploy`.
 
 ## Run
 

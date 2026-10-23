@@ -90,7 +90,7 @@ run-server: ## Run the HTTP service (override MDCAST_TOKEN / MDCAST_BIND / MDCAS
 deploy: ## Apply the k8s manifests (services namespace; keep the real MDCAST_TOKEN only in your local deploy.yml)
 	kubectl apply -f deploy.yml
 
-deploy-restart: ## Re-roll the mdcast pods (pulls the current ghcr.io/xmiksay/mdcast image)
+deploy-restart: ## Re-roll the mdcast pods to pick up Secret/ConfigMap edits (same pinned image; a new release is `make deploy`)
 	kubectl -n services rollout restart deployment/mdcast
 	kubectl -n services rollout status deployment/mdcast
 
