@@ -279,3 +279,30 @@ async fn an_invalid_generated_board_is_a_400_naming_it() {
         assert!(message.contains("\"board.svg\""), "{message}");
     }
 }
+
+#[tokio::test]
+async fn a_template_with_a_text_svg_from_the_manifest_renders() {
+    // Mixed-fallback SVG text (issue #92's trigger) must be outlined before
+    // typst sees it, or the compile can hang instead of answering.
+    const SVG: &[u8] = "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"200\" height=\"40\">\
+        <text x=\"5\" y=\"25\" font-family=\"arial\">HTTP ↔ doména</text></svg>"
+        .as_bytes();
+    let (app, _) = app();
+    let digest = sha256(SVG);
+    send(&app, multipart(&[(digest.as_str(), SVG)])).await;
+
+    let request = json_request(
+        "/v1/render/template",
+        serde_json::json!({
+            "template_source": "#image(\"flow.svg\", width: 5cm)\n",
+            "data": "{}",
+            "assets": { "flow.svg": digest.as_str() },
+        }),
+    );
+    let (status, response) =
+        tokio::time::timeout(std::time::Duration::from_secs(60), send(&app, request))
+            .await
+            .expect("template render hung");
+
+    assert_eq!(status, StatusCode::OK, "{:?}", body_bytes(response).await);
+}

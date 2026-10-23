@@ -2045,6 +2045,7 @@ dependencies = [
  "bytes",
  "chess-diagram",
  "clap",
+ "flate2",
  "futures",
  "libc",
  "lru",
@@ -2067,8 +2068,10 @@ dependencies = [
  "tracing-subscriber",
  "typst",
  "typst-as-lib",
+ "typst-assets",
  "typst-html",
  "typst-pdf",
+ "usvg",
  "zip",
 ]
 

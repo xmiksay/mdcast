@@ -31,18 +31,44 @@ mod compiler;
 mod context;
 mod fonts;
 mod markdown;
+mod process;
+mod svg_outline;
 mod template;
+#[cfg(test)]
+mod test_support;
 mod virtual_files;
-pub use compiler::{CliCompiler, TypstCompiler};
+pub use compiler::{CliCompiler, OutlineCommand, TypstCompiler};
 use compiler::{CompileFormat, CompileInputs};
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
+use svg_outline::outline_svgs;
+#[doc(hidden)]
+pub use svg_outline::run_child as run_outline_child;
 #[cfg(feature = "typst-html")]
 pub use template::render_template_html;
 pub use template::{TemplateDoc, render_template, render_template_html_with, render_template_with};
 use virtual_files::{collect_images_for_typst, collect_layout_assets};
+
+/// The argument that puts the `mdcast`/`mdcast-server` binary into its
+/// hidden SVG-outline child mode ([`run_outline_child`] on stdin/stdout) —
+/// what [`OutlineCommand::current_exe`] passes.
+#[doc(hidden)]
+pub const OUTLINE_CHILD_ARG: &str = "__outline-svg";
+
+/// The SVG-outline step on its own, dispatched exactly as a render
+/// dispatches it for `compiler` — the seam integration tests drive a real
+/// outline child through. Returns the files and the paths dropped.
+#[doc(hidden)]
+pub async fn outline_svg_files(
+    compiler: &TypstCompiler,
+    files: Vec<(String, Vec<u8>)>,
+    fonts: Vec<Vec<u8>>,
+) -> Result<(Vec<(String, Vec<u8>)>, std::collections::HashSet<String>)> {
+    let outlined = outline_svgs(files, fonts, compiler).await?;
+    Ok((outlined.files, outlined.dropped))
+}
 
 pub struct TypstBackend {
     target: Target,
@@ -116,12 +142,21 @@ impl Backend for TypstBackend {
             // layout-asset keys warn and are simply absent from `asset_map`,
             // so a layout's `asset-path(key)` degrades to its `default:`
             // instead of failing the whole compile.
-            let ((image_map, mut virtual_files), (asset_map, asset_files), fonts) = try_join!(
+            let ((mut image_map, mut virtual_files), (mut asset_map, asset_files), fonts) = try_join!(
                 collect_images_for_typst(&doc.pages, assets, self.target),
                 collect_layout_assets(&doc.assets, assets),
                 collect_fonts(&doc.fonts, assets),
             )?;
             virtual_files.extend(asset_files);
+
+            // Before the maps feed `md_to_typst`/`/context.typ`: an SVG that
+            // failed to parse then degrades like an unresolved image (body
+            // image dropped, `asset-path` to its default) instead of a
+            // missing-file compile error (issue #92).
+            let outlined = outline_svgs(virtual_files, fonts, &self.compiler).await?;
+            let kept = |vpath: &String| !outlined.dropped.contains(vpath.trim_start_matches('/'));
+            image_map.retain(|_, vpath| kept(vpath));
+            asset_map.retain(|_, vpath| kept(vpath));
 
             // Convert each page body from markdown → typst markup.
             let typst_bodies: Vec<String> = doc
@@ -157,8 +192,8 @@ impl Backend for TypstBackend {
                 .compile(CompileInputs {
                     main: "main.typ".to_string(),
                     sources,
-                    files: virtual_files,
-                    fonts,
+                    files: outlined.files,
+                    fonts: outlined.fonts,
                     format: CompileFormat::Pdf,
                 })
                 .await?;

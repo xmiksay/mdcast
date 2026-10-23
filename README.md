@@ -497,7 +497,10 @@ reaches mdcast.
 
 mdcast never validates or transcodes image bytes — they flow from the
 `AssetProvider` straight to the target engine, so what "attaching an image"
-supports is whatever that engine/viewer accepts. Verified against typst
+supports is whatever that engine/viewer accepts. The one exception is SVG on
+the typst targets, which is re-serialised with its text outlined when it
+may contain text (see
+[SVG text on the typst targets](#svg-text-on-the-typst-targets) below). Verified against typst
 0.14's format table and pandoc's pass-through behaviour:
 
 | Format | pdf / pdf-presentation (typst) | docx (Word) | odt (LibreOffice) | pptx | html-reveal |
@@ -531,6 +534,94 @@ only for LibreOffice, say). Combinations the table leaves ambiguous
 WebP) are left un-warned rather than guessed at. This is a detection sniff
 only — no transcoding (e.g. WebP → PNG re-encode) is performed; fix the
 source image if a warning fires.
+
+### SVG text on the typst targets
+
+Before typst sees any SVG *file* — a markdown body image, a declared layout
+asset, a template sibling or a `generated` entry, in both `library` and `cli`
+compiler modes — mdcast parses it with `usvg` (the same parser and version
+typst uses) and, if it may contain text, re-serialises it with every
+`<text>` converted to outlined paths. typst's own SVG-text pipeline can
+deadlock when text needs mixed font fallbacks (e.g. a mermaid label
+containing `↔`; upstream typst
+[#6052](https://github.com/typst/typst/issues/6052),
+[#7178](https://github.com/typst/typst/issues/7178),
+[#6783](https://github.com/typst/typst/issues/6783),
+[#7279](https://github.com/typst/typst/issues/7279)), so any SVG with text
+would otherwise be a way to hang the render. SVG bytes a template constructs
+itself (`#image(bytes(...))`, an SVG string from `/data.json`) are not files
+and are **not** outlined — the template author controls those. Neither is a
+file typst is told is SVG only at the call site (`image("x.png", format:
+"svg")`, `image(read("x.png", encoding: none))` of an SVG): detection follows the file's
+own name and bytes, not the `image()` call.
+
+- **Only SVGs that may contain text are rewritten.** That means the
+  (inflated) bytes contain `text`, a `data:` URI (a base64-embedded SVG can
+  hide its `<text>`), `&#` or `<!ENTITY`. Every other SVG — QR codes, icons —
+  is only checked to parse and then handed to typst **byte-for-byte**
+  (gzip included), so the `read("icon.svg").replace("currentColor", ...)`
+  recolor idiom keeps working on it. A rewritten SVG has `currentColor`
+  already resolved and its attributes normalised, so that idiom does not
+  apply to an SVG with text.
+- **Fonts:** glyphs are outlined with typst's bundled fonts (Libertinus
+  Serif, New Computer Modern, DejaVu Sans Mono) plus the document's declared
+  fonts (`ResolvedDoc.fonts` / `TemplateDoc.fonts`). A `font-family` naming
+  none of them, or a generic family (`serif`, `sans-serif`, ...), resolves to
+  the first declared font's family — a stand-in for typst's own fallback to
+  the text font active where the image appears, which isn't known before
+  the compile — or to Libertinus Serif when no fonts are declared
+  (`monospace` stays DejaVu Sans Mono). Characters that face lacks fall back
+  to any bundled/declared face that has them. Unlike typst, system fonts are
+  never consulted, so output doesn't depend on the host.
+- **Consequence:** SVG text in the PDF is vector shapes, not text — it can't
+  be selected, searched or copied. Image size is unchanged.
+- **Linked images** in a rewritten SVG resolve exactly as typst's own
+  resolver would and are embedded as data URIs: `file://` is stripped,
+  absolute (`/...`) paths and URLs are refused, the path is relative to the
+  SVG's directory, and only PNG/JPEG/GIF/WebP are accepted (by extension,
+  else magic bytes) — typst refuses a linked SVG or PDF, so those are left
+  out.
+- **Detection** mirrors typst 0.14's own rule: a `.svg`/`.svgz` extension is
+  SVG; `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.pdf` is not; any other key
+  (extensionless, `.svg.gz`, ...) is sniffed — raster magic first, then
+  gzip magic or the SVG namespace within the first 2 KiB.
+- **Unparseable SVG:** warns (`SVG could not be parsed; dropping it`, naming
+  the key) and is dropped — typst's own import would have failed on the same
+  bytes. A markdown body image then disappears like an unresolved one and a
+  layout's `asset-path` falls back to its `default:`; a template that
+  references the file fails on the missing file. A file that is SVG only by
+  content sniff and fails to parse (corrupt gzip included) is passed through
+  untouched instead (it may be a gzipped data file a template `read()`s).
+  Gzip inside gzip counts as unparseable — typst inflates only once.
+- **Resource limits:** parsing and laying out an SVG costs as much as a
+  typst compile can — a 2 KB SVG of nested `<use>` fan-out over a long label
+  asks for tens of millions of glyph outlines — so outlining follows the
+  compiler mode. With `--typst-compiler cli` / `MDCAST_TYPST=cli` the whole
+  step runs in a short-lived child process (the `mdcast`/`mdcast-server`
+  binary itself, in a hidden mode) under the **same**
+  `--typst-timeout-secs` / `MDCAST_TYPST_TIMEOUT_SECS` and
+  `MDCAST_TYPST_MAX_MEMORY_BYTES` as the typst compile child, spawned only
+  when the render carries an SVG at all, and sent only what outlining reads
+  (the SVGs, rasters a text-bearing SVG may link, and the declared fonts
+  when some SVG may carry text — not the render's other files), so it does
+  not need a second copy of every photo under the same memory cap. Because
+  the outline child and the typst compile child each get the **full**
+  timeout, a `cli`-mode render's worst case is about twice
+  `MDCAST_TYPST_TIMEOUT_SECS`. A child that times out, hits the
+  memory cap or answers garbage fails the render exactly like a failed
+  `cli` compile (`render_failed` from the server). In the default `library`
+  mode it runs in-process on a blocking thread with **no** time or memory
+  bound — the same as the in-process typst compile itself. A library
+  embedder building `CliCompiler` (via `CliCompiler::new(...)` and its
+  `with_*` methods — the struct is `#[non_exhaustive]`) without
+  `with_outline(...)` also gets the
+  in-process path, with a one-time warning. Independently of mode, two
+  fixed caps bound *bytes* only — not parse time or memory: a gzipped SVG
+  (`.svgz`, or an SVG data URI) may inflate to at most 32 MiB, and all
+  embedded images together (raster data URIs and linked rasters at their
+  raw size, nested SVGs inflated) as well as the re-serialised SVG may be at
+  most 64 MiB. Exceeding either warns and drops the SVG, whatever its name.
+- pandoc targets get the SVG bytes untouched.
 
 ## Table of contents
 
@@ -752,11 +843,18 @@ cannot offer:
   wedges one `spawn_blocking` OS thread for the life of the process under
   `library` mode — `spawn_blocking` cannot be cancelled. Under `cli` mode
   it's a child process instead, bounded by a timeout (`--typst-timeout-secs`
-  / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it.
+  / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it. The
+  timeout is per child: a render that also runs the SVG-outline child (see
+  below) can take up to about **2×** the timeout end to end.
 - **A memory cap.** `--typst-timeout-secs`'s server-only sibling
   `MDCAST_TYPST_MAX_MEMORY_BYTES` applies `setrlimit(RLIMIT_AS)` to the child
-  (unix only).
+  (unix only). Every `cli`-mode child also runs with core dumps disabled
+  (`RLIMIT_CORE` = 0), so one stopped by the cap cannot fill the disk.
 - **HTML export without the `typst-html` cargo feature** — see above.
+
+The SVG-outline pre-step (see "SVG text on the typst targets" above) runs under the same timeout
+and memory cap in `cli` mode, as a second short-lived child: the `mdcast` /
+`mdcast-server` binary re-executes itself in a hidden `__outline-svg` mode.
 
 `--typst-bin PATH` / `MDCAST_TYPST_BIN` (default `typst`) picks the binary;
 it is looked up on `PATH` if it isn't itself a path. The CLI binary's Typst
@@ -1016,8 +1114,8 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shell out to a `typst` binary per compile, killable and memory-boundable) — see "Selecting the Typst compiler" above |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode; the child is killed and reaped on expiry |
-| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on the `cli`-mode child (unix only) |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline) — each gets the full value, so a render's worst case is ~2× this; the child is killed and reaped on expiry |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on each `cli`-mode child — typst compile and SVG outline (unix only) |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
 An unset token doesn't just relax auth on a route — the `require_bearer`

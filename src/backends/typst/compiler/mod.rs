@@ -23,7 +23,7 @@ use anyhow::Result;
 mod cli;
 mod library;
 
-pub use cli::CliCompiler;
+pub use cli::{CliCompiler, OutlineCommand};
 
 /// Everything a compile needs, already resolved to plain data — no
 /// `AssetProvider`, no `ResolvedDoc`. Paths are relative, `/`-separated, and

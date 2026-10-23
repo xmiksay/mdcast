@@ -40,6 +40,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use mdcast::backends::Registry;
+use mdcast::backends::typst::{OutlineCommand, TypstCompiler};
 
 mod auth;
 mod blobs;
@@ -52,8 +53,27 @@ use blobs::BlobStore;
 use config::Config;
 use routes::AppState;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Sync on purpose: the hidden SVG-outline child mode (spawned by this same
+/// binary when `MDCAST_TYPST=cli`) must be dispatched before config parsing
+/// (it needs no `MDCAST_*`), before a runtime starts (its worker threads
+/// count against the child's `RLIMIT_AS`) and before the log subscriber is
+/// installed (stdout is the child's response channel).
+fn main() -> Result<()> {
+    use mdcast::backends::typst::{OUTLINE_CHILD_ARG, run_outline_child};
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|a| a == OUTLINE_CHILD_ARG)
+    {
+        return run_outline_child(std::io::stdin().lock(), std::io::stdout().lock());
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("start the tokio runtime")?
+        .block_on(serve())
+}
+
+async fn serve() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -61,7 +81,8 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let config = Config::from_env()?;
+    let mut config = Config::from_env()?;
+    config.typst_compiler = outline_in_self(config.typst_compiler)?;
     warn_if_unauthenticated(&config);
     // Best-effort: logs the CLI binary's reported version so version skew
     // between it and mdcast's linked `typst` crate is visible at startup
@@ -114,6 +135,17 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("serve http")
+}
+
+/// `cli` mode runs the SVG-outline step as this binary's hidden child mode,
+/// under the same timeout and memory cap as the typst compile child.
+fn outline_in_self(compiler: TypstCompiler) -> Result<TypstCompiler> {
+    Ok(match compiler {
+        TypstCompiler::Cli(cli) => {
+            TypstCompiler::Cli(cli.with_outline(Some(OutlineCommand::current_exe()?)))
+        }
+        other => other,
+    })
 }
 
 /// The server runs as PID 1 in the container, where an unhandled SIGTERM is

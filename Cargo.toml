@@ -57,7 +57,15 @@ qr = ["dep:qrcode"]
 # `generated` fen/pgn entries) to SVG chess boards via `generators::chess`.
 # Default-on and opt-in per call, same reasoning as `mermaid`.
 chess = ["dep:chess-diagram"]
-typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
+typst = [
+    "dep:typst",
+    "dep:typst-pdf",
+    "dep:typst-as-lib",
+    "dep:typst-assets",
+    "dep:usvg",
+    "dep:flate2",
+    "dep:serde_json",
+]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
 # `TypstEngine` in the process (typst-as-lib's `typst-html` feature is a
@@ -123,10 +131,18 @@ typst = { version = "0.14", optional = true }
 typst-pdf = { version = "0.14", optional = true }
 typst-html = { version = "0.14", optional = true }
 typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts", "typst-kit-embed-fonts"] }
+# Both already in the graph via `typst` (same versions, so no second copy):
+# `backends/typst/svg_outline/` uses them to outline SVG `<text>` to paths
+# with typst's own bundled fonts before typst sees the SVG (issue #92).
+typst-assets = { version = "0.14", optional = true, features = ["fonts"] }
+usvg = { version = "0.45", optional = true, default-features = false, features = ["text"] }
+# Same flate2/backend usvg already pulls in: `svg_outline/resolve.rs` inflates `.svgz`
+# itself under a size cap instead of letting usvg's unbounded `read_to_end` do it.
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
-# `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap
-# (`backends/typst/compiler/cli.rs::apply_memory_limit`) — unix only, so it's
+# `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap on its children
+# (`backends/typst/process.rs::apply_memory_limit`) — unix only, so it's
 # scoped here rather than behind a cargo feature; a non-unix build simply
 # never applies the cap (documented on `CliCompiler::max_memory_bytes`).
 [target.'cfg(unix)'.dependencies]

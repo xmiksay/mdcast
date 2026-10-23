@@ -1,2 +1,4 @@
 /target
 /lcov.info
+/core
+/core.[0-9]*

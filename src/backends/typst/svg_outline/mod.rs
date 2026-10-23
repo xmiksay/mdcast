@@ -1,0 +1,316 @@
+//! SVG text → paths before typst ever sees an SVG (issue #92).
+//!
+//! typst's SVG-text pipeline can deadlock (upstream typst #6052/#7178/#6783/
+//! #7279, still present in 0.14): an SVG whose `<text>` needs mixed font
+//! fallbacks — a mermaid label containing `↔` was the production trigger —
+//! hangs the compile non-deterministically, in both compiler modes. So every
+//! SVG headed for a typst compile that may contain text is parsed here with
+//! `usvg` (the same parser and version typst uses) and re-serialised; usvg's
+//! writer emits `<text>` as outlined `<path>`s, so typst only ever loads
+//! text-free SVGs. One that provably has no text is only validated and kept
+//! byte-for-byte: re-serialising it would resolve `currentColor` and
+//! normalise attributes, breaking the typst recolor idiom
+//! (`read("icon.svg").replace("currentColor", ...)`).
+//!
+//! The font database is built once per render, and only when the render
+//! actually carries an SVG that may contain text.
+//!
+//! Where it runs follows the compiler mode, because parsing is exactly as
+//! unbounded as a typst compile (a 2 KB SVG of nested `<use>` fan-out can ask
+//! for tens of millions of glyph outlines): `TypstCompiler::Cli` with an
+//! [`OutlineCommand`] runs the whole step in a child process (`child.rs`)
+//! under the compile's own timeout and `RLIMIT_AS`, spawned only when a file
+//! is an SVG candidate at all; `Library` — and `Cli` without an outline
+//! command, which warns once — runs it in-process on a blocking thread with
+//! no time or memory bound, the same as `Library`'s typst compile itself.
+
+mod child;
+mod font_db;
+mod ipc;
+mod resolve;
+
+use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
+use std::path::Path;
+use std::sync::Once;
+
+use anyhow::Result;
+
+use super::compiler::{CliCompiler, TypstCompiler};
+use crate::image_format::{ImageFormat, sniff};
+pub use child::run_child;
+use font_db::{Fonts, font_db};
+use resolve::{Budget, href_resolver, is_gzip, no_images, parse, plain};
+
+/// These caps bound bytes only — the inflated `.svgz`/data-URI input usvg
+/// would otherwise `read_to_end` unbounded, and the re-serialised output —
+/// not parse or layout *time/memory*; that is the child's timeout and
+/// `RLIMIT_AS` in `cli` mode, and unbounded in-process (see module docs).
+/// 32 MiB of inflated SVG is far beyond any real diagram.
+const MAX_INFLATED_SVG: usize = 32 << 20;
+/// The writer re-inlines every linked raster as base64 at every reference, so
+/// N `<image>`s pointing at one large sibling multiply it N times.
+const MAX_OUTLINED_SVG: usize = 64 << 20;
+
+#[derive(Clone, Copy)]
+struct Limits {
+    inflated: usize,
+    output: usize,
+}
+
+const LIMITS: Limits = Limits {
+    inflated: MAX_INFLATED_SVG,
+    output: MAX_OUTLINED_SVG,
+};
+
+/// Files after outlining, plus the virtual paths of SVGs that could not be
+/// parsed and were dropped. `fonts` is handed back unchanged — it is moved
+/// into the blocking task and the caller still needs it for the compile.
+pub(super) struct Outlined {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub fonts: Vec<Vec<u8>>,
+    pub dropped: HashSet<String>,
+}
+
+/// Outline every SVG in `files`, in a bounded child or in-process depending
+/// on `compiler` (see module docs). A child that times out, is killed or
+/// answers garbage fails the render, like a failed `cli` compile.
+pub(super) async fn outline_svgs(
+    files: Vec<(String, Vec<u8>)>,
+    fonts: Vec<Vec<u8>>,
+    compiler: &TypstCompiler,
+) -> Result<Outlined> {
+    if let TypstCompiler::Cli(cli) = compiler {
+        match &cli.outline {
+            Some(cmd) => {
+                if !files.iter().any(|(p, b)| svg_kind(p, b).is_some()) {
+                    return Ok(Outlined {
+                        files,
+                        fonts,
+                        dropped: HashSet::new(),
+                    });
+                }
+                return child::outline_in_child(cmd, cli.bounds(), files, fonts).await;
+            }
+            None => warn_unbounded_once(cli),
+        }
+    }
+    super::spawn_compile(move || {
+        let (files, dropped) = outline_files(files, &fonts, LIMITS);
+        Ok(Outlined {
+            files,
+            fonts,
+            dropped,
+        })
+    })
+    .await
+}
+
+fn warn_unbounded_once(cli: &CliCompiler) {
+    static WARNED: Once = Once::new();
+    WARNED.call_once(|| {
+        tracing::warn!(
+            bin = %cli.bin,
+            "typst CLI compiler has no SVG-outline command; outlining SVGs in-process, \
+             outside the compile timeout and memory cap"
+        );
+    });
+}
+
+/// What became of one file. The reasons are rendered error messages rather
+/// than errors so an outcome can cross the child boundary (`ipc.rs`) and be
+/// logged by the parent exactly as an in-process one is (`apply`).
+#[derive(Debug, PartialEq)]
+enum Outcome {
+    Keep,
+    Replace(Vec<u8>),
+    Drop(String),
+    /// Sniffed-as-SVG, failed to parse, passed through untouched.
+    Unparsed(String),
+}
+
+enum Failure {
+    Parse(usvg::Error),
+    Limit(String),
+}
+
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Parse(e) => e.fmt(f),
+            Failure::Limit(msg) => f.write_str(msg),
+        }
+    }
+}
+
+fn outline_files(
+    files: Vec<(String, Vec<u8>)>,
+    fonts: &[Vec<u8>],
+    limits: Limits,
+) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let fonts: Vec<&[u8]> = fonts.iter().map(Vec::as_slice).collect();
+    let outcomes = classify(&refs, &fonts, limits);
+    apply(files, outcomes)
+}
+
+/// An SVG usvg cannot parse is dropped with a warning: typst's own SVG import
+/// is usvg too, so it would have failed on the same bytes anyway. The one
+/// exception is a file that is SVG only by content sniff (no svg/svgz
+/// extension) and fails to parse: it may not be an image at all — a gzipped
+/// data file a template `read()`s — so it passes through untouched; if it
+/// *is* imaged, typst fails on it exactly as usvg just did. Exceeding a cap
+/// always drops: passing it on would hand typst the same bomb.
+fn classify(files: &[(&str, &[u8])], fonts: &[&[u8]], limits: Limits) -> Vec<Outcome> {
+    let lookup: HashMap<&str, &[u8]> = files.iter().copied().collect();
+    let mut db = None;
+    files
+        .iter()
+        .map(|(path, bytes)| {
+            let Some(by_ext) = svg_kind(path, bytes) else {
+                return Outcome::Keep;
+            };
+            match process(path, bytes, &lookup, &mut db, fonts, limits) {
+                Ok(outcome) => outcome,
+                Err(Failure::Parse(e)) if !by_ext => Outcome::Unparsed(e.to_string()),
+                Err(e) => Outcome::Drop(e.to_string()),
+            }
+        })
+        .collect()
+}
+
+/// Folds `outcomes` (one per file, same order) back into `files`, logging
+/// each drop/pass-through — always in the parent, whichever process
+/// classified them.
+fn apply(
+    files: Vec<(String, Vec<u8>)>,
+    outcomes: Vec<Outcome>,
+) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
+    let mut dropped = HashSet::new();
+    let mut out = Vec::with_capacity(files.len());
+    for ((path, bytes), outcome) in files.into_iter().zip(outcomes) {
+        match outcome {
+            Outcome::Keep => out.push((path, bytes)),
+            Outcome::Replace(svg) => out.push((path, svg)),
+            Outcome::Unparsed(error) => {
+                tracing::debug!(key = %path, %error, "sniffed-as-SVG file did not parse; passing it through");
+                out.push((path, bytes));
+            }
+            Outcome::Drop(error) => {
+                tracing::warn!(key = %path, %error, "SVG could not be parsed; dropping it");
+                dropped.insert(path);
+            }
+        }
+    }
+    (out, dropped)
+}
+
+/// A text-free SVG is still parsed so an unparseable one is dropped like any
+/// other, but kept as the original bytes. Kept gzip is safe to hand on: it
+/// just inflated under the cap and is a single layer.
+fn process(
+    path: &str,
+    bytes: &[u8],
+    files: &HashMap<&str, &[u8]>,
+    db: &mut Option<Fonts>,
+    fonts: &[&[u8]],
+    limits: Limits,
+) -> Result<Outcome, Failure> {
+    let svg = plain(bytes, limits.inflated)?;
+    if !may_contain_text(&svg) {
+        let opts = usvg::Options {
+            image_href_resolver: no_images(),
+            ..Default::default()
+        };
+        parse(&svg, &opts)?;
+        return Ok(Outcome::Keep);
+    }
+    let db = db.get_or_insert_with(|| font_db(fonts));
+    outline(path, &svg, files, db, limits).map(Outcome::Replace)
+}
+
+/// Conservative: a false positive only costs a re-serialisation. `data:`
+/// (any case — the scheme is case-insensitive) catches a nested SVG whose
+/// `<text>` is hidden in base64; `&#` and `<!ENTITY` catch markup spelled
+/// through character or entity references.
+fn may_contain_text(svg: &[u8]) -> bool {
+    let has = |needle: &[u8]| svg.windows(needle.len()).any(|w| w == needle);
+    has(b"text")
+        || has(b"&#")
+        || has(b"<!ENTITY")
+        || svg.windows(5).any(|w| w.eq_ignore_ascii_case(b"data:"))
+}
+
+/// typst 0.14's own image-format rule, narrowed to "is it SVG": a known image
+/// extension decides outright, anything else is sniffed — raster magic first,
+/// then gzip magic or the SVG namespace in the first 2 KiB. Mirroring it
+/// exactly matters: any SVG typst would decode that this misses reaches
+/// typst's text pipeline un-outlined. `Some(true)` = SVG by extension,
+/// `Some(false)` = by content only.
+fn svg_kind(path: &str, bytes: &[u8]) -> Option<bool> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "svg" | "svgz" => Some(true),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "pdf" => None,
+        _ => {
+            let raster = matches!(
+                sniff(bytes),
+                ImageFormat::Png | ImageFormat::Jpeg | ImageFormat::Gif | ImageFormat::Webp
+            );
+            let head = &bytes[..bytes.len().min(2048)];
+            let svg = is_gzip(bytes) || head.windows(SVG_NS.len()).any(|w| w == SVG_NS.as_bytes());
+            (!raster && svg).then_some(false)
+        }
+    }
+}
+
+const SVG_NS: &str = "http://www.w3.org/2000/svg";
+
+/// Parse and re-serialise one (already inflated) SVG. Linked `<image href>`s
+/// resolve as typst's own resolver would (see `resolve::linked_raster`), so an
+/// SVG that links a sibling raster keeps it, embedded as a data URI by the
+/// writer. Every image payload counts against the output cap as it resolves,
+/// so a pathological SVG is refused before the tree holds N copies of it.
+fn outline(
+    path: &str,
+    svg: &[u8],
+    files: &HashMap<&str, &[u8]>,
+    fonts: &Fonts,
+    limits: Limits,
+) -> Result<Vec<u8>, Failure> {
+    let budget = Budget::new(limits.output);
+    let opts = usvg::Options {
+        font_family: fonts.family.clone(),
+        fontdb: fonts.db.clone(),
+        resources_dir: None,
+        image_href_resolver: href_resolver(path, files, &budget, limits.inflated),
+        ..Default::default()
+    };
+    let tree = parse(svg, &opts)?;
+    if budget.exceeded() {
+        return Err(Failure::Limit(format!(
+            "embedded images exceed the {}-byte output limit",
+            limits.output
+        )));
+    }
+    let svg = tree.to_string(&usvg::WriteOptions::default()).into_bytes();
+    if svg.len() > limits.output {
+        return Err(Failure::Limit(format!(
+            "outlined SVG exceeds the {}-byte output limit",
+            limits.output
+        )));
+    }
+    Ok(svg)
+}
+
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod tests_images;

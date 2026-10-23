@@ -74,12 +74,22 @@ src/
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
+│     ├─ process.rs     run_bounded() — the shared child runner: piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, RLIMIT_CORE=0 always + optional RLIMIT_AS (typst compile child and SVG-outline child)
+│     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
-│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler — temp-dir materialisation + `typst compile` subprocess, timeout+kill, safe_join path-traversal guard, optional RLIMIT_AS cap
+│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand) — temp-dir materialisation + `typst compile` via process::run_bounded, safe_join path-traversal guard
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
+│     ├─ svg_outline/     outline_svgs() — every SVG file headed for a typst compile that may contain text re-serialised by usvg with <text> → paths (issue #92)
+│     │  ├─ mod.rs      outline_svgs() dispatch (child in cli mode / in-process), classify()/apply()/process()/outline(), svg_kind() (typst's format rule), may_contain_text(), the byte caps
+│     │  ├─ child.rs    outline_in_child() (parent: spawn OutlineCommand via process::run_bounded) + run_child() (the hidden `__outline-svg` mode's body)
+│     │  ├─ ipc.rs      length-prefixed parent↔child framing (request: files+fonts; response: Keep/Replace/Drop/Unparsed per file), every length validated
+│     │  ├─ child_tests.rs  run_child in-memory, timeout+reap / garbage / no-spawn tests against stand-in programs
+│     │  ├─ resolve.rs  capped single-layer gzip inflate, Tree::from_str parse, output Budget, the data-URI + linked-file <image href> resolvers (typst 0.14.2's rules)
+│     │  ├─ font_db.rs  bundled + declared fontdb, brand-font fallback family
+│     │  └─ tests.rs / tests_images.rs
 │     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
@@ -88,13 +98,13 @@ src/
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() (Library-default) and render_template_with()/render_template_html_with() (explicit TypstCompiler) — user template + data → PDF/HTML, no markdown
 ├─ bin/mdcast/
-│  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, provider stack
+│  ├─ main.rs           CLI (render / explain / render-template, + hidden `__outline-svg` child mode dispatched before the runtime starts), Cli/Cmd, provider stack
 │  ├─ load_doc.rs        load_doc()/load_brand() + PreSteps (--html-image-tags/--mermaid/--qr, flattened onto render and explain)
 │  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
 │  ├─ render_template.rs #[cfg(feature = "typst")] render-template subcommand: RenderTemplateArgs, Format enum (--format pdf|html), --generated FILE.json
 │  └─ typst_compiler_args.rs #[cfg(feature = "typst")] TypstCompilerArgs — --typst-compiler/--typst-bin/--typst-timeout-secs, `#[command(flatten)]`d onto both `render` and `render-template` (issue #73)
 └─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
-   ├─ main.rs           wiring only: config → blob store → prefill → Registry → router → axum::serve
+   ├─ main.rs           wiring only: hidden `__outline-svg` child mode check (argv[1], before config/runtime) → config → blob store → prefill → Registry → router → axum::serve
    ├─ config.rs         Config::from_env — every MDCAST_* variable, fails fast without a token
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
    ├─ error.rs          ApiError → status + ErrorResponse; json_body(); internal detail → log only
@@ -278,7 +288,7 @@ make test                # cargo test --workspace — default features only; uni
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 81 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 85 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -429,8 +439,8 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shells out to a `typst` binary per compile — issue #73). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Compile timeout for `cli` mode. Exceeded → the child is killed and reaped before the request's error response is returned |
-| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to the `cli`-mode child. Unix-only; a no-op elsewhere |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92) each get the full value, so a render's worst case is ~2× this. Exceeded → the child is killed and reaped before the request's error response is returned |
+| `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to each `cli`-mode child (typst compile and SVG outline). Unix-only; a no-op elsewhere |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
 No `MDCAST_BLOB_DIR` — the blob cache is entirely in memory (issue #71) and
@@ -708,7 +718,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   feature gates a new `reqwest` dependency (`rustls-tls`, no native-tls) —
   off by default, no new dependency and byte-identical output for documents
   without remote images.
-- mdcast never validates or transcodes image bytes — the per-target format
+- mdcast never validates or transcodes image bytes (except SVG on the typst
+  targets, next bullet) — the per-target format
   support matrix (issue #55, documented in README's "Image formats" section)
   is whatever the target engine/viewer accepts. `image_format.rs::sniff`
   detects a format from magic bytes only (no `image`-crate dependency — a
@@ -723,6 +734,106 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   document destined only for LibreOffice). Combinations the matrix leaves
   ambiguous (TIFF in html-reveal is browser-dependent, WebP in odt needs
   LibreOffice ≥ 7.4) are deliberately left un-warned rather than guessed at.
+- **SVG text never reaches typst (issue #92).** typst's SVG-text pipeline
+  can deadlock on mixed font fallbacks (upstream typst #6052/#7178/#6783/
+  #7279, still in 0.14 — a mermaid label with `↔` hung production renders in
+  both compiler modes). `backends/typst/svg_outline/::outline_svgs` parses
+  every SVG among the compile files with `usvg` 0.45 — the exact version
+  typst depends on, so no second copy; `cargo tree -d` must not list `usvg`
+  (nor `flate2`, which it reuses at usvg's version/backend) — and, if it may
+  contain text, replaces it with `Tree::to_string`'s output, which writes
+  text as outlined paths. "May contain text" (`may_contain_text`) is a
+  conservative byte scan of the inflated SVG: `text`, a `data:` URI (any
+  case — a base64 nested SVG hides its `<text>`, and typst would parse it),
+  `&#` or `<!ENTITY`. Anything else (QR codes, icons) is only parsed to
+  validate it and then kept **byte-identical**, gzip included — rewriting
+  would resolve `currentColor` and normalise attributes, breaking typst's
+  `read("icon.svg").replace("currentColor", ...)` recolor idiom.
+  Detection (`svg_kind`) mirrors typst 0.14's `determine_format_from_path` +
+  `ImageFormat::detect` exactly: a `svg`/`svgz` extension is SVG, another
+  known image extension (`png`/`jpg`/`jpeg`/`gif`/`webp`/`pdf`) is not,
+  anything else (extensionless, `.svg.gz`) is sniffed — raster magic, then
+  gzip magic or the SVG namespace in the first 2 KiB; anything narrower
+  leaves the deadlock reachable. Only *files* are covered, and only as typst
+  decides from the file: SVG bytes a template builds itself
+  (`#image(bytes(...))`, strings from `/data.json`) and a file typst is told
+  is SVG at the call site (`image("x.png", format: "svg")`,
+  `image(read("x.png", encoding: none))` of an SVG) are not outlined — the template
+  author's responsibility. It runs on a
+  blocking thread at the two sites that assemble
+  `CompileInputs.files` *before* the compile: `mod.rs::render_to_bytes`
+  (after the image/asset/font fetch, before `md_to_typst`, so it can prune
+  `image_map`/`asset_map`) and `template.rs::assemble`. Not inside
+  `TypstCompiler::compile` on purpose: by then the driver already names
+  every body image, so a dropped SVG could only become a missing-file
+  compile error instead of degrading like an unresolved image. *Where* it
+  runs follows the compiler (`svg_outline/mod.rs::outline_svgs`), because
+  parse/layout cost is as unbounded as a compile (nested `<use>` fan-out of
+  a long label → tens of millions of glyph outlines from ~2 KB): with
+  `TypstCompiler::Cli` and an `OutlineCommand` (`CliCompiler::with_outline`)
+  the whole step — detection, inflate, validation parse, outlining, caps —
+  runs in a child process (`svg_outline/child.rs`) under the compile's own
+  timeout + kill/reap + `RLIMIT_AS` (`process.rs::run_bounded`, shared with
+  the typst child), spawned only if some file is an SVG candidate. The child
+  is our own binary in its hidden `__outline-svg` mode
+  (`backends::typst::OUTLINE_CHILD_ARG`; a hidden clap subcommand in
+  `mdcast`, an `argv[1]` check at the very top of `mdcast-server`'s sync
+  `main`, both before any runtime/log subscriber since stdout is the
+  response channel), calling `backends::typst::run_outline_child`; both
+  binaries set `OutlineCommand::current_exe()` when building a `Cli`
+  compiler (`/proc/self/exe` on Linux, so a binary replaced/deleted on disk
+  by a deploy still re-execs the running image; `std::env::current_exe()`
+  elsewhere). `CliCompiler` and `OutlineCommand` are `#[non_exhaustive]` —
+  build them with `CliCompiler::new(..).with_max_memory_bytes(..)
+  .with_outline(..)` / `OutlineCommand::new(program, args)`, never a struct
+  literal. Parent↔child framing is `svg_outline/ipc.rs` (no new deps):
+  `child.rs::select` sends only the SVG candidates, the rasters (by
+  `resolve::linked_kind`, typst's rule) whose name a text-bearing candidate
+  may contain (`may_link`; gzip/`&#`/`<!ENTITY`, or a name needing XML
+  escaping or holding a space (attribute normalisation) → conservatively all), and
+  the declared fonts only if some candidate may carry text — never `.typ`/
+  JSON/unlinked photos — because the child shares the compile's `RLIMIT_AS`;
+  `ipc::decode_request` borrows every payload from the one request buffer
+  for the same reason. One `Keep`/`Replace`/`Drop(reason)`/
+  `Unparsed(reason)` comes back per *sent* file and `spread` widens them back
+  (unsent = `Keep`); the parent caps the child's stdout at
+  `response_cap(n, MAX_OUTLINED_SVG)` and checks every length against the
+  remaining buffer, and logs drops itself (same messages as in-process).
+  Timeout, a killed/non-zero child, or a malformed response fails the render
+  like a failed `cli` compile (server: `render_failed`). `Library` mode — and
+  a library embedder's `Cli` without an outline command, which warns once —
+  runs it in-process on `spawn_blocking`, unbounded in time and memory like
+  the library compile itself. In either mode `resolve.rs` keeps usvg's
+  unbounded `decompress_svgz` off the path entirely — the byte caps below
+  bound inflate/payload/output size only, not parse time or memory: gzip is inflated by
+  `inflate_capped` (`MAX_INFLATED_SVG`, 32 MiB) for the top-level file and
+  for SVG data URIs (`image/svg+xml`, or `text/plain` that isn't raster —
+  the two mimes usvg loads as SVG; raster mimes are never inflated), exactly
+  one layer — a second gzip layer is refused as a parse failure (typst
+  inflates once then needs UTF-8, so it would fail too) — and every parse
+  goes through `Tree::from_str`, never `from_data`. Every image payload
+  (raw size for rasters, inflated size for nested SVG) and the serialised
+  output count against `MAX_OUTLINED_SVG` (64 MiB — the writer re-inlines
+  a linked raster at every reference); over either cap → warn + drop. A
+  corrupt gzip stream is a parse failure, not a limit. Linked `<image
+  href>`s follow typst 0.14.2's `ImageResolver::load_or_error`: `file://`
+  stripped, absolute (`/...`) paths and `scheme://` URLs refused, resolved
+  against the SVG's directory among the compile files, and only
+  GIF/JPEG/PNG/WebP accepted (extension first, else magic) — typst rejects
+  a linked SVG/SVGZ/PDF, so those are never loaded (nor inflated) here. Fonts:
+  `typst_assets::fonts()` (cached in a `OnceLock` fontdb, `serif` mapped to
+  Libertinus Serif so unknown families still outline) plus the render's
+  declared fonts, built once per render and only if an SVG that may contain
+  text is present — never system fonts. With declared fonts, the first
+  face's family replaces `serif`/`sans-serif`/`cursive`/`fantasy` and
+  `Options::font_family`, standing in for typst's fallback to the text font
+  active where the image appears (which isn't known before the compile;
+  remaining difference: no system fonts). An unparseable SVG warns and is
+  dropped (typst would have failed on the same bytes) — except a file that
+  is SVG by content sniff only, which passes through untouched (may be a
+  gzipped data file). Consequence: SVG text in a PDF is not selectable.
+  Pandoc targets are untouched. Revisit (and possibly delete) once typst
+  ships a fix.
 - Typst runs **in-process by default** (`typst-as-lib`) — no `typst` binary is
   needed to render PDF targets. As of issue #73, the compiler is a seam
   (`backends/typst/compiler/`): `TypstCompiler::Library` is this in-process

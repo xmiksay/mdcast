@@ -30,16 +30,21 @@ enum TypstCompilerArg {
 }
 
 impl TypstCompilerArgs {
-    pub async fn build(&self) -> mdcast::backends::typst::TypstCompiler {
-        use mdcast::backends::typst::{CliCompiler, TypstCompiler};
+    /// In `cli` mode the SVG-outline step runs as this same binary's hidden
+    /// `__outline-svg` subcommand, under the compile's timeout.
+    pub async fn build(&self) -> anyhow::Result<mdcast::backends::typst::TypstCompiler> {
+        use mdcast::backends::typst::{CliCompiler, OutlineCommand, TypstCompiler};
         let compiler = match self.mode {
             TypstCompilerArg::Library => TypstCompiler::Library,
-            TypstCompilerArg::Cli => TypstCompiler::Cli(CliCompiler::new(
-                self.bin.clone(),
-                std::time::Duration::from_secs(self.timeout_secs),
-            )),
+            TypstCompilerArg::Cli => TypstCompiler::Cli(
+                CliCompiler::new(
+                    self.bin.clone(),
+                    std::time::Duration::from_secs(self.timeout_secs),
+                )
+                .with_outline(Some(OutlineCommand::current_exe()?)),
+            ),
         };
         compiler.log_startup_info().await;
-        compiler
+        Ok(compiler)
     }
 }
