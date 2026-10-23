@@ -1,5 +1,7 @@
+use super::font_db::{DEFAULT_FAMILY, MONOSPACE_FAMILY, bundled_font_db, family_name};
 use super::*;
 use crate::backends::typst::compiler::{CompileFormat, CompileInputs, TypstCompiler};
+use usvg::fontdb;
 
 /// The shape of the production trigger: mermaid-style labels mixing Latin
 /// text with a glyph (`↔`) that needs a different font than the text around it.
@@ -8,9 +10,9 @@ const MERMAID_LIKE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" width="30
 <text x="10" y="35" font-family="trebuchet ms, verdana, arial, sans-serif" font-size="16">axum handlery: HTTP ↔ doména</text>
 </svg>"##;
 
-const NO_TEXT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2cm" height="1cm" viewBox="0 0 20 10"><rect width="20" height="10" fill="red"/></svg>"#;
+pub(super) const NO_TEXT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="2cm" height="1cm" viewBox="0 0 20 10"><rect width="20" height="10" fill="red"/></svg>"#;
 
-fn outline_one(path: &str, svg: &str) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
+pub(super) fn outline_one(path: &str, svg: &str) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
     outline_files(
         vec![(path.to_string(), svg.as_bytes().to_vec())],
         &[],
@@ -18,7 +20,7 @@ fn outline_one(path: &str, svg: &str) -> (Vec<(String, Vec<u8>)>, HashSet<String
     )
 }
 
-fn gzip(data: &[u8]) -> Vec<u8> {
+pub(super) fn gzip(data: &[u8]) -> Vec<u8> {
     use std::io::Write;
     let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
     enc.write_all(data).expect("in-memory write");
@@ -26,7 +28,7 @@ fn gzip(data: &[u8]) -> Vec<u8> {
 }
 
 /// A valid 1x1 RGB PNG.
-const PNG_1X1: &[u8] = &[
+pub(super) const PNG_1X1: &[u8] = &[
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
     0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90, 0x77, 0x53,
     0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0xf8, 0xcf, 0xc0, 0x00,
@@ -34,16 +36,18 @@ const PNG_1X1: &[u8] = &[
     0x44, 0xae, 0x42, 0x60, 0x82,
 ];
 
-fn linking_svg(refs: usize) -> String {
+/// An SVG with a label (so it is outlined, not kept) and `refs` `<image>`s
+/// all pointing at `href`.
+pub(super) fn linking_svg(refs: usize, href: &str) -> String {
     let images: String = (0..refs)
-        .map(|i| format!(r#"<image x="{i}" width="1" height="1" href="pic.png"/>"#))
+        .map(|i| format!(r#"<image x="{i}" width="1" height="1" href="{href}"/>"#))
         .collect();
     format!(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10">{images}</svg>"#
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10"><text y="5">a</text>{images}</svg>"#
     )
 }
 
-fn as_str(files: &[(String, Vec<u8>)], i: usize) -> &str {
+pub(super) fn as_str(files: &[(String, Vec<u8>)], i: usize) -> &str {
     std::str::from_utf8(&files[i].1).expect("usvg writes UTF-8")
 }
 
@@ -187,7 +191,10 @@ fn output_past_the_cap_is_dropped() {
     let files = || {
         vec![
             ("d/pic.png".to_string(), PNG_1X1.to_vec()),
-            ("d/a.svg".to_string(), linking_svg(10).into_bytes()),
+            (
+                "d/a.svg".to_string(),
+                linking_svg(10, "pic.png").into_bytes(),
+            ),
         ]
     };
     let limits = Limits {
@@ -205,7 +212,10 @@ fn output_past_the_cap_is_dropped() {
 async fn linked_raster_is_embedded_and_typst_renders_it() {
     let files = vec![
         ("pic.png".to_string(), PNG_1X1.to_vec()),
-        ("img.svg".to_string(), linking_svg(1).into_bytes()),
+        (
+            "img.svg".to_string(),
+            linking_svg(1, "pic.png").into_bytes(),
+        ),
     ];
     let (files, dropped) = outline_files(files, &[], LIMITS);
     assert!(dropped.is_empty());
@@ -217,24 +227,6 @@ async fn linked_raster_is_embedded_and_typst_renders_it() {
     let text = std::str::from_utf8(&svg).expect("UTF-8");
     assert!(text.contains("data:image/png;base64,"), "{text}");
     assert!(compile_sized_to(svg).await.starts_with(b"%PDF-"));
-}
-
-#[test]
-fn relative_image_hrefs_resolve_against_the_svg_dir() {
-    assert_eq!(
-        resolve_href("t/img/a.svg", "b.png").as_deref(),
-        Some("t/img/b.png")
-    );
-    assert_eq!(
-        resolve_href("t/img/a.svg", "../b.png").as_deref(),
-        Some("t/b.png")
-    );
-    assert_eq!(
-        resolve_href("t/a.svg", "/root.png").as_deref(),
-        Some("root.png")
-    );
-    assert_eq!(resolve_href("a.svg", "../escape.png"), None);
-    assert_eq!(resolve_href("a.svg", "https://x/y.png"), None);
 }
 
 /// A bundled face that isn't the default family, standing in for a brand font.
@@ -274,9 +266,10 @@ fn declared_font_becomes_the_fallback_family() {
 }
 
 #[tokio::test]
-async fn text_free_svg_keeps_its_size_and_typst_renders_it() {
-    let (files, _) = outline_one("img.svg", NO_TEXT);
-    assert_eq!(tree_size(NO_TEXT.as_bytes()), tree_size(&files[0].1));
+async fn text_free_svg_is_kept_byte_identical_and_typst_renders_it() {
+    let (files, dropped) = outline_one("img.svg", NO_TEXT);
+    assert!(dropped.is_empty());
+    assert_eq!(files[0].1, NO_TEXT.as_bytes());
     let pdf = compile_sized_to(files[0].1.clone()).await;
     assert!(pdf.starts_with(b"%PDF-"));
 }
@@ -293,6 +286,11 @@ async fn qr_svg_physical_size_is_unchanged_in_the_pdf() {
     .expect("encodes");
     assert!(svg.contains("cm\""), "QR SVG is sized in cm: {svg}");
     let (files, _) = outline_one("img.svg", &svg);
+    assert_eq!(
+        files[0].1,
+        svg.as_bytes(),
+        "text-free QR must not be rewritten"
+    );
 
     let before = media_box(&compile_sized_to(svg.into_bytes()).await);
     let after = media_box(&compile_sized_to(files[0].1.clone()).await);
@@ -308,5 +306,7 @@ fn chess_svg_physical_size_is_unchanged() {
     let (files, dropped) = outline_one("board.svg", &svg);
     assert!(dropped.is_empty());
     assert!(!as_str(&files, 0).contains("<text"));
+    // Board labels are text, so the board is rewritten — at the same size.
+    assert!(may_contain_text(svg.as_bytes()));
     assert_eq!(tree_size(svg.as_bytes()), tree_size(&files[0].1));
 }

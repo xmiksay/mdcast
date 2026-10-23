@@ -80,7 +80,11 @@ src/
 │     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler — temp-dir materialisation + `typst compile` subprocess, timeout+kill, safe_join path-traversal guard, optional RLIMIT_AS cap
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
-│     ├─ svg_outline.rs   outline_svgs() — every SVG file headed for a typst compile re-serialised by usvg with <text> → paths (issue #92); svg_outline_tests.rs
+│     ├─ svg_outline/     outline_svgs() — every SVG file headed for a typst compile that may contain text re-serialised by usvg with <text> → paths (issue #92)
+│     │  ├─ mod.rs      outline_files()/process()/outline(), svg_kind() (typst's format rule), may_contain_text(), the caps
+│     │  ├─ resolve.rs  capped single-layer gzip inflate, Tree::from_str parse, output Budget, the data-URI + linked-file <image href> resolvers (typst 0.14.2's rules)
+│     │  ├─ font_db.rs  bundled + declared fontdb, brand-font fallback family
+│     │  └─ tests.rs / tests_images.rs
 │     ├─ fonts.rs       collect_fonts() — ResolvedDoc.fonts → font book bytes
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
@@ -728,19 +732,29 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
 - **SVG text never reaches typst (issue #92).** typst's SVG-text pipeline
   can deadlock on mixed font fallbacks (upstream typst #6052/#7178/#6783/
   #7279, still in 0.14 — a mermaid label with `↔` hung production renders in
-  both compiler modes). `backends/typst/svg_outline.rs::outline_svgs` parses
+  both compiler modes). `backends/typst/svg_outline/::outline_svgs` parses
   every SVG among the compile files with `usvg` 0.45 — the exact version
   typst depends on, so no second copy; `cargo tree -d` must not list `usvg`
-  (nor `flate2`, which it reuses at usvg's version/backend) — and replaces it
-  with `Tree::to_string`'s output, which writes text as outlined paths.
+  (nor `flate2`, which it reuses at usvg's version/backend) — and, if it may
+  contain text, replaces it with `Tree::to_string`'s output, which writes
+  text as outlined paths. "May contain text" (`may_contain_text`) is a
+  conservative byte scan of the inflated SVG: `text`, a `data:` URI (any
+  case — a base64 nested SVG hides its `<text>`, and typst would parse it),
+  `&#` or `<!ENTITY`. Anything else (QR codes, icons) is only parsed to
+  validate it and then kept **byte-identical**, gzip included — rewriting
+  would resolve `currentColor` and normalise attributes, breaking typst's
+  `read("icon.svg").replace("currentColor", ...)` recolor idiom.
   Detection (`svg_kind`) mirrors typst 0.14's `determine_format_from_path` +
   `ImageFormat::detect` exactly: a `svg`/`svgz` extension is SVG, another
   known image extension (`png`/`jpg`/`jpeg`/`gif`/`webp`/`pdf`) is not,
   anything else (extensionless, `.svg.gz`) is sniffed — raster magic, then
   gzip magic or the SVG namespace in the first 2 KiB; anything narrower
-  leaves the deadlock reachable. Only *files* are covered: SVG bytes a
-  template builds itself (`#image(bytes(...))`, strings from `/data.json`)
-  are not outlined — the template author's responsibility. It runs on a
+  leaves the deadlock reachable. Only *files* are covered, and only as typst
+  decides from the file: SVG bytes a template builds itself
+  (`#image(bytes(...))`, strings from `/data.json`) and a file typst is told
+  is SVG at the call site (`image("x.png", format: "svg")`,
+  `image(read("x.png", encoding: none))` of an SVG) are not outlined — the template
+  author's responsibility. It runs on a
   blocking thread at the two sites that assemble
   `CompileInputs.files` *before* the compile: `mod.rs::render_to_bytes`
   (after the image/asset/font fetch, before `md_to_typst`, so it can prune
@@ -749,26 +763,36 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   every body image, so a dropped SVG could only become a missing-file
   compile error instead of degrading like an unresolved image. Because it
   runs in-process (uncancellable `spawn_blocking`), it is **outside**
-  `cli` mode's timeout/`RLIMIT_AS`; instead gzip is inflated by
-  `inflate_capped` (`MAX_INFLATED_SVG`, 32 MiB — usvg's own `read_to_end` is
-  unbounded, a gzip bomb would OOM the server) for the top-level file and any
-  nested `<image>`/data URI, and linked bytes plus the serialised output are
-  capped at `MAX_OUTLINED_SVG` (64 MiB — the writer re-inlines a linked
-  raster at every reference); over either cap → warn + drop. Fonts:
+  `cli` mode's timeout/`RLIMIT_AS`, so `resolve.rs` keeps usvg's unbounded
+  `decompress_svgz` off the path entirely: gzip is inflated by
+  `inflate_capped` (`MAX_INFLATED_SVG`, 32 MiB) for the top-level file and
+  for SVG data URIs (`image/svg+xml`, or `text/plain` that isn't raster —
+  the two mimes usvg loads as SVG; raster mimes are never inflated), exactly
+  one layer — a second gzip layer is refused as a parse failure (typst
+  inflates once then needs UTF-8, so it would fail too) — and every parse
+  goes through `Tree::from_str`, never `from_data`. Every image payload
+  (raw size for rasters, inflated size for nested SVG) and the serialised
+  output count against `MAX_OUTLINED_SVG` (64 MiB — the writer re-inlines
+  a linked raster at every reference); over either cap → warn + drop. A
+  corrupt gzip stream is a parse failure, not a limit. Linked `<image
+  href>`s follow typst 0.14.2's `ImageResolver::load_or_error`: `file://`
+  stripped, absolute (`/...`) paths and `scheme://` URLs refused, resolved
+  against the SVG's directory among the compile files, and only
+  GIF/JPEG/PNG/WebP accepted (extension first, else magic) — typst rejects
+  a linked SVG/SVGZ/PDF, so those are never loaded (nor inflated) here. Fonts:
   `typst_assets::fonts()` (cached in a `OnceLock` fontdb, `serif` mapped to
   Libertinus Serif so unknown families still outline) plus the render's
-  declared fonts, built once per render and only if an SVG is present —
-  never system fonts. With declared fonts, the first face's family replaces
-  `serif`/`sans-serif`/`cursive`/`fantasy` and `Options::font_family`, so
-  unmatched families resolve to the brand font, approximating typst's
-  fallback to the document's text font (remaining difference: no system
-  fonts). An unparseable SVG warns and is dropped (typst would have failed on
-  the same bytes) — except a file that is SVG by content sniff only, which
-  passes through untouched (may be a gzipped data file). Relative
-  `<image href>`s inside an SVG resolve against the other compile files,
-  mirroring typst's resolver. Consequence: SVG text in a PDF is not
-  selectable. Pandoc targets are
-  untouched. Revisit (and possibly delete) once typst ships a fix.
+  declared fonts, built once per render and only if an SVG that may contain
+  text is present — never system fonts. With declared fonts, the first
+  face's family replaces `serif`/`sans-serif`/`cursive`/`fantasy` and
+  `Options::font_family`, standing in for typst's fallback to the text font
+  active where the image appears (which isn't known before the compile;
+  remaining difference: no system fonts). An unparseable SVG warns and is
+  dropped (typst would have failed on the same bytes) — except a file that
+  is SVG by content sniff only, which passes through untouched (may be a
+  gzipped data file). Consequence: SVG text in a PDF is not selectable.
+  Pandoc targets are untouched. Revisit (and possibly delete) once typst
+  ships a fix.
 - Typst runs **in-process by default** (`typst-as-lib`) — no `typst` binary is
   needed to render PDF targets. As of issue #73, the compiler is a seam
   (`backends/typst/compiler/`): `TypstCompiler::Library` is this in-process

@@ -498,7 +498,8 @@ reaches mdcast.
 mdcast never validates or transcodes image bytes — they flow from the
 `AssetProvider` straight to the target engine, so what "attaching an image"
 supports is whatever that engine/viewer accepts. The one exception is SVG on
-the typst targets, which is re-serialised with its text outlined (see
+the typst targets, which is re-serialised with its text outlined when it
+may contain text (see
 [SVG text on the typst targets](#svg-text-on-the-typst-targets) below). Verified against typst
 0.14's format table and pandoc's pass-through behaviour:
 
@@ -539,30 +540,47 @@ source image if a warning fires.
 Before typst sees any SVG *file* — a markdown body image, a declared layout
 asset, a template sibling or a `generated` entry, in both `library` and `cli`
 compiler modes — mdcast parses it with `usvg` (the same parser and version
-typst uses) and re-serialises it with every `<text>` converted to outlined
-paths. typst's own SVG-text pipeline can deadlock when text needs mixed font
-fallbacks (e.g. a mermaid label containing `↔`; upstream typst
+typst uses) and, if it may contain text, re-serialises it with every
+`<text>` converted to outlined paths. typst's own SVG-text pipeline can
+deadlock when text needs mixed font fallbacks (e.g. a mermaid label
+containing `↔`; upstream typst
 [#6052](https://github.com/typst/typst/issues/6052),
 [#7178](https://github.com/typst/typst/issues/7178),
 [#6783](https://github.com/typst/typst/issues/6783),
 [#7279](https://github.com/typst/typst/issues/7279)), so any SVG with text
 would otherwise be a way to hang the render. SVG bytes a template constructs
 itself (`#image(bytes(...))`, an SVG string from `/data.json`) are not files
-and are **not** outlined — the template author controls those.
+and are **not** outlined — the template author controls those. Neither is a
+file typst is told is SVG only at the call site (`image("x.png", format:
+"svg")`, `image(read("x.png", encoding: none))` of an SVG): detection follows the file's
+own name and bytes, not the `image()` call.
 
+- **Only SVGs that may contain text are rewritten.** That means the
+  (inflated) bytes contain `text`, a `data:` URI (a base64-embedded SVG can
+  hide its `<text>`), `&#` or `<!ENTITY`. Every other SVG — QR codes, icons —
+  is only checked to parse and then handed to typst **byte-for-byte**
+  (gzip included), so the `read("icon.svg").replace("currentColor", ...)`
+  recolor idiom keeps working on it. A rewritten SVG has `currentColor`
+  already resolved and its attributes normalised, so that idiom does not
+  apply to an SVG with text.
 - **Fonts:** glyphs are outlined with typst's bundled fonts (Libertinus
   Serif, New Computer Modern, DejaVu Sans Mono) plus the document's declared
   fonts (`ResolvedDoc.fonts` / `TemplateDoc.fonts`). A `font-family` naming
   none of them, or a generic family (`serif`, `sans-serif`, ...), resolves to
-  the first declared font's family — the stand-in for typst's own fallback to
-  the document's text font — or to Libertinus Serif when no fonts are
-  declared (`monospace` stays DejaVu Sans Mono). Characters that face lacks
-  fall back to any bundled/declared face that has them. Unlike typst, system
-  fonts are never consulted, so output doesn't depend on the host.
+  the first declared font's family — a stand-in for typst's own fallback to
+  the text font active where the image appears, which isn't known before
+  the compile — or to Libertinus Serif when no fonts are declared
+  (`monospace` stays DejaVu Sans Mono). Characters that face lacks fall back
+  to any bundled/declared face that has them. Unlike typst, system fonts are
+  never consulted, so output doesn't depend on the host.
 - **Consequence:** SVG text in the PDF is vector shapes, not text — it can't
-  be selected, searched or copied. Image size is unchanged. Relative
-  `<image href>`s resolve against the other compile files and the linked
-  bytes are embedded into the SVG as data URIs.
+  be selected, searched or copied. Image size is unchanged.
+- **Linked images** in a rewritten SVG resolve exactly as typst's own
+  resolver would and are embedded as data URIs: `file://` is stripped,
+  absolute (`/...`) paths and URLs are refused, the path is relative to the
+  SVG's directory, and only PNG/JPEG/GIF/WebP are accepted (by extension,
+  else magic bytes) — typst refuses a linked SVG or PDF, so those are left
+  out.
 - **Detection** mirrors typst 0.14's own rule: a `.svg`/`.svgz` extension is
   SVG; `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.pdf` is not; any other key
   (extensionless, `.svg.gz`, ...) is sniffed — raster magic first, then
@@ -572,16 +590,18 @@ and are **not** outlined — the template author controls those.
   bytes. A markdown body image then disappears like an unresolved one and a
   layout's `asset-path` falls back to its `default:`; a template that
   references the file fails on the missing file. A file that is SVG only by
-  content sniff and fails to parse is passed through untouched instead (it
-  may be a gzipped data file a template `read()`s).
+  content sniff and fails to parse (corrupt gzip included) is passed through
+  untouched instead (it may be a gzipped data file a template `read()`s).
+  Gzip inside gzip counts as unparseable — typst inflates only once.
 - **Resource limits:** outlining runs **in-process** (in `mdcast-server`, in
   the server process) on a blocking thread, *before* the compile — so it is
   **not** covered by `MDCAST_TYPST_TIMEOUT_SECS` or
   `MDCAST_TYPST_MAX_MEMORY_BYTES`, even in `cli` mode. It is bounded by two
-  fixed caps instead: a gzipped SVG (`.svgz`, or nested in an `<image>`) may
-  inflate to at most 32 MiB, and the re-serialised SVG (including linked
-  rasters, re-embedded at every reference) may be at most 64 MiB. Exceeding
-  either warns and drops the SVG like an unparseable one.
+  fixed caps instead: a gzipped SVG (`.svgz`, or an SVG data URI) may
+  inflate to at most 32 MiB, and all embedded images together (raster data
+  URIs and linked rasters at their raw size, nested SVGs inflated) as well
+  as the re-serialised SVG may be at most 64 MiB. Exceeding either warns and
+  drops the SVG, whatever its name.
 - pandoc targets get the SVG bytes untouched.
 
 ## Table of contents
