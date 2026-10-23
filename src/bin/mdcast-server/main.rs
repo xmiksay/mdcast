@@ -110,7 +110,41 @@ async fn main() -> Result<()> {
         pandoc_available,
         "mdcast-server listening"
     );
-    axum::serve(listener, app).await.context("serve http")
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("serve http")
+}
+
+/// The server runs as PID 1 in the container, where an unhandled SIGTERM is
+/// ignored — without this every rollout would wait out the grace period and
+/// SIGKILL in-flight renders instead of draining them.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            tracing::error!(%err, "install Ctrl-C handler");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(err) => {
+                tracing::error!(%err, "install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        () = ctrl_c => {},
+        () = terminate => {},
+    }
+    tracing::info!("shutdown signal received, draining in-flight requests");
 }
 
 /// `MDCAST_TOKEN` unset or empty means the router skips `require_bearer`

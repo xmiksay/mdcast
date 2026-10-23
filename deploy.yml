@@ -4,7 +4,9 @@
 # http://mdcast.services (port 80 → 8080) inside the cluster.
 #
 #   make deploy           # kubectl apply -f deploy.yml
-#   make deploy-restart   # re-roll the pods after pushing a new image
+#   make deploy-restart   # re-roll the pods to pick up Secret/ConfigMap edits
+#
+# New release: bump the pinned image tag below, then `make deploy`.
 #
 # The committed Secret is a placeholder — keep the real MDCAST_TOKEN only in
 # your local copy (kubectl apply overwrites the in-cluster secret with this
@@ -26,14 +28,15 @@ metadata:
 data:
   RUST_LOG: "info"
   # cli mode (issue #73): every typst compile is a killable subprocess with
-  # the default 30s timeout and the address-space cap below — a pathological
+  # the timeout (MDCAST_TYPST_TIMEOUT_SECS) and address-space cap below — a pathological
   # template can't wedge a worker thread for the pod's lifetime.
   MDCAST_TYPST: "cli"
   MDCAST_TYPST_MAX_MEMORY_BYTES: "1073741824"
   # Headroom for node CPU contention: a render measured at ~1s of CPU was
   # observed stretching past the default 30s wall-clock kill when the node
-  # was loaded. Keep below the site client's 120s request timeout.
-  MDCAST_TYPST_TIMEOUT_SECS: "120"
+  # was loaded. Kept well below the site client's 120s request timeout:
+  # this bounds only the typst child, the rest of the request comes on top.
+  MDCAST_TYPST_TIMEOUT_SECS: "100"
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -52,6 +55,9 @@ spec:
       labels:
         app: mdcast
     spec:
+      # The server drains in-flight renders on SIGTERM; give the longest one
+      # (MDCAST_TYPST_TIMEOUT_SECS) time to finish before the SIGKILL.
+      terminationGracePeriodSeconds: 110
       containers:
         - name: mdcast
           # Pinned to the release tag, not :latest — an Always-pull of

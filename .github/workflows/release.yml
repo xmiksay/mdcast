@@ -43,7 +43,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       # All three crates inherit `version` from [workspace.package], so this
-      # also proves they are in lockstep.
+      # also proves they are in lockstep. deploy.yml pins the image to the
+      # release tag, so a release PR that forgot to bump it fails here.
       - name: Verify tag matches the workspace version
         run: |
           tag="${GITHUB_REF_NAME#v}"
@@ -54,6 +55,10 @@ jobs:
               exit 1
             fi
           done
+          if ! grep -q "image: ghcr.io/xmiksay/mdcast:${tag}$" deploy.yml; then
+            echo "deploy.yml does not pin ghcr.io/xmiksay/mdcast:${tag}" >&2
+            exit 1
+          fi
 
       - name: Verify tag commit passed CI
         env:

@@ -297,8 +297,12 @@ the release tag (`ghcr.io/xmiksay/mdcast:X.Y.Z`, `IfNotPresent`), not
 `:latest` — an `Always` pull of `:latest` once resolved to a stale image
 through a registry-edge cache right after a push. It requests a full CPU
 (typst is CPU-bound; a `100m` request let a loaded node stretch a ~1s
-compile past the kill window) and sets `MDCAST_TYPST_TIMEOUT_SECS=120`,
-kept under the site client's 120s request timeout.
+compile past the kill window) and sets `MDCAST_TYPST_TIMEOUT_SECS=100` —
+well below the site client's 120s request timeout, since it bounds only the
+typst child. `mdcast-server` drains in-flight requests on SIGTERM/Ctrl-C
+(`axum::serve(..).with_graceful_shutdown`), and the Deployment's
+`terminationGracePeriodSeconds: 110` gives the longest compile time to
+finish before the SIGKILL.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
 `mermaid`, `qr` and `rt-multi-thread` itself (a render service without engines is
@@ -329,7 +333,8 @@ job summary and uploading `lcov.info` + the HTML report as a
 the release PR's coverage snapshot already covers the commit that lands.
 
 `.github/workflows/release.yml` publishes to crates.io on every `v*` tag
-push: it checks the tag against the `Cargo.toml` version, confirms the tag
+push: it checks the tag against the `Cargo.toml` version and `deploy.yml`'s
+pinned image tag, confirms the tag
 commit already has a successful `test` check run (via the GitHub API — the
 tagged commit is a just-merged, CI-green `master` commit, so there's nothing
 to re-verify), then publishes **`mdcast-api` → `mdcast` → `mdcast-client`**
