@@ -10,6 +10,7 @@ use super::super::tests::{NO_TEXT, PNG_1X1};
 use super::super::{Outcome, outline_svgs};
 use super::*;
 use crate::backends::typst::compiler::{CliCompiler, TypstCompiler};
+use crate::backends::typst::test_support::count_processes_named;
 
 const TEXT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><text y="8">Hi ↔</text></svg>"#;
 
@@ -203,6 +204,18 @@ fn unreadable_names_send_every_linkable_raster() {
 }
 
 #[test]
+fn a_name_with_a_space_is_always_sent() {
+    // roxmltree reads `a<TAB>b.png` as `a b.png`, which the raw bytes never spell.
+    let svg =
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"><text>a</text><image href=\"a\tb.png\"/></svg>";
+    let sel = select(&named(&[
+        ("a.svg", svg.as_bytes()),
+        ("img/a b.png", PNG_1X1),
+    ]));
+    assert_eq!(sel.files, [true, true]);
+}
+
+#[test]
 fn spread_puts_each_answer_back_at_its_file() {
     let answered = vec![Outcome::Drop("x".into()), Outcome::Replace(b"s".to_vec())];
     assert_eq!(
@@ -214,16 +227,4 @@ fn spread_puts_each_answer_back_at_its_file() {
             Outcome::Replace(b"s".to_vec())
         ]
     );
-}
-
-/// Linux-only headcount via `/proc`; 0 (never a false failure) elsewhere.
-fn count_processes_named(name: &str) -> usize {
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return 0;
-    };
-    entries
-        .flatten()
-        .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
-        .filter(|e| std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == name))
-        .count()
 }

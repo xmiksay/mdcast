@@ -6,6 +6,7 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 use super::*;
+use crate::backends::typst::test_support::count_processes_named;
 
 /// Every test below spawns a real `typst` subprocess, and
 /// `timeout_kills_and_reaps_a_non_terminating_compile` asserts on the
@@ -191,32 +192,4 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
         after <= before,
         "typst process count did not return to baseline: before={before} after={after}"
     );
-}
-
-/// Linux-only headcount via `/proc` — good enough to catch a leaked child in
-/// CI without pulling in a process-listing crate. Returns 0 (never a false
-/// failure) on any other target.
-fn count_processes_named(name: &str) -> usize {
-    #[cfg(target_os = "linux")]
-    {
-        let mut count = 0;
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return 0;
-        };
-        for entry in entries.flatten() {
-            let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-                continue;
-            };
-            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default();
-            if comm.trim() == name {
-                count += 1;
-            }
-        }
-        count
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = name;
-        0
-    }
 }

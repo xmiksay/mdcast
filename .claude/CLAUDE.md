@@ -75,6 +75,7 @@ src/
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
 │     ├─ process.rs     run_bounded() — the shared child runner: piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, RLIMIT_CORE=0 always + optional RLIMIT_AS (typst compile child and SVG-outline child)
+│     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
@@ -788,7 +789,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   literal. Parent↔child framing is `svg_outline/ipc.rs` (no new deps):
   `child.rs::select` sends only the SVG candidates, the rasters (by
   `resolve::linked_kind`, typst's rule) whose name a text-bearing candidate
-  may contain (`may_link`; gzip/`&#`/`<!ENTITY` → conservatively all), and
+  may contain (`may_link`; gzip/`&#`/`<!ENTITY`, or a name needing XML
+  escaping or holding a space (attribute normalisation) → conservatively all), and
   the declared fonts only if some candidate may carry text — never `.typ`/
   JSON/unlinked photos — because the child shares the compile's `RLIMIT_AS`;
   `ipc::decode_request` borrows every payload from the one request buffer

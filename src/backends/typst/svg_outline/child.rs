@@ -105,12 +105,14 @@ fn select(files: &[(String, Vec<u8>)]) -> Selection {
 /// Conservative "could `svg` name `path` in an `<image href>`": a resolved
 /// href always ends in the file's own name, so its absence rules the link
 /// out — unless the SVG is gzipped, or could spell the name through a
-/// character/entity reference, or the name itself needs XML escaping.
+/// character/entity reference, or the name itself needs XML escaping or
+/// holds a space (attribute-value normalisation turns a raw tab/LF/CR in
+/// the href into one, so the bytes need not contain the name verbatim).
 fn may_link(svg: &[u8], path: &str) -> bool {
     let name = path.rsplit('/').next().unwrap_or(path).as_bytes();
     let has = |needle: &[u8]| svg.windows(needle.len()).any(|w| w == needle);
     name.is_empty()
-        || name.iter().any(|c| b"&<>\"'".contains(c))
+        || name.iter().any(|c| b"&<>\"' ".contains(c))
         || is_gzip(svg)
         || has(b"&#")
         || has(b"<!ENTITY")

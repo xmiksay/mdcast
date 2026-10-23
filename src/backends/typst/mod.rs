@@ -34,6 +34,8 @@ mod markdown;
 mod process;
 mod svg_outline;
 mod template;
+#[cfg(test)]
+mod test_support;
 mod virtual_files;
 pub use compiler::{CliCompiler, OutlineCommand, TypstCompiler};
 use compiler::{CompileFormat, CompileInputs};
