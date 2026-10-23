@@ -98,8 +98,8 @@ spec:
           # budget) plus concurrent renders; the CPU limit keeps a burst of
           # typst/pandoc compiles from starving the node. The 1-CPU request
           # is the flip side: typst is CPU-bound, and a 100m guarantee let a
-          # loaded node throttle a ~1s compile past the then-default 30s kill
-          # window.
+          # loaded node throttle a ~1s compile past the 30s default kill
+          # window this deployment used to run with.
           resources:
             requests:
               cpu: "1"
