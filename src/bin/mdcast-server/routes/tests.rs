@@ -22,15 +22,23 @@ fn app() -> (Router, Arc<BlobStore>) {
 }
 
 fn app_with_compiler(typst_compiler: TypstCompiler) -> (Router, Arc<BlobStore>) {
-    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
-    let state = Arc::new(AppState {
-        store: store.clone(),
+    let state = state(typst_compiler, true, 1 << 20);
+    let store = state.store.clone();
+    (router(Arc::new(state), Some(TOKEN), 1 << 20), store)
+}
+
+/// Generous render slots, diagnostics hidden: what every test not about
+/// those two knobs wants.
+fn state(typst_compiler: TypstCompiler, pandoc_available: bool, max_upload: u64) -> AppState {
+    AppState {
+        store: Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap()),
         registry: Registry::with_typst_compiler(typst_compiler.clone()),
         typst_compiler,
-        pandoc_available: true,
-        max_upload_bytes: 1 << 20,
-    });
-    (router(state, Some(TOKEN), 1 << 20), store)
+        pandoc_available,
+        max_upload_bytes: max_upload,
+        render_gate: RenderGate::new(16, std::time::Duration::from_secs(10)),
+        expose_diagnostics: false,
+    }
 }
 
 /// `None` when no `typst` binary is on `PATH` — callers skip gracefully,
@@ -146,18 +154,8 @@ async fn v1_rejects_anything_but_the_configured_token() {
 /// permissive, it's absent.
 #[tokio::test]
 async fn a_router_with_no_configured_token_serves_v1_without_credentials() {
-    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
-    let app = router(
-        Arc::new(AppState {
-            store,
-            registry: Registry::with_defaults(),
-            typst_compiler: TypstCompiler::Library,
-            pandoc_available: true,
-            max_upload_bytes: 1 << 20,
-        }),
-        None,
-        1 << 20,
-    );
+    let state = state(TypstCompiler::Library, true, 1 << 20);
+    let app = router(Arc::new(state), None, 1 << 20);
 
     let request = Request::builder()
         .method("POST")
@@ -383,30 +381,5 @@ mod template_tests;
 #[path = "capabilities_tests.rs"]
 mod capabilities_tests;
 
-#[tokio::test]
-async fn a_body_over_the_limit_is_a_413() {
-    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
-    let app = router(
-        Arc::new(AppState {
-            store,
-            registry: Registry::with_defaults(),
-            typst_compiler: TypstCompiler::Library,
-            pandoc_available: true,
-            max_upload_bytes: 64,
-        }),
-        Some(TOKEN),
-        64,
-    );
-
-    let (status, response) = send(
-        &app,
-        json_request(
-            "/v1/render",
-            serde_json::json!({ "markdown": "#".repeat(4096), "target": "pdf" }),
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
-    assert_eq!(body_json(response).await["code"], "payload_too_large");
-}
+#[path = "hardening_tests.rs"]
+mod hardening_tests;

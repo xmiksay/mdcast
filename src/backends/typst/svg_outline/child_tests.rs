@@ -27,6 +27,8 @@ fn bounds(timeout: Duration) -> Bounds {
     Bounds {
         timeout,
         max_memory_bytes: None,
+        max_file_bytes: None,
+        cpu_secs: None,
     }
 }
 

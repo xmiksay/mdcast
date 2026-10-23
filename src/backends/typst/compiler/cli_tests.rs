@@ -193,3 +193,90 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
         "typst process count did not return to baseline: before={before} after={after}"
     );
 }
+
+#[tokio::test]
+async fn compile_errors_are_typed_diagnostics_without_the_temp_dir() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "= Hi\n#image(\"missing.png\")\n")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    let diags = err
+        .downcast_ref::<crate::backends::typst::CompileDiagnostics>()
+        .unwrap_or_else(|| panic!("not typed diagnostics: {err:#}"));
+    let all = diags.diagnostics.join("\n");
+    assert!(all.starts_with("main.typ:2:"), "{all}");
+    assert!(all.contains("missing.png"), "{all}");
+    assert!(!all.contains("mdcast-typst-"), "temp dir leaked: {all}");
+}
+
+/// A `@preview` import must fail, promptly, without a download: the proxy
+/// variables point every request at a closed loopback port.
+#[tokio::test]
+async fn a_package_import_fails_fast_without_downloading() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+    let start = std::time::Instant::now();
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "#import \"@preview/cetz:0.3.0\": *\nHi\n")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(start.elapsed() < Duration::from_secs(10), "{err:#}");
+    let message = format!("{err:#}");
+    assert!(message.contains("cetz"), "{message}");
+    assert!(
+        message.contains("refused"),
+        "not refused locally: {message}"
+    );
+}
+
+#[tokio::test]
+async fn output_over_the_cap_is_rejected_before_it_is_read() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20)).with_max_output_bytes(64);
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "= Hello")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("64-byte cap"), "{err:#}");
+}
+
+#[test]
+fn bounds_cap_file_size_and_cpu_time() {
+    let cli = CliCompiler::new("typst", Duration::from_secs(10)).with_max_output_bytes(1000);
+    let bounds = cli.bounds();
+    assert_eq!(bounds.max_file_bytes, Some(1000 + (1 << 20)));
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    assert_eq!(bounds.cpu_secs, Some(11 * cores + 5));
+}

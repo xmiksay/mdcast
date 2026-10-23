@@ -45,7 +45,7 @@ pub(super) async fn outline_in_child(
     let mut command = Command::new(&cmd.program);
     command.args(&cmd.args);
     let cap = ipc::response_cap(n_sent, LIMITS.output);
-    let done = run_bounded(command, Some(request), bounds, cap, "SVG outline").await?;
+    let done = run_bounded(command, &[], Some(request), bounds, cap, "SVG outline").await?;
     if !done.status.success() {
         bail!(
             "SVG outline failed ({}):\n{}",

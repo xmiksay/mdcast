@@ -339,14 +339,11 @@ async fn a_server_error_response_arrives_with_its_code_intact() {
 
     match error {
         Error::Server {
-            status,
-            code,
+            status: 422,
+            code: ErrorCode::RenderFailed,
             message,
-        } => {
-            assert_eq!(status, 422);
-            assert_eq!(code, ErrorCode::RenderFailed);
-            assert!(message.contains("incident 4711-0"), "{message}");
-        }
+            ..
+        } => assert!(message.contains("incident 4711-0"), "{message}"),
         other => panic!("expected Server, got {other:?}"),
     }
 }

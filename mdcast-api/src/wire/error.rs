@@ -10,6 +10,12 @@ use serde::{Deserialize, Serialize};
 pub struct ErrorResponse {
     pub code: ErrorCode,
     pub message: String,
+    /// Sanitised engine diagnostics (`path:line:col: severity: message`) for a
+    /// `render_failed`, present only when the server opts in
+    /// (`MDCAST_EXPOSE_DIAGNOSTICS`). Omitted when empty, so a body without
+    /// it is byte-identical to one from a server that predates the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub detail: Vec<String>,
 }
 
 impl ErrorResponse {
@@ -17,7 +23,13 @@ impl ErrorResponse {
         Self {
             code,
             message: message.into(),
+            detail: Vec::new(),
         }
+    }
+
+    pub fn with_detail(mut self, detail: Vec<String>) -> Self {
+        self.detail = detail;
+        self
     }
 }
 
@@ -43,6 +55,14 @@ pub enum ErrorCode {
     RenderFailed,
     /// Anything the server cannot attribute to the request.
     Internal,
+    /// Every render slot stayed busy for the server's whole queue wait
+    /// (`503`, with `Retry-After`). Nothing is wrong with the request; send
+    /// it again later.
+    Overloaded,
+    /// A code this version of the protocol does not know — what a newer
+    /// server's addition decodes to, instead of failing the whole body.
+    #[serde(other)]
+    Unknown,
 }
 
 #[cfg(test)]
@@ -70,10 +90,34 @@ mod tests {
             (ErrorCode::UnsupportedTarget, "\"unsupported_target\""),
             (ErrorCode::RenderFailed, "\"render_failed\""),
             (ErrorCode::Internal, "\"internal\""),
+            (ErrorCode::Overloaded, "\"overloaded\""),
         ] {
             let json = serde_json::to_string(&code).unwrap();
             assert_eq!(json, expected);
             assert_eq!(serde_json::from_str::<ErrorCode>(&json).unwrap(), code);
         }
+    }
+
+    #[test]
+    fn an_unknown_code_decodes_instead_of_failing_the_body() {
+        let err: ErrorResponse =
+            serde_json::from_str(r#"{"code":"from_the_future","message":"m"}"#).unwrap();
+        assert_eq!(err.code, ErrorCode::Unknown);
+    }
+
+    #[test]
+    fn detail_is_omitted_when_empty_and_carried_when_present() {
+        let with = ErrorResponse::new(ErrorCode::RenderFailed, "m")
+            .with_detail(vec!["main.typ:1:2: error: x".into()]);
+
+        let json = serde_json::to_string(&with).unwrap();
+        assert_eq!(
+            json,
+            r#"{"code":"render_failed","message":"m","detail":["main.typ:1:2: error: x"]}"#
+        );
+        assert_eq!(serde_json::from_str::<ErrorResponse>(&json).unwrap(), with);
+        let old: ErrorResponse =
+            serde_json::from_str(r#"{"code":"render_failed","message":"m"}"#).unwrap();
+        assert!(old.detail.is_empty());
     }
 }

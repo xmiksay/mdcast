@@ -23,8 +23,8 @@ the LaTeX toolchain is slow and heavy. The value mdcast adds is the
 ## Quick start
 
 PDF targets need nothing extra — the Typst compiler is embedded in the
-library by default (a `typst` binary is an opt-in alternative — see
-"Selecting the Typst compiler" below). Only the pandoc-backed targets
+library by default (a `typst` binary is an opt-in alternative for the CLI,
+and `mdcast-server`'s default — see "Selecting the Typst compiler" below). Only the pandoc-backed targets
 (docx/odt/pptx/html-reveal) need the `pandoc` binary:
 
 ```sh
@@ -820,7 +820,7 @@ keep the branch coarse (chrome vs. no chrome) rather than sprinkling
 ### CLI
 
 ```
-mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
 ```
 
 `--data` is a JSON file deserialized straight into `TemplateDoc.data`.
@@ -846,15 +846,32 @@ cannot offer:
   / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it. The
   timeout is per child: a render that also runs the SVG-outline child (see
   below) can take up to about **2×** the timeout end to end.
-- **A memory cap.** `--typst-timeout-secs`'s server-only sibling
+- **Resource caps.** `--typst-timeout-secs`'s server-only sibling
   `MDCAST_TYPST_MAX_MEMORY_BYTES` applies `setrlimit(RLIMIT_AS)` to the child
   (unix only). Every `cli`-mode child also runs with core dumps disabled
-  (`RLIMIT_CORE` = 0), so one stopped by the cap cannot fill the disk.
+  (`RLIMIT_CORE` = 0), a file-size cap (`RLIMIT_FSIZE`, the output cap below
+  plus 1 MiB) and a CPU-time cap (`RLIMIT_CPU`, (timeout + 1) × cores + 5
+  seconds — a backstop behind the wall-clock timeout, not a replacement).
+  The finished artifact is checked against `--typst-max-output-bytes` /
+  `MDCAST_TYPST_MAX_OUTPUT_BYTES` (default 256 MiB) *before* it is read into
+  memory; a bigger one fails the render.
+- **A sealed-off child.** It runs with `--ignore-system-fonts` (only the
+  fonts the render supplies, plus typst's embedded ones), an empty
+  `--package-path`/`--package-cache-path`, and an environment cleared down to
+  `PATH`, a `HOME`/`XDG_CACHE_HOME` inside its temp dir, and proxy variables
+  pointing at a closed loopback port — so `#import "@preview/…"` fails at
+  once instead of downloading from packages.typst.org, and the server's own
+  environment (`MDCAST_TOKEN` above all) never reaches it. The SVG-outline
+  child gets the same cleared environment.
 - **HTML export without the `typst-html` cargo feature** — see above.
 
 The SVG-outline pre-step (see "SVG text on the typst targets" above) runs under the same timeout
 and memory cap in `cli` mode, as a second short-lived child: the `mdcast` /
 `mdcast-server` binary re-executes itself in a hidden `__outline-svg` mode.
+
+The `--ignore-system-fonts`, `--package-path`, `--package-cache-path` and
+`--diagnostic-format` flags this relies on exist in every typst CLI from 0.11
+on; the container image pins 0.14.2.
 
 `--typst-bin PATH` / `MDCAST_TYPST_BIN` (default `typst`) picks the binary;
 it is looked up on `PATH` if it isn't itself a path. The CLI binary's Typst
@@ -866,8 +883,11 @@ and `cli` mode, or between two `cli`-mode deployments pinned to different
 startup so that skew is visible rather than silently discovered later as a
 rendering difference.
 
-`library` is the default everywhere: a deployment or CLI invocation that sets
-none of `--typst-compiler`/`MDCAST_TYPST` sees exactly the pre-#73 behaviour.
+`library` is the CLI's default and stays selectable everywhere, but
+**`mdcast-server` defaults to `cli`** (issue #96): the server compiles
+templates its callers wrote, which is exactly the case the bounds above
+exist for. Set `MDCAST_TYPST=library` to opt back into the in-process
+compiler for a server whose callers are all trusted.
 
 **Security note.** In-process, Typst's `World` is a virtual filesystem that
 cannot reach the host disk at all. `cli` mode's temp directory is real, with
@@ -1045,9 +1065,9 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr] [--chess]
-mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
@@ -1098,8 +1118,23 @@ MDCAST_TOKEN=$(openssl rand -hex 32) \
   ./target/release/mdcast-server
 ```
 
+PDF renders need a `typst` binary on `PATH` (the server's default
+`MDCAST_TYPST=cli`; the container image ships one) — or set
+`MDCAST_TYPST=library` to compile in-process instead.
+
 The API is **synchronous**: `POST /v1/render` blocks until the artifact exists
 and the response body *is* the artifact. No job ids, no polling.
+
+Renders are **concurrency-limited** (issue #96): at most
+`MDCAST_MAX_CONCURRENT_RENDERS` run at once, across both render routes. A
+render takes its slot only after its request has been validated and its
+manifest resolved — a `400` or a `409` round trip never occupies one — and
+holds it until the artifact is built. One that cannot get a slot within
+`MDCAST_RENDER_QUEUE_SECS` is answered `503` with code `overloaded` and a
+`Retry-After` of the queue time (at least 1 s). Blob check/upload, `/health`
+and `/v1/capabilities` are never limited. Size the limit so that N ×
+`MDCAST_TYPST_MAX_MEMORY_BYTES` plus `MDCAST_MAX_CACHE_BYTES` fits the
+container's memory limit.
 
 ### Environment
 
@@ -1112,10 +1147,14 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_MAX_CACHE_LIVES`  | `32`                     | Ceiling repeated hits can grow a blob's lives to |
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Maximum size of **any** request body, uploads included |
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
-| `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shell out to a `typst` binary per compile, killable and memory-boundable) — see "Selecting the Typst compiler" above |
+| `MDCAST_TYPST`            | `cli`                    | `cli` (shell out to a sealed-off `typst` binary per compile, killable and resource-capped — the server default since issue #96) or `library` (in-process, no time or memory limit — trusted callers only) — see "Selecting the Typst compiler" above |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path |
 | `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline) — each gets the full value, so a render's worst case is ~2× this; the child is killed and reaped on expiry |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on each `cli`-mode child — typst compile and SVG outline (unix only) |
+| `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli`-mode compile may produce — checked before the file is read into memory, and enforced on the child as `RLIMIT_FSIZE` (+1 MiB) |
+| `MDCAST_MAX_CONCURRENT_RENDERS` | number of CPUs     | Renders allowed to run at once (both render routes together); `0` refuses to start |
+| `MDCAST_RENDER_QUEUE_SECS` | `10`                    | How long a render waits for a slot before a `503 overloaded` (`Retry-After` = this, min 1); `0` = don't wait |
+| `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true`: a `422 render_failed` also carries `detail`, the typst errors and warnings as `path:line:col: severity: message` with virtual paths only (temp-dir paths stripped). Off, the response is just the incident id |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
 An unset token doesn't just relax auth on a route — the `require_bearer`
@@ -1200,18 +1239,24 @@ curl -sS localhost:8080/v1/capabilities
 entries (`pdf`, `pdf-presentation`) are always present, and the pandoc-backed
 ones (`docx`, `odt`, `pptx`, `html-reveal`) appear only when the server found
 a working `pandoc` binary at startup. `template_formats` includes `html`
-only when this deployment can actually export it — `MDCAST_TYPST=cli`, or a
-`library`-mode build with `--features typst-html`. `max_upload_bytes` echoes
+only when this deployment can actually export it — `MDCAST_TYPST=cli` (the
+default), or a `library`-mode build with `--features typst-html`. `max_upload_bytes` echoes
 `MDCAST_MAX_UPLOAD_BYTES`, so a client can reject an oversized bundle before
 any round trip instead of discovering the limit via `413`.
 
 Status codes: `400` malformed request, `401` missing/wrong token, `409`
 missing blobs (see below), `413` body over the limit, `422` the render itself
-failed, `501` this build has no engine/feature for what was asked, `500`
+failed, `501` this build has no engine/feature for what was asked, `503`
+every render slot stayed busy (`overloaded`, with `Retry-After`), `500`
 anything else. Every one of them carries `{"code": …, "message": …}`
 (`ErrorCode` in `mdcast-api`) — except `409`, which has its own shape because
 a client *acts* on it. Internal error text never reaches the client: it is
-logged with an incident id that the response quotes.
+logged with an incident id that the response quotes. The one opt-in
+exception: with `MDCAST_EXPOSE_DIAGNOSTICS=1`, a `422` from a typst compile
+also carries `"detail": ["main.typ:2:9: error: unclosed delimiter", …]`, so a
+template author sees the real error — in either compiler mode, from either
+render route. A code a client does not know decodes as `ErrorCode::Unknown`
+rather than failing the body.
 
 ### Assets: content-addressed, negotiated
 
@@ -1270,26 +1315,53 @@ and frontmatter in the submitted markdown wins over the request's `meta`
 field. `POST /v1/render/template` is the `render-template` path: the template
 arrives as inline typst source, `data` is raw JSON text that becomes the
 virtual `/data.json`, and sibling files it `#import`s or `#image`s come from
-the manifest — plus any `generated` entries (see "QR codes" and "Chess diagrams" above). With `MDCAST_TYPST=library` (the default), `"format": "html"`
+the manifest — plus any `generated` entries (see "QR codes" and "Chess diagrams" above). With `MDCAST_TYPST=library`, `"format": "html"`
 needs a server built with `--features server,typst-html`; without it the
 request gets a `501` saying so, never a PDF with the wrong content type. With
-`MDCAST_TYPST=cli` it needs no such build feature at all — see "Selecting the
-Typst compiler" above.
+`MDCAST_TYPST=cli` (the default) it needs no such build feature at all — see
+"Selecting the Typst compiler" above.
+
+### Running in Kubernetes
+
+The image (`Dockerfile`) runs as the unprivileged UID/GID `10001` and writes
+only under `/tmp` (`TMPDIR` and `HOME` both point there: the blob mirror,
+the typst and pandoc temp directories). Recommended pod settings:
+
+```yaml
+securityContext:            # pod
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+containers:
+  - name: mdcast
+    securityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities: { drop: ["ALL"] }
+    volumeMounts:
+      - { name: tmp, mountPath: /tmp }
+volumes:
+  - name: tmp
+    emptyDir: { sizeLimit: 1Gi }   # >= MDCAST_MAX_CONCURRENT_RENDERS × MDCAST_TYPST_MAX_OUTPUT_BYTES + the blob mirror
+```
+
+Locally the same shape is `docker run --read-only --tmpfs /tmp --user 10001
+…`. An egress-deny `NetworkPolicy` is still worth adding — the typst child is
+already kept off the network, pandoc is not.
 
 ### Known limitations
 
-- **`MDCAST_TYPST=library` (the default) has no compile time or memory
-  limit — mitigated by `MDCAST_TYPST=cli` (issue #73).** A template that
-  loops forever wedges one `spawn_blocking` thread for the life of the
-  process — `spawn_blocking` cannot be cancelled, so a timeout would free the
-  request but not the thread. This was a deliberate deferral given the
-  internal trust boundary; `MDCAST_TYPST=cli` (see "Selecting the Typst
-  compiler" above) is that fix, arrived at: each compile runs as a real child
-  process, bounded by `MDCAST_TYPST_TIMEOUT_SECS` (killed and reaped on
-  expiry — the server's thread/process counts return to baseline, which
-  `library` mode cannot offer) and optionally `MDCAST_TYPST_MAX_MEMORY_BYTES`.
-  `library` mode keeps this limitation by design — it is still the default,
-  for a deployment that hasn't opted into `cli` mode.
+- **`MDCAST_TYPST=library` has no compile time or memory limit — which is
+  why the server defaults to `cli` (issues #73, #96).** In `library` mode a
+  template that loops forever wedges one `spawn_blocking` thread for the life
+  of the process — `spawn_blocking` cannot be cancelled, so a timeout would
+  free the request but not the thread. `cli` mode (see "Selecting the Typst
+  compiler" above) runs each compile as a real child process, bounded by
+  `MDCAST_TYPST_TIMEOUT_SECS` (killed and reaped on expiry — the server's
+  thread/process counts return to baseline, which `library` mode cannot
+  offer) plus the memory, file-size, CPU and output caps. Opt into `library`
+  only when every caller is trusted.
 - One instance, one node-local cache. Two instances behind a load balancer
   would each negotiate their own blobs (correct, just wasteful).
 - The response carries the primary artifact only. No current backend produces
@@ -1364,8 +1436,9 @@ wired up, or before a render attempt discovers a target isn't supported.
 | `Transport` | DNS, connect, TLS, timeout — the request never completed |
 | `Unauthorized` | `401` — fix the token, not the payload |
 | `PayloadTooLarge` | `413` — over `MDCAST_MAX_UPLOAD_BYTES`; retrying as-is is hopeless |
+| `Overloaded { message, retry_after }` | `503 overloaded` — every render slot stayed busy; send the same request again after `retry_after` (the server's `Retry-After`) |
 | `BlobsStillMissing` | a `409` that survived the upload and the retry |
-| `Server { status, code, message }` | the server's own `ErrorResponse` — the `ErrorCode` (`render_failed`, `unsupported_target`, `internal`, …) is carried through, not flattened |
+| `Server { status, code, message, detail }` | the server's own `ErrorResponse` — the `ErrorCode` (`render_failed`, `unsupported_target`, `internal`, …) is carried through, not flattened; `detail` holds the typst diagnostics when the server exposes them (`MDCAST_EXPOSE_DIAGNOSTICS`) |
 | `UnexpectedStatus` / `InvalidResponse` | something other than mdcast answered, or its body did not decode |
 | `MissingAsset` / `UnknownDigest` / `DigestMismatch` | the bundle cannot satisfy its own manifest — caught locally, before a round trip, while the asset *key* is still known |
 

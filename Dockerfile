@@ -7,8 +7,13 @@
 #   - typst:  MDCAST_TYPST=cli mode compiles PDF/HTML in a killable child
 #     process with timeout + memory cap (issue #73); pinned to the same 0.14
 #     line as the typst crates, musl build so it runs on slim debian as-is.
-#     `library` mode never invokes it — shipping it just keeps both modes
-#     usable from one image.
+#     It is mdcast-server's default compiler (issue #96); `library` mode
+#     never invokes it — shipping it keeps both modes usable from one image.
+#
+# The final stage runs as an unprivileged, fixed UID/GID (10001) and writes
+# only under /tmp (TMPDIR: the blob mirror, typst and pandoc temp dirs), so it
+# runs unchanged with a read-only root filesystem and a size-limited emptyDir
+# (or tmpfs) mounted at /tmp — see README's "Running in Kubernetes".
 
 FROM rust:1.97-bookworm AS build
 WORKDIR /app
@@ -17,7 +22,11 @@ COPY mdcast-api/ mdcast-api/
 COPY mdcast-client/ mdcast-client/
 COPY src/ src/
 COPY embedded/ embedded/
-RUN cargo build --release --features server --bin mdcast-server
+# `--build-arg CARGO_BUILD_JOBS=4` caps rustc parallelism on a shared host;
+# unset, the build uses every core.
+ARG CARGO_BUILD_JOBS
+RUN CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-$(nproc)}" \
+    cargo build --release --features server --bin mdcast-server
 
 FROM debian:bookworm-slim
 ARG TYPST_VERSION=v0.14.2
@@ -30,11 +39,18 @@ RUN apt-get update \
     && curl -fsSL "https://github.com/typst/typst/releases/download/${TYPST_VERSION}/typst-x86_64-unknown-linux-musl.tar.xz" \
        | tar -xJ --strip-components=1 -C /usr/local/bin typst-x86_64-unknown-linux-musl/typst \
     && apt-get purge -y curl xz-utils && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system --gid 10001 mdcast \
+    && useradd --system --uid 10001 --gid 10001 --no-create-home \
+       --home-dir /tmp --shell /usr/sbin/nologin mdcast
 WORKDIR /app
 COPY --from=build /app/target/release/mdcast-server ./
 # Loopback is useless inside a container; everything else keeps the
 # documented MDCAST_* defaults.
 ENV MDCAST_BIND=0.0.0.0:8080
+# HOME too: pandoc and anything else defaulting to $HOME must land on the one
+# writable mount.
+ENV TMPDIR=/tmp HOME=/tmp
+USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["./mdcast-server"]

@@ -23,7 +23,7 @@ use mdcast::{
 };
 
 use crate::blobs::BlobAssets;
-use crate::error::{ApiError, json_body};
+use crate::error::{ApiError, json_body, render_failed};
 
 use super::{AppState, artifact_response, content_type};
 
@@ -53,6 +53,8 @@ pub async fn markdown(
     let blobs = BlobAssets::resolve(state.store.clone(), assets)
         .await
         .map_err(ApiError::MissingBlobs)?;
+    // Only now: a 400 or a 409 round trip never occupies a render slot.
+    let _slot = state.render_gate.enter().await?;
 
     // Blobs over the built-in catalog — also what a `<qr path="…">` tag reads
     // through, so it resolves the same keys the render itself will.
@@ -69,7 +71,7 @@ pub async fn markdown(
         .registry
         .render_to_bytes(target, &doc, &provider)
         .await
-        .map_err(ApiError::RenderFailed)?;
+        .map_err(render_failed(state.expose_diagnostics))?;
 
     Ok(artifact_response(content_type(target), artifact))
 }

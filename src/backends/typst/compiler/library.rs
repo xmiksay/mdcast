@@ -9,7 +9,8 @@ use typst::syntax::{FileId, Source, VirtualPath};
 use typst_as_lib::TypstEngine;
 
 use super::{CompileFormat, CompileInputs};
-use crate::backends::typst::{format_diagnostics, format_lib_error, forward_warnings};
+use crate::backends::typst::diagnostics;
+use crate::backends::typst::forward_warnings;
 
 pub(super) fn compile(inputs: CompileInputs) -> Result<Vec<u8>> {
     let mut sources: Vec<Source> = Vec::with_capacity(inputs.sources.len());
@@ -17,6 +18,9 @@ pub(super) fn compile(inputs: CompileInputs) -> Result<Vec<u8>> {
         let id = FileId::new(None, VirtualPath::new(&path));
         sources.push(Source::new(id, content));
     }
+    // Kept for span → line/column in a failure's diagnostics; `Source` is a
+    // cheap `Arc` clone.
+    let lookup = sources.clone();
     let file_refs: Vec<(&str, Vec<u8>)> = inputs
         .files
         .iter()
@@ -39,11 +43,14 @@ pub(super) fn compile(inputs: CompileInputs) -> Result<Vec<u8>> {
         CompileFormat::Pdf => {
             let result = engine.compile(inputs.main.as_str());
             forward_warnings(&result.warnings);
-            let doc = result.output.map_err(format_lib_error)?;
+            let doc = result
+                .output
+                .map_err(|e| lib_error(e, &result.warnings, &lookup))?;
             let options = typst_pdf::PdfOptions::default();
-            typst_pdf::pdf(&doc, &options).map_err(format_diagnostics)
+            typst_pdf::pdf(&doc, &options)
+                .map_err(|e| diagnostics::from_source(e, &result.warnings, &lookup))
         }
-        CompileFormat::Html => compile_html(&engine, &inputs.main),
+        CompileFormat::Html => compile_html(&engine, &inputs.main, &lookup),
     }
 }
 
@@ -51,11 +58,15 @@ pub(super) fn compile(inputs: CompileInputs) -> Result<Vec<u8>> {
 fn compile_html(
     engine: &TypstEngine<typst_as_lib::TypstTemplateCollection>,
     main: &str,
+    lookup: &[Source],
 ) -> Result<Vec<u8>> {
     let result: typst::diag::Warned<Result<typst_html::HtmlDocument, _>> = engine.compile(main);
     forward_warnings(&result.warnings);
-    let doc = result.output.map_err(format_lib_error)?;
-    let html = typst_html::html(&doc).map_err(format_diagnostics)?;
+    let doc = result
+        .output
+        .map_err(|e| lib_error(e, &result.warnings, lookup))?;
+    let html = typst_html::html(&doc)
+        .map_err(|e| diagnostics::from_source(e, &result.warnings, lookup))?;
     Ok(html.into_bytes())
 }
 
@@ -67,9 +78,25 @@ fn compile_html(
 fn compile_html(
     _engine: &TypstEngine<typst_as_lib::TypstTemplateCollection>,
     _main: &str,
+    _lookup: &[Source],
 ) -> Result<Vec<u8>> {
     anyhow::bail!(
         "HTML export via the in-process Typst compiler requires mdcast's `typst-html` build \
          feature; select the `cli` compiler instead to export HTML without it"
     )
+}
+
+/// Only a source-level failure has diagnostics to report; anything else
+/// (`typst-as-lib` itself failing to find the main file, say) stays prose.
+fn lib_error(
+    err: typst_as_lib::TypstAsLibError,
+    warnings: &[typst::diag::SourceDiagnostic],
+    lookup: &[Source],
+) -> anyhow::Error {
+    match err {
+        typst_as_lib::TypstAsLibError::TypstSource(errors) => {
+            diagnostics::from_source(errors, warnings, lookup)
+        }
+        other => anyhow::anyhow!(other.to_string()),
+    }
 }

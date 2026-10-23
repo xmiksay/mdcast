@@ -94,6 +94,7 @@ server = [
     "dep:lru",
     "tokio/net",
     "tokio/signal",
+    "tokio/sync",
 ]
 # Fetch http(s) image URLs found in markdown through `images::collect_images`
 # instead of leaving them for pandoc to fetch on its own (or, on the typst
