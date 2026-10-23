@@ -29,6 +29,7 @@ pub async fn capabilities(State(state): State<Arc<AppState>>) -> Json<Capabiliti
     Json(CapabilitiesResponse {
         targets,
         template_formats,
+        generators: mdcast::generators::available(),
         max_upload_bytes: state.max_upload_bytes,
         version: env!("CARGO_PKG_VERSION").to_string(),
     })

@@ -39,6 +39,6 @@ pub use doc::{DocMeta, Target};
 pub use manifest::AssetManifest;
 pub use wire::{
     BlobCheckRequest, BlobCheckResponse, CapabilitiesResponse, ErrorCode, ErrorResponse,
-    MissingBlob, MissingBlobsError, RenderMarkdownRequest, RenderOptions, RenderTemplateRequest,
-    TemplateFormat,
+    GeneratedAsset, GeneratedSpec, Generator, MissingBlob, MissingBlobsError, QrEcLevel,
+    RenderMarkdownRequest, RenderOptions, RenderTemplateRequest, TemplateFormat,
 };

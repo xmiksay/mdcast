@@ -2,7 +2,7 @@
 //!
 //! Every step here has a `mdcast render` flag behind it (see
 //! `bin/mdcast/main.rs`): frontmatter extraction, the `HtmlImageTags`
-//! preprocessor, the mermaid pre-step, page splitting and classification,
+//! preprocessor, the mermaid and QR pre-steps, page splitting and classification,
 //! layout assets/fonts, TOC depth. Nothing the CLI cannot do is reachable
 //! through the wire protocol, and nothing it does is skipped.
 
@@ -54,8 +54,11 @@ pub async fn markdown(
         .await
         .map_err(ApiError::MissingBlobs)?;
 
-    let (doc, diagrams) = resolve_doc(&markdown, meta, brand, &options);
-    let provider = provider_stack(blobs, diagrams);
+    // Blobs over the built-in catalog — also what a `<qr path="…">` tag reads
+    // through, so it resolves the same keys the render itself will.
+    let base = over_embedded(blobs);
+    let (doc, generated) = resolve_doc(&markdown, meta, brand, &options, &base).await;
+    let provider = provider_stack(base, generated);
 
     tracing::info!(
         target = target.as_str(),
@@ -72,13 +75,14 @@ pub async fn markdown(
 }
 
 /// The CLI's `load_doc`, minus the filesystem. Returns the document plus any
-/// mermaid SVGs the pre-step produced, which the caller has to layer over the
-/// provider stack for the render to resolve them.
-fn resolve_doc(
+/// SVGs the mermaid/QR pre-steps produced, which the caller has to layer over
+/// the provider stack for the render to resolve them.
+async fn resolve_doc(
     markdown: &str,
     meta: DocMeta,
     brand: Option<BrandSpec>,
     options: &RenderOptions,
+    assets: &dyn AssetProvider,
 ) -> (ResolvedDoc, Vec<(String, Bytes)>) {
     // Frontmatter in the submitted body wins over the request's `meta` field:
     // it travels with the document, so it is the more specific statement.
@@ -93,11 +97,18 @@ fn resolve_doc(
     };
     let markdown = preprocessor.preprocess(&markdown);
 
-    let (markdown, diagrams) = if options.mermaid {
+    let (markdown, mut generated) = if options.mermaid {
         let rendered = mdcast::mermaid::render_diagrams(&markdown);
         (rendered.markdown, rendered.svgs)
     } else {
         (markdown, Vec::new())
+    };
+    let markdown = if options.qr {
+        let rendered = mdcast::generators::qr::render_qr_codes(&markdown, assets).await;
+        generated.extend(rendered.svgs);
+        rendered.markdown
+    } else {
+        markdown
     };
 
     let pages = classify(DefaultSplitter.split(&markdown), &brand.auto_layout);
@@ -109,7 +120,7 @@ fn resolve_doc(
         fonts: as_refs(&options.layout_fonts),
         toc: options.toc_depth,
     };
-    (doc, diagrams)
+    (doc, generated)
 }
 
 fn as_refs(keys: &[String]) -> Vec<AssetRef> {
@@ -129,19 +140,25 @@ fn merge_meta(base: DocMeta, front_matter: DocMeta) -> DocMeta {
     }
 }
 
-/// Innermost first: the built-in catalog, the request's blobs over it, and the
-/// mermaid SVGs over both. Layering blobs *over* `EmbeddedAssets` is what lets
-/// a request override `reference/reference.docx` or a typst layout while
-/// everything it does not mention still resolves to the built-in.
-fn provider_stack(blobs: BlobAssets, diagrams: Vec<(String, Bytes)>) -> Box<dyn AssetProvider> {
-    let provider: Box<dyn AssetProvider> = Box::new(LayeredAssets {
+fn over_embedded(blobs: BlobAssets) -> Box<dyn AssetProvider> {
+    Box::new(LayeredAssets {
         over: blobs,
         base: EmbeddedAssets,
-    });
-    if diagrams.is_empty() {
+    })
+}
+
+/// `provider` is the request's blobs over the built-in catalog; the generated
+/// (mermaid/QR) SVGs go over both. Layering blobs *over* `EmbeddedAssets` is
+/// what lets a request override `reference/reference.docx` or a typst layout
+/// while everything it does not mention still resolves to the built-in.
+fn provider_stack(
+    provider: Box<dyn AssetProvider>,
+    generated: Vec<(String, Bytes)>,
+) -> Box<dyn AssetProvider> {
+    if generated.is_empty() {
         return provider;
     }
-    let svgs: HashMap<String, Bytes> = diagrams.into_iter().collect();
+    let svgs: HashMap<String, Bytes> = generated.into_iter().collect();
     Box::new(LayeredAssets {
         over: sync_provider(move |key| Ok(svgs.get(key).cloned())),
         base: provider,
@@ -152,12 +169,26 @@ fn provider_stack(blobs: BlobAssets, diagrams: Vec<(String, Bytes)>) -> Box<dyn 
 mod tests {
     use super::*;
 
-    fn doc(markdown: &str, options: RenderOptions) -> ResolvedDoc {
-        resolve_doc(markdown, DocMeta::default(), None, &options).0
+    async fn resolve(
+        markdown: &str,
+        options: RenderOptions,
+    ) -> (ResolvedDoc, Vec<(String, Bytes)>) {
+        resolve_doc(
+            markdown,
+            DocMeta::default(),
+            None,
+            &options,
+            &EmbeddedAssets,
+        )
+        .await
     }
 
-    #[test]
-    fn frontmatter_wins_over_the_requests_meta() {
+    async fn doc(markdown: &str, options: RenderOptions) -> ResolvedDoc {
+        resolve(markdown, options).await.0
+    }
+
+    #[tokio::test]
+    async fn frontmatter_wins_over_the_requests_meta() {
         let meta = DocMeta {
             title: Some("from the request".into()),
             author: Some("kept".into()),
@@ -165,7 +196,14 @@ mod tests {
         };
         let markdown = "---\ntitle: from the document\n---\n\n# Body";
 
-        let (doc, _) = resolve_doc(markdown, meta, None, &RenderOptions::default());
+        let (doc, _) = resolve_doc(
+            markdown,
+            meta,
+            None,
+            &RenderOptions::default(),
+            &EmbeddedAssets,
+        )
+        .await;
 
         assert_eq!(doc.meta.title.as_deref(), Some("from the document"));
         assert_eq!(
@@ -175,8 +213,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn options_land_on_the_resolved_doc() {
+    #[tokio::test]
+    async fn options_land_on_the_resolved_doc() {
         let options = RenderOptions {
             toc_depth: Some(3),
             layout_assets: vec!["branding/logo.svg".into()],
@@ -184,7 +222,7 @@ mod tests {
             ..RenderOptions::default()
         };
 
-        let doc = doc("# Hi", options);
+        let doc = doc("# Hi", options).await;
 
         assert_eq!(doc.toc, Some(3));
         assert_eq!(
@@ -200,12 +238,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn html_image_tags_is_off_unless_asked_for() {
+    #[tokio::test]
+    async fn html_image_tags_is_off_unless_asked_for() {
         let markdown = "<img src=\"img/a.png\" alt=\"A\">";
 
         assert!(
-            doc(markdown, RenderOptions::default()).pages[0]
+            doc(markdown, RenderOptions::default()).await.pages[0]
                 .body
                 .contains("<img")
         );
@@ -215,32 +253,24 @@ mod tests {
                 html_image_tags: true,
                 ..RenderOptions::default()
             },
-        );
+        )
+        .await;
         assert!(rewritten.pages[0].body.contains("![A](img/a.png)"));
     }
 
-    #[test]
-    fn mermaid_fences_become_image_refs_with_their_svgs_alongside() {
+    #[tokio::test]
+    async fn mermaid_fences_become_image_refs_with_their_svgs_alongside() {
         let markdown = "```mermaid\npie\n\"A\" : 1\n```\n";
 
-        let (plain, none) = resolve_doc(
-            markdown,
-            DocMeta::default(),
-            None,
-            &RenderOptions::default(),
-        );
+        let (plain, none) = resolve(markdown, RenderOptions::default()).await;
         assert!(plain.pages[0].body.contains("```mermaid"));
         assert!(none.is_empty());
 
-        let (rendered, diagrams) = resolve_doc(
-            markdown,
-            DocMeta::default(),
-            None,
-            &RenderOptions {
-                mermaid: true,
-                ..RenderOptions::default()
-            },
-        );
+        let options = RenderOptions {
+            mermaid: true,
+            ..RenderOptions::default()
+        };
+        let (rendered, diagrams) = resolve(markdown, options).await;
         assert!(
             rendered.pages[0]
                 .body
@@ -248,6 +278,30 @@ mod tests {
         );
         assert_eq!(diagrams.len(), 1);
         assert_eq!(diagrams[0].0, "mermaid/diagram-0.svg");
+    }
+
+    #[tokio::test]
+    async fn qr_blocks_render_only_when_asked_and_read_paths_through_the_provider() {
+        let markdown = "```qr\nSPD*1.0\n```\n\n<qr path=\"pay.txt\">\n";
+        let assets = mdcast::sync_provider(|key| {
+            Ok((key == "pay.txt").then(|| Bytes::from_static(b"SPD*1.0*AM:1")))
+        });
+
+        let (plain, none) = resolve(markdown, RenderOptions::default()).await;
+        assert!(plain.pages[0].body.contains("```qr"));
+        assert!(none.is_empty());
+
+        let options = RenderOptions {
+            qr: true,
+            ..RenderOptions::default()
+        };
+        let (rendered, svgs) =
+            resolve_doc(markdown, DocMeta::default(), None, &options, &assets).await;
+        let body = &rendered.pages[0].body;
+        assert!(body.contains("![](qr/qr-0.svg)"), "{body}");
+        assert!(body.contains("![](qr/qr-1.svg)"), "{body}");
+        let keys: Vec<_> = svgs.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["qr/qr-0.svg", "qr/qr-1.svg"]);
     }
 
     #[tokio::test]
@@ -262,7 +316,7 @@ mod tests {
         let blobs = BlobAssets::resolve(store, manifest).await.ok().unwrap();
 
         let provider = provider_stack(
-            blobs,
+            over_embedded(blobs),
             vec![(
                 "mermaid/diagram-0.svg".into(),
                 Bytes::from_static(b"<svg/>"),

@@ -2,7 +2,7 @@
 //! out of `negotiation.rs` to keep both files under the size cap.
 
 use mdcast_api::Target;
-use mdcast_api::wire::{CapabilitiesResponse, TemplateFormat};
+use mdcast_api::wire::{CapabilitiesResponse, Generator, TemplateFormat};
 use mdcast_client::Client;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -21,6 +21,7 @@ fn response() -> CapabilitiesResponse {
     CapabilitiesResponse {
         targets: vec![Target::Pdf, Target::PdfPresentation],
         template_formats: vec![TemplateFormat::Pdf],
+        generators: vec![Generator::Qr],
         max_upload_bytes: 268_435_456,
         version: "0.3.0".to_string(),
     }

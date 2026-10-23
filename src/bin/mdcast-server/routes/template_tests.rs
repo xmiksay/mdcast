@@ -176,3 +176,60 @@ async fn a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request(
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(response).await["code"], "render_failed");
 }
+
+fn generated_request(generated: serde_json::Value, assets: serde_json::Value) -> Request<Body> {
+    json_request(
+        "/v1/render/template",
+        serde_json::json!({
+            "template_source": "#image(\"qr.svg\", width: 3cm)\n",
+            "data": "{}",
+            "assets": assets,
+            "generated": generated,
+        }),
+    )
+}
+
+#[tokio::test]
+async fn a_generated_qr_code_is_served_at_its_path() {
+    let (app, _) = app();
+    let generated = serde_json::json!([{"path": "qr.svg", "kind": "qr", "data": "SPD*1.0*AM:1"}]);
+
+    let (status, response) = send(&app, generated_request(generated, serde_json::json!({}))).await;
+
+    let body = body_bytes(response).await;
+    assert_eq!(status, StatusCode::OK, "{body:?}");
+    assert!(body.starts_with(b"%PDF-"));
+}
+
+#[tokio::test]
+async fn an_unencodable_generated_entry_is_a_400_naming_it() {
+    let (app, _) = app();
+    let generated = serde_json::json!([{"path": "qr.svg", "kind": "qr", "data": ""}]);
+
+    let (status, response) = send(&app, generated_request(generated, serde_json::json!({}))).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let message = body_json(response).await["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("\"qr.svg\""), "{message}");
+}
+
+#[tokio::test]
+async fn a_generated_path_colliding_with_the_manifest_is_a_400_before_any_409() {
+    let (app, _) = app();
+    let generated = serde_json::json!([{"path": "qr.svg", "kind": "qr", "data": "x"}]);
+    // Never uploaded: the collision must be reported instead of a 409.
+    let assets = serde_json::json!({"qr.svg": sha256(b"never uploaded").as_str()});
+
+    let (status, response) = send(&app, generated_request(generated, assets)).await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body_json(response).await["message"]
+            .as_str()
+            .unwrap()
+            .contains("collides")
+    );
+}

@@ -357,6 +357,56 @@ never fails the render. Supported diagram types (pie, sequence, flowchart,
 state, class, ER, gantt, …) are whatever the bundled `mermaid-svg` version
 supports — see its [gallery](https://docs.rs/mermaid-svg).
 
+## QR codes (`qr` feature)
+
+With the `qr` feature (on by default), mdcast renders QR codes to SVG itself
+(via the [`qrcode`](https://crates.io/crates/qrcode) crate, default features
+off), in markdown and in template renders.
+
+**Markdown** — a fence or a tag; the tag form matches the F13 sites'
+directive convention:
+
+````markdown
+```qr ec=H size=large
+SPD*1.0*ACC:CZ6508000000192000145399*AM:480.55*CC:CZK
+```
+
+Scan <qr>https://example.com</qr> to open the site.
+
+<qr path="payments/invoice-42.txt" size="small">
+````
+
+| Attribute | Values | Default |
+|---|---|---|
+| `ec` | `L`, `M`, `Q`, `H` (error correction) | `M` |
+| `size` | `small` (2 cm), `large` (6 cm) | 4 cm, quiet zone included |
+| `path` | asset key whose text content is encoded (tags only) | — |
+
+A fence encodes its content minus the closing newline; a tag's content is
+trimmed; a `path=` file is read through the asset provider (`--assets`, the
+request manifest) with trailing whitespace trimmed. Tags inside code are left
+alone. Like mermaid, it is a pre-step ahead of the page splitter: each block
+becomes `![](qr/qr-N.svg)` and the SVG resolves through the normal asset
+pipeline in every target. A block that fails (unknown attribute value,
+missing `path`, data too long to encode) warns and stays in the document as
+written. Opt-in per call: CLI `--qr` on `render`/`explain`, wire
+`RenderOptions.qr`, library `generators::qr::render_qr_codes(md, &provider)`.
+
+**Templates** — instead of uploading a QR image it generated itself, a
+template render can ask for one by content (`RenderTemplateRequest.generated`
+on the wire, `--generated FILE.json` on the CLI):
+
+```json
+[{"path": "qr.svg", "kind": "qr", "data": "SPD*1.0*ACC:CZ65…", "ec": "M"}]
+```
+
+The template then uses `#image("qr.svg", width: 3cm)`. `path` is relative to
+the template's directory (the server serves the template at the root). Here a
+bad entry fails the request — `400` naming the entry from the server, an
+error from the CLI — and so does a `path` the manifest/asset directory
+already provides, rather than silently shadowing it. `GET /v1/capabilities`
+lists available kinds under `generators`.
+
 ## Remote images (`remote-images` feature, issue #54)
 
 A page-body `![alt](http://…)` / `![alt](https://…)` reference is never
@@ -620,7 +670,7 @@ keep the branch coarse (chrome vs. no chrome) rather than sprinkling
 ### CLI
 
 ```
-mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast render-template templates/invoice.typ --data invoice.json --out invoice.pdf [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ```
 
 `--data` is a JSON file deserialized straight into `TemplateDoc.data`.
@@ -793,15 +843,16 @@ first.
 
 ```toml
 [features]
-default         = ["pandoc", "typst", "rt-multi-thread", "mermaid"]
+default         = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr"]
 pandoc          = []   # DOCX, ODT, PPTX, html-reveal
 typst           = []   # PDF, PDF-presentation
 typst-html      = []   # render_template_html — experimental HTML export (issue #53), off by default
 remote-images   = []   # fetch http(s) page-body images through collect_images (issue #54), off by default
 mermaid         = []   # render ```mermaid fences to SVG via mermaid-svg (pure Rust)
+qr              = []   # render ```qr fences / <qr> tags / generated template entries to SVG QR codes
 rt-multi-thread = []   # tokio multi-threaded runtime; required by the mdcast binary,
                        # library-only consumers can drop it via default-features = false
-server          = []   # the mdcast-server binary (axum); implies pandoc + typst + mermaid
+server          = []   # the mdcast-server binary (axum); implies pandoc + typst + mermaid + qr
 ```
 
 Build with only what you need:
@@ -836,9 +887,9 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
-mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]
-mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr]
+mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
 ```
 
 Targets: `docx`, `odt`, `pdf`, `pdf-presentation`, `pptx`, `html-reveal`.
@@ -849,7 +900,8 @@ standard `![A](X)` markdown before page splitting, so the auto-classifier and
 both engines see real image nodes.
 
 `--mermaid` renders ```` ```mermaid ```` fenced code blocks to SVG diagrams —
-see "Mermaid diagrams" above.
+see "Mermaid diagrams" above. `--qr` does the same for ```` ```qr ```` fences
+and `<qr>` tags — see "QR codes" above.
 
 `--layout-asset KEY` (repeatable) declares a `ResolvedDoc.assets` entry —
 resolved through `--assets`/the embedded provider and reachable from a typst
@@ -977,7 +1029,8 @@ wired up:
 ```sh
 curl -sS localhost:8080/v1/capabilities
 # {"targets":["pdf","pdf-presentation","docx","odt","pptx","html-reveal"],
-#  "template_formats":["pdf","html"],"max_upload_bytes":268435456,"version":"0.3.0"}
+#  "template_formats":["pdf","html"],"generators":["qr"],
+#  "max_upload_bytes":268435456,"version":"0.5.0"}
 ```
 
 `targets` reflects runtime reality, not build features: the typst-backed
@@ -1049,12 +1102,12 @@ there is no invalidation protocol, and eviction is invisible — a `409` for
 something uploaded last week just means uploading it again.
 
 `POST /v1/render` takes the same options the CLI's `render` does
-(`html_image_tags`, `mermaid`, `toc_depth`, `layout_assets`, `layout_fonts`),
+(`html_image_tags`, `mermaid`, `qr`, `toc_depth`, `layout_assets`, `layout_fonts`),
 and frontmatter in the submitted markdown wins over the request's `meta`
 field. `POST /v1/render/template` is the `render-template` path: the template
 arrives as inline typst source, `data` is raw JSON text that becomes the
 virtual `/data.json`, and sibling files it `#import`s or `#image`s come from
-the manifest. With `MDCAST_TYPST=library` (the default), `"format": "html"`
+the manifest — plus any `generated` entries (see "QR codes" above). With `MDCAST_TYPST=library` (the default), `"format": "html"`
 needs a server built with `--features server,typst-html`; without it the
 request gets a `501` saying so, never a PDF with the wrong content type. With
 `MDCAST_TYPST=cli` it needs no such build feature at all — see "Selecting the
@@ -1190,9 +1243,9 @@ list them:
 
 | Target                  | What it does                                                    |
 |-------------------------|-----------------------------------------------------------------|
-| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid) |
+| `make build` / `release`| Debug / release build of the whole workspace (default features = pandoc + typst + mermaid + qr) |
 | `make check`            | Fast typecheck (default features)                               |
-| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, bin-without-mermaid, default, +typst-html, +remote-images, +server, +server/typst-html) |
+| `make check-all`        | `mdcast-api` and `mdcast-client`, plus all `mdcast` feature combinations (core, pandoc, typst, qr-only, bin-without-mermaid/qr, default, +typst-html, +remote-images, +server, +server/typst-html) |
 | `make fmt` / `lint`     | Apply formatting / fmt-check + clippy with `-D warnings` across the workspace (default + typst-html + remote-images + server features) |
 | `make test`             | Full suite, whole workspace, default features (unit + integration) |
 | `make test-unit`        | In-module `#[cfg(test)]` tests only                             |

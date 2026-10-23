@@ -41,7 +41,7 @@ exclude = [
 ]
 
 [features]
-default = ["pandoc", "typst", "rt-multi-thread", "mermaid"]
+default = ["pandoc", "typst", "rt-multi-thread", "mermaid", "qr"]
 pandoc = ["dep:zip", "dep:quick-xml"]
 # Render ```mermaid fenced code blocks to SVG (pure Rust, no Node/Chromium)
 # via `mermaid::render_diagrams` — a pre-step ahead of the page splitter.
@@ -49,6 +49,10 @@ pandoc = ["dep:zip", "dep:quick-xml"]
 # opt-in per call (CLI `--mermaid` flag / explicit library call), so output
 # is byte-identical for anyone not asking for it.
 mermaid = ["dep:mermaid-svg"]
+# Render ```qr fences / <qr> tags (and `RenderTemplateRequest.generated` QR
+# entries) to SVG via `generators::qr`. Default-on and opt-in per call, same
+# reasoning as `mermaid`.
+qr = ["dep:qrcode"]
 typst = ["dep:typst", "dep:typst-pdf", "dep:typst-as-lib", "dep:serde_json"]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
 # pulls in `typst-html` and flips `typst::Feature::Html` on for every
@@ -68,6 +72,7 @@ server = [
     "pandoc",
     "typst",
     "mermaid",
+    "qr",
     "rt-multi-thread",
     "dep:axum",
     "dep:sha2",
@@ -92,6 +97,7 @@ lru = { version = "0.18", optional = true }
 mdcast-api = { workspace = true, features = ["toml"] }
 mermaid-svg = { version = "0.7", optional = true }
 pulldown-cmark = { version = "0.13", default-features = false }
+qrcode = { version = "0.14", optional = true, default-features = false }
 quick-xml = { version = "0.41", optional = true }
 regex = "1"
 reqwest = { version = "0.12", optional = true, default-features = false, features = [
@@ -138,7 +144,7 @@ required-features = ["rt-multi-thread"]
 [[bin]]
 name = "mdcast-server"
 path = "src/bin/mdcast-server/main.rs"
-required-features = ["server", "pandoc", "typst", "mermaid", "rt-multi-thread"]
+required-features = ["server", "pandoc", "typst", "mermaid", "qr", "rt-multi-thread"]
 
 [package.metadata.docs.rs]
 all-features = true

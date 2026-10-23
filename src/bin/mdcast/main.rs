@@ -3,25 +3,21 @@
 //! supplies the `brand.toml` (auto-layout rules, palette, fonts).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
 use mdcast::backends::Registry;
-use mdcast::pages::auto::classify;
-use mdcast::pages::splitter::DefaultSplitter;
-use mdcast::{
-    AssetRef, BrandHandle, BrandSpec, EmbeddedAssets, HtmlImageTags, Identity, LayeredAssets,
-    MarkdownPreprocessor, PageSplitter, RenderRequest, ResolvedDoc, Target,
-};
+use mdcast::{EmbeddedAssets, LayeredAssets, RenderRequest, Target};
 
 mod fs_assets;
+mod load_doc;
 #[cfg(feature = "typst")]
 mod render_template;
 #[cfg(feature = "typst")]
 mod typst_compiler_args;
 
 use fs_assets::FsAssets;
+use load_doc::{PreSteps, load_doc};
 #[cfg(feature = "typst")]
 use typst_compiler_args::TypstCompilerArgs;
 
@@ -48,17 +44,8 @@ enum Cmd {
         /// supply images referenced from markdown without writing code.
         #[arg(long)]
         assets: Option<PathBuf>,
-        /// Enable the built-in HtmlImageTags preprocessor: `<img src="X">` /
-        /// `<image path="X">` become standard `![](X)` before splitting.
-        #[arg(long, default_value_t = false)]
-        html_image_tags: bool,
-        /// Render ```mermaid fenced code blocks to SVG diagrams (pure Rust,
-        /// no Node/Chromium) before splitting; the SVGs resolve through the
-        /// asset pipeline like any other image. Needs the `mermaid` feature
-        /// (on by default). A diagram that fails to render warns and stays a
-        /// code block.
-        #[arg(long, default_value_t = false)]
-        mermaid: bool,
+        #[command(flatten)]
+        steps: PreSteps,
         /// Request a table of contents at the given heading depth (1-6).
         /// Honoured by docx/odt (`--toc --toc-depth`) and by `pdf` (a leading
         /// `#outline(depth: N)` page); ignored by pdf-presentation/pptx/html-reveal.
@@ -86,12 +73,11 @@ enum Cmd {
         input: PathBuf,
         #[arg(long)]
         brand: Option<PathBuf>,
-        #[arg(long, default_value_t = false)]
-        html_image_tags: bool,
-        /// Same as `render --mermaid` — lets the auto-classifier see the
-        /// diagram as an image (e.g. a diagram-only page classifies image-full).
-        #[arg(long, default_value_t = false)]
-        mermaid: bool,
+        /// Same flags as `render` — lets the auto-classifier see a diagram or
+        /// QR code as an image (e.g. a diagram-only page classifies image-full).
+        /// `<qr path="…">` resolves against the embedded catalog only.
+        #[command(flatten)]
+        steps: PreSteps,
     },
     /// Render a user-supplied typst template against structured data — no
     /// markdown involved. `template` is an AssetProvider key (e.g.
@@ -99,25 +85,8 @@ enum Cmd {
     /// `#import`s/images (see `TemplateDoc`'s docs).
     #[cfg(feature = "typst")]
     RenderTemplate {
-        template: String,
-        /// JSON file read into the template as `json("/data.json")`.
-        #[arg(long)]
-        data: PathBuf,
-        #[arg(short, long)]
-        out: PathBuf,
-        #[arg(long)]
-        brand: Option<PathBuf>,
-        /// Directory layered over `EmbeddedAssets`. Provider keys map to
-        /// relative paths inside this dir — the same `--assets` flag `render`
-        /// uses.
-        #[arg(long)]
-        assets: Option<PathBuf>,
-        /// Output format. `html` always works with `--typst-compiler cli`;
-        /// with the default (`library`) it's only a valid value when the
-        /// binary was built with the `typst-html` feature (off by
-        /// default — see README's "Data-driven template rendering" section).
-        #[arg(long, value_enum, default_value_t = render_template::Format::Pdf)]
-        format: render_template::Format,
+        #[command(flatten)]
+        args: render_template::RenderTemplateArgs,
         #[command(flatten)]
         typst_compiler: TypstCompilerArgs,
     },
@@ -163,19 +132,28 @@ async fn main() -> Result<()> {
             out,
             brand,
             assets,
-            html_image_tags,
-            mermaid,
+            steps,
             toc_depth,
             layout_assets,
             layout_fonts,
             #[cfg(feature = "typst")]
             typst_compiler,
         } => {
-            let (doc, mermaid_svgs) = load_doc(
+            // Provider stack, innermost first: embedded catalog, `--assets`
+            // dir override, then the SVGs the pre-steps render. Boxed because
+            // each layer is optional.
+            let mut provider: Box<dyn mdcast::AssetProvider> = Box::new(EmbeddedAssets);
+            if let Some(dir) = assets {
+                provider = Box::new(LayeredAssets {
+                    over: FsAssets(dir),
+                    base: provider,
+                });
+            }
+            let (doc, generated) = load_doc(
                 &input,
                 brand.as_deref(),
-                html_image_tags,
-                mermaid,
+                steps,
+                &provider,
                 toc_depth,
                 layout_assets,
                 layout_fonts,
@@ -185,19 +163,9 @@ async fn main() -> Result<()> {
             let registry = Registry::with_typst_compiler(typst_compiler.build().await);
             #[cfg(not(feature = "typst"))]
             let registry = Registry::with_defaults();
-            // Provider stack, innermost first: embedded catalog, `--assets`
-            // dir override, rendered mermaid SVGs. Boxed because each layer
-            // is optional.
-            let mut provider: Box<dyn mdcast::AssetProvider> = Box::new(EmbeddedAssets);
-            if let Some(dir) = assets {
-                provider = Box::new(LayeredAssets {
-                    over: FsAssets(dir),
-                    base: provider,
-                });
-            }
-            if !mermaid_svgs.is_empty() {
+            if !generated.is_empty() {
                 let svgs: std::collections::HashMap<String, bytes::Bytes> =
-                    mermaid_svgs.into_iter().collect();
+                    generated.into_iter().collect();
                 provider = Box::new(LayeredAssets {
                     over: mdcast::sync_provider(move |k| Ok(svgs.get(k).cloned())),
                     base: provider,
@@ -214,14 +182,13 @@ async fn main() -> Result<()> {
         Cmd::Explain {
             input,
             brand,
-            html_image_tags,
-            mermaid,
+            steps,
         } => {
             let (doc, _) = load_doc(
                 &input,
                 brand.as_deref(),
-                html_image_tags,
-                mermaid,
+                steps,
+                &EmbeddedAssets,
                 None,
                 Vec::new(),
                 Vec::new(),
@@ -236,144 +203,13 @@ async fn main() -> Result<()> {
         }
         #[cfg(feature = "typst")]
         Cmd::RenderTemplate {
-            template,
-            data,
-            out,
-            brand,
-            assets,
-            format,
+            args,
             typst_compiler,
         } => {
             let compiler = typst_compiler.build().await;
-            let artifact =
-                render_template::run(template, data, out, brand, assets, format, &compiler).await?;
+            let artifact = render_template::run(args, &compiler).await?;
             println!("wrote {}", artifact.primary.display());
         }
     }
     Ok(())
-}
-
-/// Shared by `load_doc` (markdown pipeline) and `render_template::run`
-/// (data-driven template pipeline) — both accept the same `--brand brand.toml`.
-async fn load_brand(brand: Option<&std::path::Path>) -> Result<BrandSpec> {
-    match brand {
-        Some(p) => {
-            let s = tokio::fs::read_to_string(p)
-                .await
-                .with_context(|| format!("read {}", p.display()))?;
-            mdcast::brand::from_toml(&s).with_context(|| format!("parse {}", p.display()))
-        }
-        None => Ok(BrandSpec::default()),
-    }
-}
-
-async fn load_doc(
-    input: &std::path::Path,
-    brand: Option<&std::path::Path>,
-    html_image_tags: bool,
-    mermaid: bool,
-    toc_depth: Option<u8>,
-    layout_assets: Vec<String>,
-    layout_fonts: Vec<String>,
-) -> Result<(ResolvedDoc, Vec<(String, bytes::Bytes)>)> {
-    let md = tokio::fs::read_to_string(input)
-        .await
-        .with_context(|| format!("read {}", input.display()))?;
-    let (meta, md) = mdcast::frontmatter::extract(&md);
-    let brand_spec = load_brand(brand).await?;
-    // Preprocessor stage: rewrites the whole document before any other pipeline
-    // step sees it. The CLI exposes only the built-in HtmlImageTags via flag;
-    // library callers compose their own MarkdownPreprocessor.
-    let preprocessor: Box<dyn MarkdownPreprocessor> = if html_image_tags {
-        Box::new(HtmlImageTags)
-    } else {
-        Box::new(Identity)
-    };
-    let md = preprocessor.preprocess(&md);
-
-    // Mermaid pre-step: after the plain-string preprocessors (an <img> tag
-    // rewrite can't affect a fence), before splitting, so the classifier and
-    // both engines see the diagram as a real image node.
-    #[cfg(feature = "mermaid")]
-    let (md, mermaid_svgs) = if mermaid {
-        let rendered = mdcast::mermaid::render_diagrams(&md);
-        (rendered.markdown, rendered.svgs)
-    } else {
-        (md, Vec::new())
-    };
-    #[cfg(not(feature = "mermaid"))]
-    let mermaid_svgs = {
-        anyhow::ensure!(
-            !mermaid,
-            "this mdcast build does not include the `mermaid` feature"
-        );
-        Vec::new()
-    };
-
-    let raw = DefaultSplitter.split(&md);
-    let pages = classify(raw, &brand_spec.auto_layout);
-    let doc = ResolvedDoc {
-        pages,
-        meta,
-        brand: BrandHandle(Arc::new(brand_spec)),
-        assets: layout_assets
-            .into_iter()
-            .map(|key| AssetRef { key })
-            .collect(),
-        fonts: layout_fonts
-            .into_iter()
-            .map(|key| AssetRef { key })
-            .collect(),
-        toc: toc_depth,
-    };
-    Ok((doc, mermaid_svgs))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn load_doc_turns_layout_asset_flags_into_asset_refs() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.md");
-        tokio::fs::write(&input, "# Hi").await.unwrap();
-
-        let (doc, _) = load_doc(
-            &input,
-            None,
-            false,
-            false,
-            None,
-            vec!["branding/logo.svg".to_string(), "bg.png".to_string()],
-            Vec::new(),
-        )
-        .await
-        .unwrap();
-
-        let keys: Vec<&str> = doc.assets.iter().map(|a| a.key.as_str()).collect();
-        assert_eq!(keys, vec!["branding/logo.svg", "bg.png"]);
-    }
-
-    #[tokio::test]
-    async fn load_doc_turns_layout_font_flags_into_font_refs() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.md");
-        tokio::fs::write(&input, "# Hi").await.unwrap();
-
-        let (doc, _) = load_doc(
-            &input,
-            None,
-            false,
-            false,
-            None,
-            Vec::new(),
-            vec!["fonts/Brand-Regular.ttf".to_string()],
-        )
-        .await
-        .unwrap();
-
-        let keys: Vec<&str> = doc.fonts.iter().map(|a| a.key.as_str()).collect();
-        assert_eq!(keys, vec!["fonts/Brand-Regular.ttf"]);
-    }
 }

@@ -4,6 +4,8 @@ pub mod assets;
 pub mod backends;
 pub mod brand;
 pub mod frontmatter;
+#[cfg(feature = "qr")]
+pub mod generators;
 mod image_format;
 pub mod images;
 #[cfg(feature = "mermaid")]
@@ -21,7 +23,8 @@ use bytes::Bytes;
 pub use mdcast_api;
 
 pub use assets::{
-    AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, async_provider, sync_provider,
+    AssetProvider, BoxFuture, EmbeddedAssets, LayeredAssets, MemoryAssets, async_provider,
+    sync_provider,
 };
 pub use brand::{AutoLayout, BrandSpec};
 // `Target`/`DocMeta` are defined in `mdcast-api` (serde-only, no engine
