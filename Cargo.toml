@@ -63,6 +63,7 @@ typst = [
     "dep:typst-as-lib",
     "dep:typst-assets",
     "dep:usvg",
+    "dep:flate2",
     "dep:serde_json",
 ]
 # Experimental HTML export for `render_template` (issue #53). Off by default:
@@ -135,6 +136,9 @@ typst-as-lib = { version = "0.15", optional = true, features = ["typst-kit-fonts
 # with typst's own bundled fonts before typst sees the SVG (issue #92).
 typst-assets = { version = "0.14", optional = true, features = ["fonts"] }
 usvg = { version = "0.45", optional = true, default-features = false, features = ["text"] }
+# Same flate2/backend usvg already pulls in: `svg_outline.rs` inflates `.svgz`
+# itself under a size cap instead of letting usvg's unbounded `read_to_end` do it.
+flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
 # `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap

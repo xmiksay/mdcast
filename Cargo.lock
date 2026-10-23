@@ -2045,6 +2045,7 @@ dependencies = [
  "bytes",
  "chess-diagram",
  "clap",
+ "flate2",
  "futures",
  "libc",
  "lru",

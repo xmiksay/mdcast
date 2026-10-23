@@ -536,8 +536,8 @@ source image if a warning fires.
 
 ### SVG text on the typst targets
 
-Before typst sees any SVG — a markdown body image, a declared layout asset,
-a template sibling or a `generated` entry, in both `library` and `cli`
+Before typst sees any SVG *file* — a markdown body image, a declared layout
+asset, a template sibling or a `generated` entry, in both `library` and `cli`
 compiler modes — mdcast parses it with `usvg` (the same parser and version
 typst uses) and re-serialises it with every `<text>` converted to outlined
 paths. typst's own SVG-text pipeline can deadlock when text needs mixed font
@@ -546,23 +546,42 @@ fallbacks (e.g. a mermaid label containing `↔`; upstream typst
 [#7178](https://github.com/typst/typst/issues/7178),
 [#6783](https://github.com/typst/typst/issues/6783),
 [#7279](https://github.com/typst/typst/issues/7279)), so any SVG with text
-would otherwise be a way to hang the render.
+would otherwise be a way to hang the render. SVG bytes a template constructs
+itself (`#image(bytes(...))`, an SVG string from `/data.json`) are not files
+and are **not** outlined — the template author controls those.
 
 - **Fonts:** glyphs are outlined with typst's bundled fonts (Libertinus
   Serif, New Computer Modern, DejaVu Sans Mono) plus the document's declared
-  fonts (`ResolvedDoc.fonts` / `TemplateDoc.fonts`) — never system fonts, so
-  output doesn't depend on the host. A `font-family` naming none of them
-  falls back to Libertinus Serif; characters it lacks fall back to any
-  bundled/declared face that has them.
+  fonts (`ResolvedDoc.fonts` / `TemplateDoc.fonts`). A `font-family` naming
+  none of them, or a generic family (`serif`, `sans-serif`, ...), resolves to
+  the first declared font's family — the stand-in for typst's own fallback to
+  the document's text font — or to Libertinus Serif when no fonts are
+  declared (`monospace` stays DejaVu Sans Mono). Characters that face lacks
+  fall back to any bundled/declared face that has them. Unlike typst, system
+  fonts are never consulted, so output doesn't depend on the host.
 - **Consequence:** SVG text in the PDF is vector shapes, not text — it can't
-  be selected, searched or copied. Image size is unchanged.
-- **Detection:** by content (a root `<svg` element) or by a `.svg`/`.svgz`
-  extension.
+  be selected, searched or copied. Image size is unchanged. Relative
+  `<image href>`s resolve against the other compile files and the linked
+  bytes are embedded into the SVG as data URIs.
+- **Detection** mirrors typst 0.14's own rule: a `.svg`/`.svgz` extension is
+  SVG; `.png`/`.jpg`/`.jpeg`/`.gif`/`.webp`/`.pdf` is not; any other key
+  (extensionless, `.svg.gz`, ...) is sniffed — raster magic first, then
+  gzip magic or the SVG namespace within the first 2 KiB.
 - **Unparseable SVG:** warns (`SVG could not be parsed; dropping it`, naming
   the key) and is dropped — typst's own import would have failed on the same
   bytes. A markdown body image then disappears like an unresolved one and a
   layout's `asset-path` falls back to its `default:`; a template that
-  references the file fails on the missing file.
+  references the file fails on the missing file. A file that is SVG only by
+  content sniff and fails to parse is passed through untouched instead (it
+  may be a gzipped data file a template `read()`s).
+- **Resource limits:** outlining runs **in-process** (in `mdcast-server`, in
+  the server process) on a blocking thread, *before* the compile — so it is
+  **not** covered by `MDCAST_TYPST_TIMEOUT_SECS` or
+  `MDCAST_TYPST_MAX_MEMORY_BYTES`, even in `cli` mode. It is bounded by two
+  fixed caps instead: a gzipped SVG (`.svgz`, or nested in an `<image>`) may
+  inflate to at most 32 MiB, and the re-serialised SVG (including linked
+  rasters, re-embedded at every reference) may be at most 64 MiB. Exceeding
+  either warns and drops the SVG like an unparseable one.
 - pandoc targets get the SVG bytes untouched.
 
 ## Table of contents
