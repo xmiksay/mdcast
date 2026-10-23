@@ -245,13 +245,13 @@ fn declared_fonts_are_added_to_the_bundled_set() {
     let bundled = bundled_font_db().len();
     let (extra, _) = brand_font();
     assert_eq!(font_db(&[]).db.len(), bundled);
-    assert!(font_db(&[extra]).db.len() > bundled);
+    assert!(font_db(&[extra.as_slice()]).db.len() > bundled);
 }
 
 #[test]
 fn declared_font_becomes_the_fallback_family() {
     let (font, family) = brand_font();
-    let fonts = font_db(std::slice::from_ref(&font));
+    let fonts = font_db(&[font.as_slice()]);
     assert_eq!(fonts.family, family);
     for generic in [fontdb::Family::Serif, fontdb::Family::SansSerif] {
         assert_eq!(fonts.db.family_name(&generic), family);

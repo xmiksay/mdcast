@@ -74,7 +74,7 @@ src/
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
-│     ├─ process.rs     run_bounded() — the shared child runner: piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, optional RLIMIT_AS (typst compile child and SVG-outline child)
+│     ├─ process.rs     run_bounded() — the shared child runner: piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, RLIMIT_CORE=0 always + optional RLIMIT_AS (typst compile child and SVG-outline child)
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
@@ -438,7 +438,7 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shells out to a `typst` binary per compile — issue #73). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92). Exceeded → the child is killed and reaped before the request's error response is returned |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92) each get the full value, so a render's worst case is ~2× this. Exceeded → the child is killed and reaped before the request's error response is returned |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to each `cli`-mode child (typst compile and SVG outline). Unix-only; a no-op elsewhere |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
@@ -780,10 +780,21 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   `main`, both before any runtime/log subscriber since stdout is the
   response channel), calling `backends::typst::run_outline_child`; both
   binaries set `OutlineCommand::current_exe()` when building a `Cli`
-  compiler. Parent↔child framing is `svg_outline/ipc.rs` (no new deps):
-  all files + declared fonts go over (a linked `<image href>` resolves
-  against siblings), one `Keep`/`Replace`/`Drop(reason)`/`Unparsed(reason)`
-  comes back per file; the parent caps the child's stdout at
+  compiler (`/proc/self/exe` on Linux, so a binary replaced/deleted on disk
+  by a deploy still re-execs the running image; `std::env::current_exe()`
+  elsewhere). `CliCompiler` and `OutlineCommand` are `#[non_exhaustive]` —
+  build them with `CliCompiler::new(..).with_max_memory_bytes(..)
+  .with_outline(..)` / `OutlineCommand::new(program, args)`, never a struct
+  literal. Parent↔child framing is `svg_outline/ipc.rs` (no new deps):
+  `child.rs::select` sends only the SVG candidates, the rasters (by
+  `resolve::linked_kind`, typst's rule) whose name a text-bearing candidate
+  may contain (`may_link`; gzip/`&#`/`<!ENTITY` → conservatively all), and
+  the declared fonts only if some candidate may carry text — never `.typ`/
+  JSON/unlinked photos — because the child shares the compile's `RLIMIT_AS`;
+  `ipc::decode_request` borrows every payload from the one request buffer
+  for the same reason. One `Keep`/`Replace`/`Drop(reason)`/
+  `Unparsed(reason)` comes back per *sent* file and `spread` widens them back
+  (unsent = `Keep`); the parent caps the child's stdout at
   `response_cap(n, MAX_OUTLINED_SVG)` and checks every length against the
   remaining buffer, and logs drops itself (same messages as in-process).
   Timeout, a killed/non-zero child, or a malformed response fails the render

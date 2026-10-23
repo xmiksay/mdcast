@@ -25,7 +25,7 @@ pub(super) struct Fonts {
 /// appears, which we can't know here; the first declared (brand) font stands
 /// in for it as every generic family and the no-match fallback — otherwise a
 /// branded render's diagram labels would come out in Libertinus Serif.
-pub(super) fn font_db(fonts: &[Vec<u8>]) -> Fonts {
+pub(super) fn font_db(fonts: &[&[u8]]) -> Fonts {
     let bundled = bundled_font_db();
     let Some(first) = fonts.first() else {
         return Fonts {
@@ -35,7 +35,7 @@ pub(super) fn font_db(fonts: &[Vec<u8>]) -> Fonts {
     };
     let mut db = (**bundled).clone();
     for font in fonts {
-        db.load_font_data(font.clone());
+        db.load_font_data(font.to_vec());
     }
     let family = family_name(first).unwrap_or_else(|| DEFAULT_FAMILY.to_string());
     db.set_serif_family(family.clone());

@@ -148,7 +148,12 @@ fn outline_files(
     fonts: &[Vec<u8>],
     limits: Limits,
 ) -> (Vec<(String, Vec<u8>)>, HashSet<String>) {
-    let outcomes = classify(&files, fonts, limits);
+    let refs: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect();
+    let fonts: Vec<&[u8]> = fonts.iter().map(Vec::as_slice).collect();
+    let outcomes = classify(&refs, &fonts, limits);
     apply(files, outcomes)
 }
 
@@ -159,11 +164,8 @@ fn outline_files(
 /// data file a template `read()`s — so it passes through untouched; if it
 /// *is* imaged, typst fails on it exactly as usvg just did. Exceeding a cap
 /// always drops: passing it on would hand typst the same bomb.
-fn classify(files: &[(String, Vec<u8>)], fonts: &[Vec<u8>], limits: Limits) -> Vec<Outcome> {
-    let lookup: HashMap<&str, &[u8]> = files
-        .iter()
-        .map(|(p, b)| (p.as_str(), b.as_slice()))
-        .collect();
+fn classify(files: &[(&str, &[u8])], fonts: &[&[u8]], limits: Limits) -> Vec<Outcome> {
+    let lookup: HashMap<&str, &[u8]> = files.iter().copied().collect();
     let mut db = None;
     files
         .iter()
@@ -214,7 +216,7 @@ fn process(
     bytes: &[u8],
     files: &HashMap<&str, &[u8]>,
     db: &mut Option<Fonts>,
-    fonts: &[Vec<u8>],
+    fonts: &[&[u8]],
     limits: Limits,
 ) -> Result<Outcome, Failure> {
     let svg = plain(bytes, limits.inflated)?;

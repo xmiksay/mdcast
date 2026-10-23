@@ -25,12 +25,15 @@ const RESPONSE_MAGIC: &[u8; 4] = b"MDR1";
 /// encode so a valid child never trips the decode check.
 const MAX_REASON: usize = 64 << 10;
 
-pub(super) struct Request {
-    pub files: Vec<(String, Vec<u8>)>,
-    pub fonts: Vec<Vec<u8>>,
+/// Borrows every path and payload from the request buffer: the child runs
+/// under the same `RLIMIT_AS` as the compile, so a second in-memory copy of
+/// the render's inputs would halve what it can take.
+pub(super) struct Request<'a> {
+    pub files: Vec<(&'a str, &'a [u8])>,
+    pub fonts: Vec<&'a [u8]>,
 }
 
-pub(super) fn encode_request(files: &[(String, Vec<u8>)], fonts: &[Vec<u8>]) -> Vec<u8> {
+pub(super) fn encode_request(files: &[(&str, &[u8])], fonts: &[&[u8]]) -> Vec<u8> {
     let payload: usize = files
         .iter()
         .map(|(p, b)| p.len() + b.len() + 12)
@@ -53,21 +56,21 @@ pub(super) fn encode_request(files: &[(String, Vec<u8>)], fonts: &[Vec<u8>]) -> 
     out
 }
 
-pub(super) fn decode_request(buf: &[u8]) -> Result<Request> {
+pub(super) fn decode_request(buf: &[u8]) -> Result<Request<'_>> {
     let mut r = Reader::new(buf, REQUEST_MAGIC)?;
     let n = r.u32()?;
     let mut files = Vec::new();
     for _ in 0..n {
         let len = r.u32()?;
-        let path = std::str::from_utf8(r.take(len)?)?.to_string();
+        let path = std::str::from_utf8(r.take(len)?)?;
         let len = r.u64()?;
-        files.push((path, r.take(len)?.to_vec()));
+        files.push((path, r.take(len)?));
     }
     let n = r.u32()?;
     let mut fonts = Vec::new();
     for _ in 0..n {
         let len = r.u64()?;
-        fonts.push(r.take(len)?.to_vec());
+        fonts.push(r.take(len)?);
     }
     r.finish()?;
     Ok(Request { files, fonts })
@@ -206,20 +209,24 @@ impl<'a> Reader<'a> {
 mod tests {
     use super::*;
 
-    fn files() -> Vec<(String, Vec<u8>)> {
+    fn files() -> Vec<(&'static str, &'static [u8])> {
         vec![
-            ("a.svg".into(), b"<svg/>".to_vec()),
-            ("dir/ü.png".into(), vec![0, 1, 2]),
-            ("empty".into(), Vec::new()),
+            ("a.svg", b"<svg/>"),
+            ("dir/ü.png", &[0, 1, 2]),
+            ("empty", &[]),
         ]
     }
 
     #[test]
-    fn request_round_trips() {
-        let fonts = vec![b"OTTO".to_vec(), Vec::new()];
-        let req = decode_request(&encode_request(&files(), &fonts)).unwrap();
+    fn request_round_trips_borrowing_from_the_buffer() {
+        let fonts: Vec<&[u8]> = vec![b"OTTO", &[]];
+        let buf = encode_request(&files(), &fonts);
+        let req = decode_request(&buf).unwrap();
         assert_eq!(req.files, files());
         assert_eq!(req.fonts, fonts);
+        let inside = buf.as_ptr_range();
+        assert!(inside.contains(&req.files[0].1.as_ptr()));
+        assert!(inside.contains(&req.fonts[0].as_ptr()));
     }
 
     #[test]
@@ -247,7 +254,7 @@ mod tests {
 
     #[test]
     fn every_truncation_is_rejected() {
-        let req = encode_request(&files(), &[b"font".to_vec()]);
+        let req = encode_request(&files(), &[b"font"]);
         for len in 0..req.len() {
             assert!(
                 decode_request(&req[..len]).is_err(),

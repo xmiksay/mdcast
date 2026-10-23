@@ -42,6 +42,14 @@ fn inputs(main: &str, sources: Vec<(&str, &str)>, format: CompileFormat) -> Comp
     }
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn outline_child_is_the_running_image_not_its_path() {
+    let cmd = OutlineCommand::current_exe().unwrap();
+    assert_eq!(cmd.program, Path::new("/proc/self/exe"));
+    assert_eq!(cmd.args, [crate::backends::typst::OUTLINE_CHILD_ARG]);
+}
+
 #[test]
 fn safe_join_rejects_parent_dir_escape() {
     let root = Path::new("/tmp/mdcast-root");

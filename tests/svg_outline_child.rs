@@ -33,11 +33,13 @@ const PNG_1X1: &[u8] = &[
 fn files() -> Vec<(String, Vec<u8>)> {
     [
         ("t.svg", TEXT.as_bytes()),
+        ("main.typ", b"#image(\"t.svg\")"),
         ("plain.svg", NO_TEXT.as_bytes()),
+        ("photo.jpg", b"unlinked, never sent to the child"),
         ("broken.svg", BROKEN.as_bytes()),
+        ("data.json", b"{}"),
         ("linking.svg", LINKING.as_bytes()),
         ("dot.png", PNG_1X1),
-        ("data.json", b"{}"),
     ]
     .into_iter()
     .map(|(p, b)| (p.to_string(), b.to_vec()))
@@ -48,10 +50,7 @@ fn child_compiler(program: &str, timeout: Duration, max_memory: Option<u64>) -> 
     TypstCompiler::Cli(
         CliCompiler::new("typst", timeout)
             .with_max_memory_bytes(max_memory)
-            .with_outline(Some(OutlineCommand {
-                program: program.into(),
-                args: vec![OUTLINE_CHILD_ARG.to_string()],
-            })),
+            .with_outline(Some(OutlineCommand::new(program, [OUTLINE_CHILD_ARG]))),
     )
 }
 
@@ -86,6 +85,8 @@ async fn assert_child_matches_in_process(program: &str) {
     );
     assert!(String::from_utf8_lossy(get("linking.svg")).contains("data:image/png;base64,"));
     assert_eq!(get("data.json"), b"{}");
+    assert_eq!(get("photo.jpg"), b"unlinked, never sent to the child");
+    assert_eq!(child.len(), files().len() - 1, "only broken.svg dropped");
     // Logged by the parent, with the same message as in-process.
     let logs = buf.contents();
     assert!(
@@ -134,6 +135,7 @@ async fn use_fanout_bomb_is_stopped_by_the_child_memory_cap() {
         Duration::from_secs(120),
         Some(CAP),
     );
+    let cores_before = core_dumps();
     let control = vec![("t.svg".to_string(), TEXT.as_bytes().to_vec())];
     if let Err(e) = outline_svg_files(&compiler, control, Vec::new()).await {
         eprintln!("skipping: the outline child cannot run under a {CAP}-byte cap here: {e:#}");
@@ -149,6 +151,27 @@ async fn use_fanout_bomb_is_stopped_by_the_child_memory_cap() {
     .expect_err("the bomb must fail the render, not be outlined");
 
     assert!(err.to_string().contains("SVG outline failed"), "{err:#}");
+    assert_eq!(
+        core_dumps(),
+        cores_before,
+        "the aborted child must not leave a core dump behind"
+    );
+}
+
+/// `core` / `core.<pid>` in the working directory the child inherits — the
+/// kernel's default `core_pattern` names.
+#[cfg(unix)]
+fn core_dumps() -> std::collections::BTreeSet<String> {
+    std::fs::read_dir(".")
+        .expect("read the test's working directory")
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| {
+            n == "core"
+                || n.strip_prefix("core.")
+                    .is_some_and(|pid| pid.bytes().all(|b| b.is_ascii_digit()))
+        })
+        .collect()
 }
 
 /// Real prefix-scanning `list`, so sibling discovery finds the SVGs.

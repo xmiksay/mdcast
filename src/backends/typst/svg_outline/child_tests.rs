@@ -30,20 +30,25 @@ fn bounds(timeout: Duration) -> Bounds {
 }
 
 fn command(program: &str, args: &[&str]) -> OutlineCommand {
-    OutlineCommand {
-        program: program.into(),
-        args: args.iter().map(|a| a.to_string()).collect(),
-    }
+    OutlineCommand::new(program, args.iter().copied())
+}
+
+fn refs(files: &[(String, Vec<u8>)]) -> Vec<(&str, &[u8])> {
+    files
+        .iter()
+        .map(|(p, b)| (p.as_str(), b.as_slice()))
+        .collect()
 }
 
 #[test]
 fn run_child_answers_exactly_what_classify_does_in_process() {
-    let request = ipc::encode_request(&files(), &[]);
+    let files = files();
+    let request = ipc::encode_request(&refs(&files), &[]);
     let mut response = Vec::new();
     run_child(request.as_slice(), &mut response).unwrap();
 
     let outcomes = ipc::decode_response(&response, 4, LIMITS.output).unwrap();
-    assert_eq!(outcomes, classify(&files(), &[], LIMITS));
+    assert_eq!(outcomes, classify(&refs(&files), &[], LIMITS));
     assert!(
         matches!(&outcomes[0], Outcome::Replace(svg) if !svg.windows(5).any(|w| w == b"<text"))
     );
@@ -142,6 +147,73 @@ async fn cli_without_an_outline_command_still_outlines_in_process() {
     let outlined = outline_svgs(files(), Vec::new(), &compiler).await.unwrap();
     assert_eq!(outlined.dropped, HashSet::from(["broken.svg".to_string()]));
     assert_eq!(outlined.files.len(), 3);
+}
+
+fn named(files: &[(&str, &[u8])]) -> Vec<(String, Vec<u8>)> {
+    files
+        .iter()
+        .map(|(p, b)| (p.to_string(), b.to_vec()))
+        .collect()
+}
+
+#[test]
+fn only_candidates_and_rasters_a_text_svg_may_link_are_sent() {
+    let linking = r#"<svg xmlns="http://www.w3.org/2000/svg"><text>a</text><image href="img/dot.png"/></svg>"#;
+    let sel = select(&named(&[
+        ("main.typ", b"#image(\"a.svg\")"),
+        ("a.svg", linking.as_bytes()),
+        ("data.json", b"{}"),
+        ("img/dot.png", PNG_1X1),
+        ("photo.jpg", b"not even a jpeg"),
+        ("magic-only", PNG_1X1),
+        ("plain.svg", NO_TEXT.as_bytes()),
+    ]));
+    assert_eq!(
+        sel.files,
+        [false, true, false, true, false, false, true],
+        "unlinked rasters and non-images stay in the parent"
+    );
+    assert!(sel.fonts, "a text-bearing SVG needs the fonts");
+}
+
+#[test]
+fn text_free_svgs_need_no_fonts_and_no_rasters() {
+    let sel = select(&named(&[
+        ("plain.svg", NO_TEXT.as_bytes()),
+        ("plain.png", PNG_1X1),
+    ]));
+    assert_eq!(sel.files, [true, false]);
+    assert!(!sel.fonts);
+}
+
+#[test]
+fn unreadable_names_send_every_linkable_raster() {
+    let svg = |body: &str| {
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg"><text>{body}</text></svg>"#)
+    };
+    let raster = ("x.png", PNG_1X1);
+    for escaped in [svg("&#120;.png"), svg("<!ENTITY")] {
+        let sel = select(&named(&[("a.svg", escaped.as_bytes()), raster]));
+        assert_eq!(sel.files, [true, true], "{escaped}");
+    }
+    let gz = super::super::tests::gzip(svg("x.png").as_bytes());
+    let sel = select(&named(&[("a.svgz", &gz), raster]));
+    assert_eq!(sel.files, [true, true]);
+    assert!(sel.fonts, "gzip is not inflated just to decide");
+}
+
+#[test]
+fn spread_puts_each_answer_back_at_its_file() {
+    let answered = vec![Outcome::Drop("x".into()), Outcome::Replace(b"s".to_vec())];
+    assert_eq!(
+        spread(&[false, true, false, true], answered),
+        [
+            Outcome::Keep,
+            Outcome::Drop("x".into()),
+            Outcome::Keep,
+            Outcome::Replace(b"s".to_vec())
+        ]
+    );
 }
 
 /// Linux-only headcount via `/proc`; 0 (never a false failure) elsewhere.

@@ -601,12 +601,20 @@ own name and bytes, not the `image()` call.
   binary itself, in a hidden mode) under the **same**
   `--typst-timeout-secs` / `MDCAST_TYPST_TIMEOUT_SECS` and
   `MDCAST_TYPST_MAX_MEMORY_BYTES` as the typst compile child, spawned only
-  when the render carries an SVG at all; a child that times out, hits the
+  when the render carries an SVG at all, and sent only what outlining reads
+  (the SVGs, rasters a text-bearing SVG may link, and the declared fonts
+  when some SVG may carry text — not the render's other files), so it does
+  not need a second copy of every photo under the same memory cap. Because
+  the outline child and the typst compile child each get the **full**
+  timeout, a `cli`-mode render's worst case is about twice
+  `MDCAST_TYPST_TIMEOUT_SECS`. A child that times out, hits the
   memory cap or answers garbage fails the render exactly like a failed
   `cli` compile (`render_failed` from the server). In the default `library`
   mode it runs in-process on a blocking thread with **no** time or memory
   bound — the same as the in-process typst compile itself. A library
-  embedder building `CliCompiler` without `with_outline(...)` also gets the
+  embedder building `CliCompiler` (via `CliCompiler::new(...)` and its
+  `with_*` methods — the struct is `#[non_exhaustive]`) without
+  `with_outline(...)` also gets the
   in-process path, with a one-time warning. Independently of mode, two
   fixed caps bound *bytes* only — not parse time or memory: a gzipped SVG
   (`.svgz`, or an SVG data URI) may inflate to at most 32 MiB, and all
@@ -835,10 +843,13 @@ cannot offer:
   wedges one `spawn_blocking` OS thread for the life of the process under
   `library` mode — `spawn_blocking` cannot be cancelled. Under `cli` mode
   it's a child process instead, bounded by a timeout (`--typst-timeout-secs`
-  / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it.
+  / `MDCAST_TYPST_TIMEOUT_SECS`, default 30s) that kills and reaps it. The
+  timeout is per child: a render that also runs the SVG-outline child (see
+  below) can take up to about **2×** the timeout end to end.
 - **A memory cap.** `--typst-timeout-secs`'s server-only sibling
   `MDCAST_TYPST_MAX_MEMORY_BYTES` applies `setrlimit(RLIMIT_AS)` to the child
-  (unix only).
+  (unix only). Every `cli`-mode child also runs with core dumps disabled
+  (`RLIMIT_CORE` = 0), so one stopped by the cap cannot fill the disk.
 - **HTML export without the `typst-html` cargo feature** — see above.
 
 The SVG-outline pre-step (see "SVG text on the typst targets" above) runs under the same timeout
@@ -1103,7 +1114,7 @@ and the response body *is* the artifact. No job ids, no polling.
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
 | `MDCAST_TYPST`            | `library`                | `library` (in-process, default) or `cli` (shell out to a `typst` binary per compile, killable and memory-boundable) — see "Selecting the Typst compiler" above |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline); the child is killed and reaped on expiry |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline) — each gets the full value, so a render's worst case is ~2× this; the child is killed and reaped on expiry |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on each `cli`-mode child — typst compile and SVG outline (unix only) |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 

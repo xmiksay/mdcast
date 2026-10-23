@@ -177,7 +177,7 @@ fn linked_raster(
 type Kind = fn(Arc<Vec<u8>>) -> ImageKind;
 
 /// typst's `determine_format_from_path`, falling back to magic bytes.
-fn linked_kind(href: &str, data: &[u8]) -> Option<Kind> {
+pub(super) fn linked_kind(href: &str, data: &[u8]) -> Option<Kind> {
     let ext = Path::new(href)
         .extension()
         .and_then(OsStr::to_str)

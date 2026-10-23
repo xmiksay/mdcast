@@ -40,8 +40,10 @@ const FONTS_DIR: &str = ".mdcast-fonts";
 
 /// Config for the `typst` CLI compiler. `bin` is looked up on `PATH` unless
 /// it's an absolute/relative path itself (`std::process::Command`'s usual
-/// resolution).
+/// resolution). Build it with [`CliCompiler::new`] and the `with_*`
+/// methods: it is `#[non_exhaustive]` so a new knob is not a breaking change.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct CliCompiler {
     pub bin: String,
     /// Wall-clock budget for one child — the compile, and separately the
@@ -64,20 +66,39 @@ pub struct CliCompiler {
 /// stdin/stdout — in practice one of mdcast's own binaries in its hidden
 /// [`OUTLINE_CHILD_ARG`](crate::backends::typst::OUTLINE_CHILD_ARG) mode.
 #[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
 pub struct OutlineCommand {
     pub program: PathBuf,
     pub args: Vec<String>,
 }
 
 impl OutlineCommand {
+    pub fn new(
+        program: impl Into<PathBuf>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            args: args.into_iter().map(Into::into).collect(),
+        }
+    }
+
     /// The running executable in its hidden outline-child mode — what a
     /// binary that dispatches [`OUTLINE_CHILD_ARG`](crate::backends::typst::OUTLINE_CHILD_ARG)
     /// itself passes to [`CliCompiler::with_outline`].
     pub fn current_exe() -> Result<Self> {
-        Ok(Self {
-            program: std::env::current_exe().context("locate the running executable")?,
-            args: vec![crate::backends::typst::OUTLINE_CHILD_ARG.to_string()],
-        })
+        // `/proc/self/exe` names the running image itself, so it still execs
+        // the same binary after a deploy replaces or deletes the file on
+        // disk; `current_exe()`'s path would then run the new binary (child
+        // protocol skew) or nothing at all.
+        #[cfg(target_os = "linux")]
+        let program = PathBuf::from("/proc/self/exe");
+        #[cfg(not(target_os = "linux"))]
+        let program = std::env::current_exe().context("locate the running executable")?;
+        Ok(Self::new(
+            program,
+            [crate::backends::typst::OUTLINE_CHILD_ARG],
+        ))
     }
 }
 

@@ -3,7 +3,8 @@
 //! child (`svg_outline/child.rs`). Each gets the same wall-clock timeout with
 //! an explicit kill+reap on elapse — what `spawn_blocking` structurally cannot
 //! offer — and the same optional `RLIMIT_AS` cap, so `MDCAST_TYPST_TIMEOUT_SECS`
-//! / `MDCAST_TYPST_MAX_MEMORY_BYTES` mean one thing for every child.
+//! / `MDCAST_TYPST_MAX_MEMORY_BYTES` mean one thing for every child. No
+//! child may dump core (see `apply_child_limits`).
 
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
@@ -58,7 +59,7 @@ pub(super) async fn run_bounded(
     .stderr(Stdio::piped())
     .kill_on_drop(true);
     #[cfg(unix)]
-    apply_memory_limit(&mut cmd, bounds.max_memory_bytes);
+    apply_child_limits(&mut cmd, bounds.max_memory_bytes);
 
     let mut child = cmd.spawn().with_context(|| {
         format!(
@@ -126,29 +127,41 @@ async fn read_capped(
     }
 }
 
-/// `setrlimit(RLIMIT_AS)` in the child, applied via `pre_exec` (runs after
-/// `fork`, before `exec`) — the only place a per-process memory cap can be
-/// installed for an arbitrary binary. `RLIMIT_AS` bounds the whole address
-/// space (heap, stacks, mmap'd files), which is what actually stops an
-/// unbounded child from exhausting host memory; it is not a precise "bytes of
-/// document data" cap.
+/// Per-child resource limits, installed via `pre_exec` (runs after `fork`,
+/// before `exec`) — the only place a per-process limit can be set for an
+/// arbitrary binary.
+///
+/// `RLIMIT_CORE` is always zeroed: a child stopped by the memory cap aborts,
+/// and its core dump (tens to hundreds of MB, written to its working
+/// directory) would turn every hostile render into disk fill — the server's
+/// writable layer, or the repo root under `make verify`.
+///
+/// `RLIMIT_AS` bounds the whole address space (heap, stacks, mmap'd files),
+/// which is what actually stops an unbounded child from exhausting host
+/// memory; it is not a precise "bytes of document data" cap.
 #[cfg(unix)]
-fn apply_memory_limit(cmd: &mut Command, max_memory_bytes: Option<u64>) {
-    let Some(limit) = max_memory_bytes else {
-        return;
-    };
+fn apply_child_limits(cmd: &mut Command, max_memory_bytes: Option<u64>) {
     // SAFETY: the closure only calls `libc::setrlimit`, an async-signal-safe
     // syscall wrapper that performs no allocation — the constraint `pre_exec`
     // documents (it runs post-fork, pre-exec, in a single-threaded child
     // where most of the standard library is unsafe to use).
     unsafe {
         cmd.pre_exec(move || {
-            let rl = libc::rlimit {
-                rlim_cur: limit as libc::rlim_t,
-                rlim_max: limit as libc::rlim_t,
+            let no_core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
             };
-            if libc::setrlimit(libc::RLIMIT_AS, &rl) != 0 {
+            if libc::setrlimit(libc::RLIMIT_CORE, &no_core) != 0 {
                 return Err(std::io::Error::last_os_error());
+            }
+            if let Some(limit) = max_memory_bytes {
+                let rl = libc::rlimit {
+                    rlim_cur: limit as libc::rlim_t,
+                    rlim_max: limit as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &rl) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
             }
             Ok(())
         });
@@ -192,5 +205,41 @@ mod tests {
         assert!(done.status.success());
         assert_eq!(done.stdout, input);
         assert!(!done.stdout_overflow);
+    }
+
+    /// Reads the limits the child actually runs under, rather than trusting
+    /// that `pre_exec` ran.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn children_never_dump_core_and_get_the_memory_cap() {
+        let limit = |limits: &str, name: &str| -> Vec<String> {
+            let line = limits
+                .lines()
+                .find(|l| l.starts_with(name))
+                .unwrap_or_else(|| panic!("no {name:?} in {limits}"));
+            line[name.len()..]
+                .split_whitespace()
+                .take(2)
+                .map(str::to_string)
+                .collect()
+        };
+        for max_memory_bytes in [None, Some(1u64 << 30)] {
+            let mut cmd = Command::new("cat");
+            cmd.arg("/proc/self/limits");
+            let bounds = Bounds {
+                timeout: Duration::from_secs(20),
+                max_memory_bytes,
+            };
+            let done = run_bounded(cmd, None, bounds, 1 << 16, "cat")
+                .await
+                .unwrap();
+            assert!(done.status.success());
+            let limits = String::from_utf8(done.stdout).unwrap();
+            assert_eq!(limit(&limits, "Max core file size"), ["0", "0"]);
+            if let Some(cap) = max_memory_bytes {
+                let cap = cap.to_string();
+                assert_eq!(limit(&limits, "Max address space"), [cap.as_str(), &cap]);
+            }
+        }
     }
 }
