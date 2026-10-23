@@ -102,8 +102,8 @@ pub enum QrEcLevel {
 }
 
 /// The generator kinds a server can render — the values of
-/// [`super::CapabilitiesResponse::generators`]. Also the markdown fence/tag
-/// name each one answers to.
+/// [`super::CapabilitiesResponse::generators`]. Each known variant is also the
+/// markdown fence/tag name it answers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 #[non_exhaustive]
@@ -114,7 +114,7 @@ pub enum Generator {
     /// A kind this build doesn't know — what a newer server's generator
     /// decodes to, so an older client still reads the rest of
     /// `CapabilitiesResponse` instead of failing the whole decode. A server
-    /// never reports it.
+    /// never reports it, and it has no fence or tag.
     #[serde(other)]
     Unknown,
 }
