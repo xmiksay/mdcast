@@ -11,12 +11,19 @@
 //! reveal.js tree and the reference documents as virtual files on every
 //! render.
 //!
+//! `generated` entries (a payment QR code, say) are rendered up front and
+//! served at their `path` over everything else. A bad entry — unencodable
+//! data, or a path the manifest or the template itself already claims — is a
+//! `400` naming the entry: unlike a compile failure, it is entirely the
+//! request's fault and safe to describe.
+//!
 //! HTML output (`format: "html"`) is available whenever `state.typst_compiler`
 //! is `Cli` — a real `typst` binary supports `--features html` regardless of
 //! how mdcast itself was built (issue #73) — and otherwise falls back to the
 //! `Library`-only path gated by the `typst-html` cargo feature, unchanged
 //! from before issue #73.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::Json;
@@ -25,8 +32,9 @@ use axum::extract::rejection::JsonRejection;
 use axum::response::Response;
 use bytes::Bytes;
 use mdcast::backends::typst::{TemplateDoc, TypstCompiler, render_template_with};
-use mdcast::mdcast_api::wire::{RenderTemplateRequest, TemplateFormat};
-use mdcast::{AssetProvider, BrandHandle, LayeredAssets, sync_provider};
+use mdcast::mdcast_api::AssetManifest;
+use mdcast::mdcast_api::wire::{GeneratedAsset, RenderTemplateRequest, TemplateFormat};
+use mdcast::{AssetProvider, BrandHandle, LayeredAssets, MemoryAssets, sync_provider};
 
 use crate::blobs::BlobAssets;
 use crate::error::{ApiError, json_body};
@@ -50,6 +58,7 @@ pub async fn render(
         format,
         assets,
         fonts,
+        generated,
     } = json_body(body)?;
 
     // `data` travels as raw JSON text and ends up in the virtual /data.json.
@@ -58,14 +67,21 @@ pub async fn render(
     let data = serde_json::from_str(&data)
         .map_err(|e| ApiError::BadRequest(format!("`data` is not valid JSON: {e}")))?;
 
+    // Before blob resolution: a request that can never render should not
+    // cost the caller an upload round trip first.
+    let generated = render_generated(&generated, &assets)?;
+
     let blobs = BlobAssets::resolve(state.store.clone(), assets)
         .await
         .map_err(ApiError::MissingBlobs)?;
     let provider = LayeredAssets {
-        over: sync_provider(move |key| {
-            Ok((key == TEMPLATE_KEY).then(|| Bytes::from(template_source.clone())))
-        }),
-        base: blobs,
+        over: generated,
+        base: LayeredAssets {
+            over: sync_provider(move |key| {
+                Ok((key == TEMPLATE_KEY).then(|| Bytes::from(template_source.clone())))
+            }),
+            base: blobs,
+        },
     };
 
     let doc = TemplateDoc {
@@ -86,6 +102,24 @@ pub async fn render(
         }
         TemplateFormat::Html => html(&doc, &provider, &state.typst_compiler).await,
     }
+}
+
+fn render_generated(
+    generated: &[GeneratedAsset],
+    manifest: &AssetManifest,
+) -> Result<MemoryAssets, ApiError> {
+    let mut files = BTreeMap::new();
+    for GeneratedAsset { path, spec } in generated {
+        if path == TEMPLATE_KEY || manifest.get(path).is_some() || files.contains_key(path) {
+            return Err(ApiError::BadRequest(format!(
+                "generated path {path:?} collides with a template asset or another generated entry"
+            )));
+        }
+        let bytes = mdcast::generators::render_spec(spec)
+            .map_err(|e| ApiError::BadRequest(format!("generated entry {path:?} failed: {e:#}")))?;
+        files.insert(path.clone(), bytes);
+    }
+    Ok(MemoryAssets(files))
 }
 
 /// `Cli` mode needs no build-time toggle for HTML export (issue #73) — a real

@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::doc::Target;
+use crate::wire::generated::Generator;
 use crate::wire::render::TemplateFormat;
 
 /// What this `mdcast-server` deployment can actually render right now.
@@ -19,6 +20,11 @@ pub struct CapabilitiesResponse {
     /// present; `html` appears only when this deployment can actually export
     /// it — the `typst-html` build feature, or `MDCAST_TYPST=cli`.
     pub template_formats: Vec<TemplateFormat>,
+    /// Generator kinds this build renders — in markdown (`RenderOptions`
+    /// flags) and as `RenderTemplateRequest.generated` entries. Empty from a
+    /// server older than the field.
+    #[serde(default)]
+    pub generators: Vec<Generator>,
     /// Echoes `MDCAST_MAX_UPLOAD_BYTES` — the ceiling on every request body,
     /// not just uploads — so a client can reject an oversized bundle before
     /// any round trip instead of discovering the limit via `413`.
@@ -36,6 +42,7 @@ mod tests {
         let res = CapabilitiesResponse {
             targets: vec![Target::Pdf, Target::PdfPresentation, Target::Docx],
             template_formats: vec![TemplateFormat::Pdf, TemplateFormat::Html],
+            generators: vec![Generator::Qr],
             max_upload_bytes: 268_435_456,
             version: "0.3.0".to_string(),
         };
@@ -52,6 +59,7 @@ mod tests {
         let res = CapabilitiesResponse {
             targets: vec![Target::HtmlReveal],
             template_formats: vec![],
+            generators: vec![],
             max_upload_bytes: 0,
             version: String::new(),
         };

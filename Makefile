@@ -31,6 +31,7 @@ check-all: ## Typecheck all feature combinations (the CI contract)
 	cargo check -p mdcast --no-default-features
 	cargo check -p mdcast --no-default-features --features pandoc
 	cargo check -p mdcast --no-default-features --features typst
+	cargo check -p mdcast --no-default-features --features qr
 	cargo check -p mdcast --no-default-features --features pandoc,typst,rt-multi-thread
 	cargo check -p mdcast
 	cargo check -p mdcast --features typst-html

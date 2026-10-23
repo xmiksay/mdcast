@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::brand::BrandSpec;
 use crate::doc::{DocMeta, Target};
 use crate::manifest::AssetManifest;
+use crate::wire::generated::GeneratedAsset;
 
 /// Render a markdown document to `target`. Mirrors what the CLI's `render`
 /// subcommand builds before handing a `ResolvedDoc` to a backend: the body
@@ -47,6 +48,10 @@ pub struct RenderOptions {
     /// splitting.
     #[serde(default)]
     pub mermaid: bool,
+    /// `--qr`: render ```` ```qr ```` fences and `<qr>` tags to SVG QR codes
+    /// before splitting.
+    #[serde(default)]
+    pub qr: bool,
     /// `--toc-depth N`: request a table of contents at heading depth 1-6.
     #[serde(default)]
     pub toc_depth: Option<u8>,
@@ -92,6 +97,11 @@ pub struct RenderTemplateRequest {
     /// host has installed.
     #[serde(default)]
     pub fonts: Vec<String>,
+    /// Images the server generates and serves at their `path` alongside
+    /// `assets` — e.g. a payment QR code the template `#image`s, without the
+    /// caller needing a QR library.
+    #[serde(default)]
+    pub generated: Vec<GeneratedAsset>,
 }
 
 /// Output format for a template render. `Html` needs a server built with the
@@ -109,6 +119,7 @@ pub enum TemplateFormat {
 mod tests {
     use super::*;
     use crate::digest::Digest;
+    use crate::wire::generated::{GeneratedSpec, QrEcLevel};
 
     fn manifest() -> AssetManifest {
         AssetManifest::from_iter([("img/logo.png".to_string(), Digest::from_sha256([7; 32]))])
@@ -128,6 +139,7 @@ mod tests {
             options: RenderOptions {
                 html_image_tags: true,
                 mermaid: true,
+                qr: true,
                 toc_depth: Some(3),
                 layout_assets: vec!["img/logo.png".to_string()],
                 layout_fonts: vec!["fonts/Brand-Regular.ttf".to_string()],
@@ -164,6 +176,13 @@ mod tests {
             format: TemplateFormat::Html,
             assets: manifest(),
             fonts: vec!["fonts/Brand-Regular.ttf".to_string()],
+            generated: vec![GeneratedAsset {
+                path: "qr.svg".to_string(),
+                spec: GeneratedSpec::Qr {
+                    data: "SPD*1.0".to_string(),
+                    ec: QrEcLevel::M,
+                },
+            }],
         };
 
         let json = serde_json::to_string(&req).unwrap();
@@ -184,6 +203,10 @@ mod tests {
         assert!(
             req.fonts.is_empty(),
             "fonts default to none (0.4.1 wire compat)"
+        );
+        assert!(
+            req.generated.is_empty(),
+            "generated defaults to none (0.4.2 wire compat)"
         );
     }
 }

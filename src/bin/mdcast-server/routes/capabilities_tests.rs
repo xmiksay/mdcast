@@ -128,6 +128,18 @@ async fn cli_typst_compiler_reports_html_template_support() {
 }
 
 #[tokio::test]
+async fn generators_compiled_in_are_advertised() {
+    let app = app_with(false, 1 << 20, TypstCompiler::Library);
+
+    let (_, response) = send(&app, get("/v1/capabilities")).await;
+
+    assert_eq!(
+        body_json(response).await["generators"],
+        serde_json::json!(["qr"])
+    );
+}
+
+#[tokio::test]
 async fn max_upload_bytes_is_echoed_verbatim() {
     let app = app_with(true, 42, TypstCompiler::Library);
 

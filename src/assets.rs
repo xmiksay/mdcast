@@ -2,6 +2,7 @@
 //! through this trait — never `std::fs`. The default impl bakes the built-in
 //! catalog in via `rust-embed`; consumers wrap or replace it.
 
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -108,6 +109,30 @@ impl<O: AssetProvider, B: AssetProvider> AssetProvider for LayeredAssets<O, B> {
     }
 }
 
+/// In-memory `key → bytes` provider with a real `list`, for files an
+/// embedder produces per render — e.g. generated QR codes on the template
+/// path, where sibling discovery goes through `list` and a `sync_provider`
+/// (whose `list` is empty) would leave them unregistered.
+#[derive(Debug, Clone, Default)]
+pub struct MemoryAssets(pub BTreeMap<String, Bytes>);
+
+impl AssetProvider for MemoryAssets {
+    fn get<'a>(&'a self, key: &'a str) -> BoxFuture<'a, Result<Option<Bytes>>> {
+        let r = self.0.get(key).cloned();
+        Box::pin(async move { Ok(r) })
+    }
+
+    fn list<'a>(&'a self, prefix: &'a str) -> BoxFuture<'a, Result<Vec<String>>> {
+        let r = self
+            .0
+            .keys()
+            .filter(|k| k.starts_with(prefix))
+            .cloned()
+            .collect();
+        Box::pin(async move { Ok(r) })
+    }
+}
+
 /// Wrap a synchronous `get` closure as an `AssetProvider`. `list` is a no-op
 /// (returns empty); impl the trait directly if you need real `list` support.
 pub fn sync_provider<F>(get: F) -> SyncProvider<F>
@@ -195,6 +220,21 @@ mod tests {
         });
         assert_eq!(p.get("k").await.unwrap(), Some(Bytes::from_static(b"v")));
         assert!(p.list("").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn memory_assets_gets_and_lists_by_prefix() {
+        let p = MemoryAssets(BTreeMap::from([
+            ("qr/a.svg".to_string(), Bytes::from_static(b"A")),
+            ("img/b.png".to_string(), Bytes::from_static(b"B")),
+        ]));
+        assert_eq!(
+            p.get("qr/a.svg").await.unwrap(),
+            Some(Bytes::from_static(b"A"))
+        );
+        assert_eq!(p.get("nope").await.unwrap(), None);
+        assert_eq!(p.list("qr/").await.unwrap(), vec!["qr/a.svg"]);
+        assert_eq!(p.list("").await.unwrap().len(), 2);
     }
 
     #[tokio::test]

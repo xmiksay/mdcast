@@ -32,6 +32,7 @@ mdcast-api/           serde-only shared types + wire protocol; no anyhow/tokio/I
    ├─ mod.rs          protocol overview (manifest → 409 → upload → retry)
    ├─ render.rs       RenderMarkdownRequest/RenderOptions, RenderTemplateRequest/TemplateFormat
    ├─ blob.rs         BlobCheckRequest/Response, MissingBlob, MissingBlobsError (the 409 body)
+   ├─ generated.rs    GeneratedAsset/GeneratedSpec (non-exhaustive, `kind`-tagged), QrEcLevel, Generator (capabilities)
    └─ error.rs        ErrorResponse + ErrorCode (every other 4xx/5xx: bad_request,
                       unauthorized, payload_too_large, unsupported_target,
                       render_failed, internal)
@@ -48,7 +49,7 @@ mdcast-client/        async client for mdcast-server; mdcast-api + reqwest, NEVE
 
 src/
 ├─ lib.rs             ResolvedDoc, Page, Backend, RenderRequest/RenderedArtifact, re-exports (incl. mdcast_api's Target/DocMeta)
-├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/sync_/async_
+├─ assets.rs          AssetProvider trait + EmbeddedAssets/LayeredAssets/MemoryAssets/sync_/async_
 ├─ brand.rs           re-export of mdcast_api::brand + from_toml() (the anyhow/toml loader)
 ├─ frontmatter.rs     extract() — strips leading YAML frontmatter into DocMeta
 ├─ image_format.rs    sniff() + mime_type() + warn_if_unsupported() — magic-byte format matrix warning (issue #55)
@@ -56,6 +57,10 @@ src/
 │  ├─ mod.rs           resolve_images() — async per-page image rewriter
 │  └─ tests.rs         unit tests for image_refs()/collect_images()/resolve_images()
 ├─ mermaid.rs         #[cfg(feature = "mermaid")] render_diagrams() — ```mermaid fences → SVG via mermaid-svg (pure Rust), pre-splitter
+├─ generators/        #[cfg(feature = "qr")] images mdcast draws itself
+│  ├─ mod.rs          expand() — shared fence/tag scanner (```name / <name>…</name> / <name path="KEY">), async path= resolution, splice; render_spec() for template `generated` entries; available()
+│  ├─ qr.rs           render_qr_codes() + svg() — hand-built SVG from the qrcode module matrix
+│  └─ tests.rs        unit tests for the scanner and the QR renderer
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
@@ -81,9 +86,10 @@ src/
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() (Library-default) and render_template_with()/render_template_html_with() (explicit TypstCompiler) — user template + data → PDF/HTML, no markdown
 ├─ bin/mdcast/
-│  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, load_doc/load_brand
+│  ├─ main.rs           CLI (render / explain / render-template), Cli/Cmd, provider stack
+│  ├─ load_doc.rs        load_doc()/load_brand() + PreSteps (--html-image-tags/--mermaid/--qr, flattened onto render and explain)
 │  ├─ fs_assets.rs       FsAssets — filesystem-backed AssetProvider for --assets DIR
-│  ├─ render_template.rs #[cfg(feature = "typst")] render-template subcommand plumbing; Format enum (--format pdf|html)
+│  ├─ render_template.rs #[cfg(feature = "typst")] render-template subcommand: RenderTemplateArgs, Format enum (--format pdf|html), --generated FILE.json
 │  └─ typst_compiler_args.rs #[cfg(feature = "typst")] TypstCompilerArgs — --typst-compiler/--typst-bin/--typst-timeout-secs, `#[command(flatten)]`d onto both `render` and `render-template` (issue #73)
 └─ bin/mdcast-server/   `server` feature — HTTP service speaking mdcast_api::wire
    ├─ main.rs           wiring only: config → blob store → prefill → Registry → router → axum::serve
@@ -100,7 +106,7 @@ src/
       ├─ capabilities.rs GET /v1/capabilities — unauthenticated deployment-shape probe (targets/template_formats/max_upload_bytes/version, issue #81)
       ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
       ├─ render.rs      POST /v1/render — resolve_doc()/provider_stack(), the CLI pipeline minus the filesystem
-      └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest; Html arm needs the `typst-html` build feature in `library` mode, needs nothing extra in `cli` mode (issue #73)
+      └─ template.rs    POST /v1/render/template — TemplateDoc over the manifest + `generated` entries (MemoryAssets, 400 on bad entry/collision); Html arm needs the `typst-html` build feature in `library` mode, needs nothing extra in `cli` mode (issue #73)
 
 embedded/             rust-embed source — keys mirror these paths
 ├─ typst/layouts/{pdf,pdf-presentation}/{class}.typ
@@ -245,6 +251,7 @@ happens to mirror them.
 | `revealjs/brand.css`                  | pandoc html-reveal — raw per-class CSS escape hatch, appended to the generated brand `<style>` block (issue #57) |
 | `reference/reference.{docx,odt,pptx}` | pandoc (matching target) |
 | `mermaid/diagram-{N}.svg`             | mermaid pre-step output (`mermaid::render_diagrams`, `mermaid` feature) — the caller layers these over their provider |
+| `qr/qr-{N}.svg`                       | QR pre-step output (`generators::qr::render_qr_codes`, `qr` feature) — layered like mermaid's |
 | anything else (e.g. `img/...`)        | image refs in markdown |
 
 ## Build / test
@@ -262,13 +269,13 @@ its own `-p mdcast-api --features toml` target rather than folded into
 already use.
 
 ```
-make build              # cargo build --workspace — default = pandoc + typst + mermaid (+ rt-multi-thread for the bin)
-make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / bin-without-mermaid / default / +typst-html / +remote-images / +server / +server,typst-html)
+make build              # cargo build --workspace — default = pandoc + typst + mermaid + qr (+ rt-multi-thread for the bin)
+make check-all          # cargo check -p mdcast-api (+ --features toml) + -p mdcast-client + all mdcast feature combos (core / pandoc / typst / qr / bin-without-mermaid-and-qr / default / +typst-html / +remote-images / +server / +server,typst-html)
 make test                # cargo test --workspace — default features only; unit suite runs in <1s
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 66 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 81 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -288,7 +295,7 @@ k8s manifest set (Secret + ConfigMap + Deployment + Service in the
 keep the real one only in your local copy.
 
 The `server` feature is off by default and pulls in `pandoc`, `typst`,
-`mermaid` and `rt-multi-thread` itself (a render service without engines is
+`mermaid`, `qr` and `rt-multi-thread` itself (a render service without engines is
 useless) plus axum/sha2/subtle; the `[[bin]] mdcast-server`
 `required-features` spells the whole set out again, so `cargo build` without
 the feature simply skips the binary.
@@ -339,9 +346,9 @@ Release flow: bump the workspace version, merge, tag `vX.Y.Z`, push the tag.
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
-./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid]  # prints per-page (class, origin)
-./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]  # typst-only, no markdown
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]
+./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr]  # prints per-page (class, origin)
+./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--generated generated.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N]  # typst-only, no markdown
 ```
 
 `--assets DIR` layers a filesystem-backed provider over `EmbeddedAssets`.
@@ -353,7 +360,16 @@ the mermaid pre-step (`mermaid::render_diagrams`, `mermaid` feature): every
 ```` ```mermaid ```` fence renders to SVG (pure Rust, no Node/Chromium) and
 is rewritten to `![](mermaid/diagram-N.svg)`, served from an in-memory layer
 over the provider stack; a diagram that fails to render warns and stays a
-code block. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
+code block. `--qr` runs the QR pre-step (`generators::qr::render_qr_codes`,
+`qr` feature): ```` ```qr ```` fences and `<qr>…</qr>` / `<qr path="KEY">`
+tags (attrs `ec`, `size`) become `![](qr/qr-N.svg)`; unlike mermaid it is
+async because `path=` reads through the provider stack (`--assets` /
+embedded on the CLI, blobs over embedded on the server), so `load_doc`/
+`resolve_doc` build the base provider *before* the pre-steps and layer the
+SVGs over it after; a failing block warns and stays as written.
+`render-template --generated FILE.json` takes the wire's `GeneratedAsset`
+array, paths relative to the template's directory; a bad entry or a path
+the provider already serves is an error. `--layout-asset` / `--layout-font` declare `ResolvedDoc.assets` /
 `.fonts` entries for typst layouts (see README).
 
 `--typst-compiler` (issue #73) selects `TypstCompiler::Library` (default, the
@@ -439,7 +455,8 @@ sees a `200` on its very first request instead of a `409` round trip.
 `GET /v1/capabilities` (issue #81) sits outside the `require_bearer` layer
 entirely — added to the `/v1` router *after* `route_layer` is applied, so it
 is unauthenticated in both modes, same as `/health`. It reports
-`{targets, template_formats, max_upload_bytes, version}`:
+`{targets, template_formats, generators, max_upload_bytes, version}`:
+`generators` lists `generators::available()` (today `["qr"]`);
 `targets`' typst entries (`pdf`, `pdf-presentation`) are always present, the
 pandoc entries (`docx`/`odt`/`pptx`/`html-reveal`) only when
 `pandoc::probe_pandoc` found a working binary at startup (`AppState.
