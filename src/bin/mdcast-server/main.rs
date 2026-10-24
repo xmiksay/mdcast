@@ -110,7 +110,8 @@ async fn serve() -> Result<()> {
     }
     let state = Arc::new(AppState {
         store: Arc::new(store),
-        registry: Registry::with_typst_compiler(config.typst_compiler.clone()),
+        registry: Registry::with_typst_compiler(config.typst_compiler.clone())
+            .with_pandoc_limits(config.pandoc_timeout, config.pandoc_max_memory_bytes),
         typst_compiler: config.typst_compiler.clone(),
         pandoc_available,
         max_upload_bytes: config.max_upload_bytes as u64,
@@ -134,6 +135,7 @@ async fn serve() -> Result<()> {
         typst_compiler = ?config.typst_compiler,
         max_concurrent_renders = config.max_concurrent_renders,
         render_queue_secs = config.render_queue.as_secs(),
+        pandoc_timeout_secs = config.pandoc_timeout.as_secs(),
         expose_diagnostics = config.expose_diagnostics,
         pandoc_available,
         "mdcast-server listening"

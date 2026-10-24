@@ -26,6 +26,8 @@ pub const TYPST_MAX_OUTPUT_BYTES: &str = "MDCAST_TYPST_MAX_OUTPUT_BYTES";
 pub const MAX_CONCURRENT_RENDERS: &str = "MDCAST_MAX_CONCURRENT_RENDERS";
 pub const RENDER_QUEUE_SECS: &str = "MDCAST_RENDER_QUEUE_SECS";
 pub const EXPOSE_DIAGNOSTICS: &str = "MDCAST_EXPOSE_DIAGNOSTICS";
+pub const PANDOC_TIMEOUT_SECS: &str = "MDCAST_PANDOC_TIMEOUT_SECS";
+pub const PANDOC_MAX_MEMORY_BYTES: &str = "MDCAST_PANDOC_MAX_MEMORY_BYTES";
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
@@ -35,6 +37,7 @@ const DEFAULT_MAX_CACHE_LIVES: u32 = 32;
 const DEFAULT_TYPST_BIN: &str = "typst";
 const DEFAULT_TYPST_TIMEOUT_SECS: u32 = 30;
 const DEFAULT_RENDER_QUEUE_SECS: u32 = 10;
+const DEFAULT_PANDOC_TIMEOUT_SECS: u32 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -71,6 +74,10 @@ pub struct Config {
     /// Whether a `render_failed` response carries the typst diagnostics as
     /// `detail`. Off by default: the response then names only an incident.
     pub expose_diagnostics: bool,
+    /// Wall-clock budget for one pandoc run; exceeded → killed and reaped.
+    pub pandoc_timeout: Duration,
+    /// `RLIMIT_AS` for the pandoc child; `None` (the default) is unbounded.
+    pub pandoc_max_memory_bytes: Option<u64>,
 }
 
 impl Config {
@@ -117,6 +124,15 @@ impl Config {
                     .into(),
             ),
             expose_diagnostics: parse_flag(get(EXPOSE_DIAGNOSTICS), EXPOSE_DIAGNOSTICS)?,
+            pandoc_timeout: Duration::from_secs(
+                parse_u32(get(PANDOC_TIMEOUT_SECS), PANDOC_TIMEOUT_SECS)?
+                    .unwrap_or(DEFAULT_PANDOC_TIMEOUT_SECS)
+                    .into(),
+            ),
+            pandoc_max_memory_bytes: parse_bytes(
+                get(PANDOC_MAX_MEMORY_BYTES),
+                PANDOC_MAX_MEMORY_BYTES,
+            )?,
         })
     }
 }

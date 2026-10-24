@@ -1,12 +1,13 @@
-//! The one bounded-child-process primitive both `cli`-mode children share:
-//! the `typst compile` subprocess (`compiler/cli.rs`) and the SVG-outline
-//! child (`svg_outline/child.rs`). Each gets the same wall-clock timeout with
-//! an explicit kill+reap on elapse — what `spawn_blocking` structurally cannot
-//! offer — and the same `setrlimit` set (address space, file size, CPU time),
-//! so `MDCAST_TYPST_TIMEOUT_SECS` / `MDCAST_TYPST_MAX_MEMORY_BYTES` /
-//! `MDCAST_TYPST_MAX_OUTPUT_BYTES` mean one thing for every child. No child
-//! may dump core (see `apply_child_limits`), and no child inherits the
-//! server's environment (see `run_bounded`).
+//! The one bounded-child-process primitive every engine subprocess shares:
+//! the `typst compile` child (`backends/typst/compiler/cli.rs`), the
+//! SVG-outline child (`backends/typst/svg_outline/child.rs`) and the pandoc
+//! child (`backends/pandoc.rs`). Each gets a wall-clock timeout with an
+//! explicit kill+reap on elapse — what `spawn_blocking` structurally cannot
+//! offer — and the same `setrlimit` set (address space, file size, CPU time).
+//! No child may dump core (see `apply_child_limits`), and no child inherits
+//! the server's environment (see `run_bounded`). Lives at the crate root, not
+//! under `backends/typst/`, because the `pandoc` feature must not require
+//! `typst`.
 
 use std::ffi::{OsStr, OsString};
 use std::process::{ExitStatus, Stdio};
@@ -20,7 +21,7 @@ use tokio::process::Command;
 /// Unix-only; `None`, or any value on a non-unix target, leaves that resource
 /// unbounded.
 #[derive(Clone, Copy, Debug)]
-pub(super) struct Bounds {
+pub(crate) struct Bounds {
     pub timeout: Duration,
     /// `RLIMIT_AS`.
     pub max_memory_bytes: Option<u64>,
@@ -30,14 +31,43 @@ pub(super) struct Bounds {
     pub cpu_secs: Option<u64>,
 }
 
-/// typst diagnostics are the only stderr anyone reads, and only on failure.
+/// Diagnostics are the only stderr anyone reads, and only on failure.
 const MAX_STDERR: usize = 1 << 20;
 
-pub(super) struct Finished {
+/// The parent variables a child keeps — see [`run_bounded`].
+const INHERITED_ENV: [&str; 2] = ["PATH", "TZ"];
+
+/// An engine child process could not be started (binary missing, not
+/// executable, …) — or ran but rejected the invocation itself, as a `typst`
+/// too old for the flags mdcast passes does. Typed so an embedder can tell
+/// "this deployment is broken" from "this document does not render":
+/// `mdcast-server` answers it `500 internal`, not `422 render_failed`.
+#[derive(Debug)]
+pub struct SpawnError {
+    pub what: String,
+    pub program: String,
+    pub source: std::io::Error,
+}
+
+impl std::fmt::Display for SpawnError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "could not run {} (`{}`)", self.what, self.program)
+    }
+}
+
+impl std::error::Error for SpawnError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
+pub(crate) struct Finished {
     pub status: ExitStatus,
     /// At most `stdout_cap` bytes.
+    #[cfg_attr(not(feature = "typst"), allow(dead_code))] // pandoc writes to `-o`
     pub stdout: Vec<u8>,
     /// The child wrote more than `stdout_cap` bytes; `stdout` is truncated.
+    #[cfg_attr(not(feature = "typst"), allow(dead_code))]
     pub stdout_overflow: bool,
     pub stderr: Vec<u8>,
 }
@@ -45,10 +75,15 @@ pub(super) struct Finished {
 /// Runs `cmd` to completion under `bounds`, feeding it `stdin` (or `/dev/null`
 /// when `None`). `what` names the child in errors ("typst compile").
 ///
-/// The child's environment is exactly `env` plus the parent's `PATH` —
-/// everything else (`MDCAST_TOKEN` above all, but also `TYPST_*` overrides
-/// and proxy settings) is cleared, whatever `cmd` had set. `PATH` survives
-/// only so a bare program name like `typst` still resolves.
+/// The child's environment is exactly `env` plus the parent's `PATH` and `TZ`
+/// (each only when set) — everything else (`MDCAST_TOKEN` above all, but also
+/// `TYPST_*` overrides and proxy settings) is cleared, whatever `cmd` had
+/// set. `PATH` survives only so a bare program name like `typst` still
+/// resolves; `TZ` so `datetime.today()` and pandoc's dates agree with the
+/// in-process engine, which reads the server's own zone.
+///
+/// A child that cannot be started at all fails with a [`SpawnError`] in the
+/// chain: that is the deployment's fault, never the document's.
 ///
 /// The pipes are serviced *concurrently* with `wait()`, never after: a child
 /// blocked on a full stdout/stderr pipe, or on a stdin nobody finished
@@ -56,7 +91,7 @@ pub(super) struct Finished {
 /// bound it. Output past the caps is read and discarded rather than left in
 /// the pipe for the same reason — a child that floods its output keeps
 /// running into the timeout instead of into the parent's memory.
-pub(super) async fn run_bounded(
+pub(crate) async fn run_bounded(
     mut cmd: Command,
     env: &[(&str, &OsStr)],
     stdin: Option<Vec<u8>>,
@@ -64,9 +99,12 @@ pub(super) async fn run_bounded(
     stdout_cap: usize,
     what: &str,
 ) -> Result<Finished> {
-    let path: Option<OsString> = std::env::var_os("PATH");
+    let inherited: Vec<(&str, OsString)> = INHERITED_ENV
+        .iter()
+        .filter_map(|&key| std::env::var_os(key).map(|v| (key, v)))
+        .collect();
     cmd.env_clear()
-        .envs(path.iter().map(|p| ("PATH", p.as_os_str())))
+        .envs(inherited.iter().map(|(k, v)| (*k, v.as_os_str())))
         .envs(env.iter().copied());
     cmd.stdin(if stdin.is_some() {
         Stdio::piped()
@@ -79,11 +117,10 @@ pub(super) async fn run_bounded(
     #[cfg(unix)]
     apply_child_limits(&mut cmd, bounds);
 
-    let mut child = cmd.spawn().with_context(|| {
-        format!(
-            "spawn {what} (`{}`)",
-            cmd.as_std().get_program().to_string_lossy()
-        )
+    let mut child = cmd.spawn().map_err(|source| SpawnError {
+        what: what.to_string(),
+        program: cmd.as_std().get_program().to_string_lossy().into_owned(),
+        source,
     })?;
     let child_stdin = child.stdin.take();
     let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
@@ -218,6 +255,23 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn a_missing_binary_is_a_typed_spawn_error() {
+        let err = run_bounded(
+            Command::new("/nonexistent/mdcast-no-such-binary"),
+            &[],
+            None,
+            bounds(),
+            0,
+            "nothing",
+        )
+        .await
+        .err()
+        .unwrap();
+        let spawn = err.downcast_ref::<SpawnError>().unwrap();
+        assert_eq!(spawn.source.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[tokio::test]
     async fn read_capped_keeps_the_prefix_and_flags_the_rest() {
         let data = vec![7u8; 200_000];
         let (kept, overflow) = read_capped(&mut data.as_slice(), 10).await.unwrap();
@@ -258,8 +312,8 @@ mod tests {
         assert!(!done.stdout_overflow);
     }
 
-    /// The child sees exactly `PATH` plus what the caller passed: nothing the
-    /// server inherited (its own environment certainly holds more), and not
+    /// The child sees exactly `PATH` (and `TZ`, when the parent has one) plus
+    /// what the caller passed: nothing else the server inherited, and not
     /// even a variable set on `cmd` itself — so a bearer token can never ride
     /// along whichever way it got there.
     #[tokio::test]
@@ -274,7 +328,15 @@ mod tests {
         let out = String::from_utf8(done.stdout).unwrap();
         let mut keys: Vec<&str> = out.lines().filter_map(|l| l.split('=').next()).collect();
         keys.sort_unstable();
-        assert_eq!(keys, ["HOME", "PATH"], "{out}");
+        let mut expected = vec!["HOME", "PATH"];
+        if let Some(tz) = std::env::var_os("TZ") {
+            expected.push("TZ");
+            assert!(
+                out.contains(&format!("TZ={}", tz.to_string_lossy())),
+                "{out}"
+            );
+        }
+        assert_eq!(keys, expected, "{out}");
         assert!(out.contains("HOME=/sandbox/home"), "{out}");
         assert!(!out.contains("leaked-token"), "{out}");
     }

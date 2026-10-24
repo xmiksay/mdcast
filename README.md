@@ -214,9 +214,20 @@ it directly:
 ```
 
 Provide such CSS by giving the `AssetProvider` a `revealjs/brand.css` key —
-its contents are appended verbatim to the generated `<style data-brand>`
-block. This is the only per-class hook for reveal.js; there is no per-class
-template like typst's layouts.
+its contents are appended to the generated `<style data-brand>` block. This
+is the only per-class hook for reveal.js; there is no per-class template like
+typst's layouts.
+
+Because pandoc's `--embed-resources` inlines whatever a stylesheet's
+`url(...)`/`@import` names — host files included — that block is scrubbed
+first (see "What pandoc may read" below): only `data:` URLs survive (plus
+`http(s):` in a `remote-images` build); any other `url(...)` becomes `none`
+and any other `@import "…"` is dropped, each with a warning. `</` and `&` are
+escaped (`<\/`, `\26 `) so the block can neither close its `<style>` early
+nor smuggle a path past the scrub as an HTML character reference — which
+means a CSS-nesting `&` selector does not work here. The same scrub applies
+to every `.css` file under `revealjs/` (an overridden theme, say), which may
+additionally keep relative URLs that stay inside the reveal.js directory.
 
 ## Typst layout context: `doc-meta` / `brand` / `asset-path`
 
@@ -474,7 +485,7 @@ to it next depends on the target and this feature:
 
 | Target       | `remote-images` off (default)                              | `remote-images` on                                          |
 |--------------|--------------------------------------------------------------|---------------------------------------------------------------|
-| pandoc (docx/odt/pptx/html-reveal) | URL left in the markdown; pandoc fetches it itself at conversion time (needs network on the render host) | Fetched once by mdcast, materialised to a temp file, markdown rewritten to the local path — pandoc never touches the network |
+| pandoc (docx/odt/pptx/html-reveal) | Unresolved: `tracing::warn!` with the URL, image dropped before pandoc runs — pandoc never fetches it | Fetched once by mdcast, materialised to a temp file, markdown rewritten to the local path — pandoc never touches the network |
 | typst (pdf/pdf-presentation) | Unresolved: `tracing::warn!` with the URL, image dropped from the render (no placeholder text leaks into the artifact) | Fetched once by mdcast and registered as a virtual file, same as any other image |
 
 Enable it with `cargo build --features remote-images` (pulls in `reqwest`,
@@ -492,6 +503,55 @@ server is a request-forgery vector (it can probe internal network addresses).
 The feature is opt-in for that reason; if you enable it in a server context,
 front it with your own URL allow/deny-list policy before the markdown ever
 reaches mdcast.
+
+## What pandoc may read
+
+Pandoc's writers read every resource a document names, from wherever it
+points — an image path like `/proc/self/environ` or `/etc/hostname` would be
+read off the render host and embedded in the docx/odt/pptx, or inlined into
+the html-reveal deck by `--embed-resources`. So pandoc only ever gets to read
+the files mdcast materialised for the render itself:
+
+- Every markdown image is resolved through the `AssetProvider` first (or, in
+  a `remote-images` build, fetched by mdcast). One that does not resolve is
+  dropped from the markdown with a `tracing::warn!`, exactly as on the typst
+  targets — whatever its syntax (inline, titled, `<angle-bracket>`,
+  reference-style). Inline `data:` URIs are kept; they carry their own bytes.
+- A Lua filter enforces the same rule a second time on pandoc's own parse of
+  the document, which does not always agree with mdcast's (a reference
+  definition on another page, a table cell, …): any image, and any
+  `src`/`poster`/`background-*`/`data-background-*` attribute (reveal.js
+  slide backgrounds), that is not a `data:` URI or a file directly inside the
+  render's asset directory is removed.
+- **Raw markup is not accepted from the document, on any pandoc target:**
+  the reader runs as `markdown-raw_html-raw_attribute-raw_tex-yaml_metadata_block`.
+  Raw HTML (`<img src="…">`, `<div>`, `<br>`) comes through as literal text,
+  ```` ```{=html} ````/```` ```{=openxml} ```` blocks and `` `…`{=html} ``
+  spans as ordinary code, and a YAML metadata block as ordinary markdown
+  (leading frontmatter is unaffected: mdcast strips it into `DocMeta` before
+  pandoc runs and passes it on as `--metadata`). docx/odt/pptx never rendered raw
+  HTML anyway; **html-reveal no longer passes it through — a behaviour
+  change** (use `--html-image-tags` to keep `<img>`/`<image>` tags working:
+  they become markdown images before pandoc runs). Page classes are
+  unaffected — `<page class="X">` and `::: {.X}` are consumed by the page
+  splitter, not by pandoc — and so are docx/odt page breaks, which the filter
+  now emits itself.
+- The html-reveal CSS layers are scrubbed of host-file URLs (see "Branding
+  reveal.js decks" above).
+
+Pandoc itself runs as a bounded child: a wall-clock timeout
+(`MDCAST_PANDOC_TIMEOUT_SECS` / `--pandoc-timeout-secs`, default 60 s; the
+child is killed and reaped on expiry), no core dumps, an optional
+`RLIMIT_AS` (`MDCAST_PANDOC_MAX_MEMORY_BYTES`), a working directory inside
+the render's temp dir, and an environment holding nothing but `PATH`, `TZ`
+(when set) and a `HOME`/`XDG_*` inside that temp dir — so neither
+`MDCAST_TOKEN` nor a user data directory reaches it.
+
+Network: with every resource reference either materialised by mdcast or
+removed, pandoc has nothing to fetch, so it makes no requests of its own; it
+is not, however, network-sandboxed. The one render-time fetching left is
+mdcast's own, and only in a `remote-images` build (images, and `http(s)`
+URLs kept in reveal.js CSS — which pandoc then fetches while embedding).
 
 ## Image formats
 
@@ -1065,7 +1125,7 @@ shrink amount when the deck is opened.
 ## CLI
 
 ```
-mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
+mdcast render INPUT.md --target <T> --out OUTPUT [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N] [--pandoc-timeout-secs N]
 mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr] [--chess]
 mdcast render-template TEMPLATE --data DATA.json --out OUTPUT [--assets DIR] [--brand brand.toml] [--generated GENERATED.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
 ```
@@ -1103,6 +1163,9 @@ feature — see "HTML export" above.
 and `render-template`) select the in-process compiler (default) or shell out
 to a `typst` binary instead — see "Selecting the Typst compiler" below.
 Ignored by pandoc targets.
+
+`--pandoc-timeout-secs` (default 60) bounds each pandoc run; a run past it is
+killed and the render fails. Ignored by typst targets.
 
 ## HTTP service (`server` feature)
 
@@ -1154,6 +1217,8 @@ container's memory limit.
 | `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli`-mode compile may produce — checked before the file is read into memory, and enforced on the child as `RLIMIT_FSIZE` (+1 MiB) |
 | `MDCAST_MAX_CONCURRENT_RENDERS` | number of CPUs     | Renders allowed to run at once (both render routes together); `0` refuses to start |
 | `MDCAST_RENDER_QUEUE_SECS` | `10`                    | How long a render waits for a slot before a `503 overloaded` (`Retry-After` = this, min 1); `0` = don't wait |
+| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run (docx/odt/pptx/html-reveal); the child is killed and reaped on expiry |
+| `MDCAST_PANDOC_MAX_MEMORY_BYTES` | unset — unbounded | `setrlimit(RLIMIT_AS)` cap on the pandoc child (unix only) |
 | `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true`: a `422 render_failed` also carries `detail`, the typst errors and warnings as `path:line:col: severity: message` with virtual paths only (temp-dir paths stripped). Off, the response is just the incident id |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
 
@@ -1347,8 +1412,10 @@ volumes:
 ```
 
 Locally the same shape is `docker run --read-only --tmpfs /tmp --user 10001
-…`. An egress-deny `NetworkPolicy` is still worth adding — the typst child is
-already kept off the network, pandoc is not.
+…`. An egress-deny `NetworkPolicy` is still worth adding as defence in depth:
+the typst child is kept off the network by a dead proxy, and pandoc is never
+handed anything to fetch (see "What pandoc may read" above), but neither is
+network-sandboxed by the kernel.
 
 ### Known limitations
 

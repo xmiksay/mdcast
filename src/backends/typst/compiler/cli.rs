@@ -45,8 +45,8 @@ use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 use super::super::diagnostics;
-use super::super::process::{Bounds, run_bounded};
 use super::{CompileFormat, CompileInputs};
+use crate::process::{Bounds, run_bounded};
 
 /// Default for [`CliCompiler::max_output_bytes`].
 pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 256 * 1024 * 1024;

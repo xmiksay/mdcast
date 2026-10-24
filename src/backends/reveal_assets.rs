@@ -6,17 +6,23 @@
 //! temp dir `PandocBackend::render_to_bytes` owns and cleans up; all *reads*
 //! still go through the `AssetProvider`.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use anyhow::Result;
+use bytes::Bytes;
 use futures::future::try_join_all;
 
-use super::reveal_brand;
+use super::{reveal_brand, reveal_css};
 use crate::{AssetProvider, BrandSpec};
 
 /// Pull every key beginning with `prefix` from the provider and write the bytes
 /// to `dest/<key-without-prefix>`. Returns the number of files materialised.
 /// Used to lay out the reveal.js dist (and could later cover MathJax, etc.).
+///
+/// Every `.css` file is scrubbed on the way (`reveal_css::sanitize_css`):
+/// pandoc inlines what its `url(...)`s and `@import`s name, and on the server
+/// these keys can be the caller's own blobs. A key carrying a `..` or
+/// absolute component is skipped rather than written outside `dest`.
 pub(super) async fn materialise_subtree(
     provider: &dyn AssetProvider,
     prefix: &str,
@@ -28,10 +34,26 @@ pub(super) async fn materialise_subtree(
             return Ok(0usize);
         };
         let rel = key.strip_prefix(prefix).unwrap_or(key);
+        if !Path::new(rel)
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            tracing::warn!(
+                key,
+                "skipping a reveal.js asset key that escapes its directory"
+            );
+            return Ok(0);
+        }
         let path = dest.join(rel);
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
+        let bytes = if rel.ends_with(".css") {
+            let css = String::from_utf8_lossy(&bytes);
+            Bytes::from(reveal_css::sanitize_css(&css, true, key))
+        } else {
+            bytes
+        };
         tokio::fs::write(&path, &bytes).await?;
         Ok::<usize, anyhow::Error>(1)
     }))
@@ -62,6 +84,13 @@ pub(super) async fn brand_style_file(
     if body.is_empty() {
         return Ok(None);
     }
+    // The whole block, not just the escape hatch: palette and font values are
+    // caller-supplied too.
+    let body = reveal_css::inline_style_safe(&reveal_css::sanitize_css(
+        &body,
+        false,
+        "revealjs/brand.css",
+    ));
 
     let path = root.join("brand.css.html");
     tokio::fs::write(&path, format!("<style data-brand>\n{body}</style>\n")).await?;

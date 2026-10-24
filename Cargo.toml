@@ -97,9 +97,9 @@ server = [
     "tokio/sync",
 ]
 # Fetch http(s) image URLs found in markdown through `images::collect_images`
-# instead of leaving them for pandoc to fetch on its own (or, on the typst
-# path, dropping them with a warning — see issue #54). Off by default: no new
-# dependency, byte-identical output for documents without remote images.
+# instead of dropping them with a warning (both engines — see issue #54; pandoc
+# is never left to fetch anything itself). Off by default: no new dependency,
+# byte-identical output for documents without remote images.
 remote-images = ["dep:reqwest"]
 
 [dependencies]
@@ -142,10 +142,10 @@ usvg = { version = "0.45", optional = true, default-features = false, features =
 flate2 = { version = "1", optional = true, default-features = false, features = ["rust_backend"] }
 zip = { version = "2", optional = true, default-features = false, features = ["deflate"] }
 
-# `RLIMIT_AS` for `TypstCompiler::Cli`'s optional memory cap on its children
-# (`backends/typst/process.rs::apply_memory_limit`) — unix only, so it's
+# `setrlimit` for every engine child process (`process.rs::apply_child_limits`:
+# no core dumps, optional `RLIMIT_AS`/`FSIZE`/`CPU`) — unix only, so it's
 # scoped here rather than behind a cargo feature; a non-unix build simply
-# never applies the cap (documented on `CliCompiler::max_memory_bytes`).
+# never applies the caps (documented on `CliCompiler::max_memory_bytes`).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

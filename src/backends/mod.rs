@@ -12,11 +12,17 @@ use crate::{
 #[cfg(feature = "pandoc")]
 pub mod pandoc;
 #[cfg(feature = "pandoc")]
+mod pandoc_filter;
+#[cfg(feature = "pandoc")]
+mod pandoc_input;
+#[cfg(feature = "pandoc")]
 mod pptx_autofit;
 #[cfg(feature = "pandoc")]
 mod reveal_assets;
 #[cfg(feature = "pandoc")]
 mod reveal_brand;
+#[cfg(feature = "pandoc")]
+mod reveal_css;
 #[cfg(feature = "typst")]
 pub mod typst;
 
@@ -42,12 +48,7 @@ impl Registry {
             r.register(Box::new(typst::TypstBackend::new(Target::PdfPresentation)));
         }
         #[cfg(feature = "pandoc")]
-        {
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Docx)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Odt)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Pptx)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::HtmlReveal)));
-        }
+        r.register_pandoc(pandoc::PandocBackend::new);
         r
     }
 
@@ -67,13 +68,32 @@ impl Registry {
             compiler,
         )));
         #[cfg(feature = "pandoc")]
-        {
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Docx)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Odt)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::Pptx)));
-            r.register(Box::new(pandoc::PandocBackend::new(Target::HtmlReveal)));
-        }
+        r.register_pandoc(pandoc::PandocBackend::new);
         r
+    }
+
+    /// Re-registers the pandoc targets with a per-run timeout and an
+    /// optional `RLIMIT_AS` for the pandoc child (see
+    /// [`pandoc::PandocBackend::with_timeout`]).
+    #[cfg(feature = "pandoc")]
+    pub fn with_pandoc_limits(
+        mut self,
+        timeout: std::time::Duration,
+        max_memory_bytes: Option<u64>,
+    ) -> Self {
+        self.register_pandoc(|target| {
+            pandoc::PandocBackend::new(target)
+                .with_timeout(timeout)
+                .with_max_memory_bytes(max_memory_bytes)
+        });
+        self
+    }
+
+    #[cfg(feature = "pandoc")]
+    fn register_pandoc(&mut self, backend: impl Fn(Target) -> pandoc::PandocBackend) {
+        for target in [Target::Docx, Target::Odt, Target::Pptx, Target::HtmlReveal] {
+            self.register(Box::new(backend(target)));
+        }
     }
 
     pub fn register(&mut self, backend: Box<dyn Backend>) {

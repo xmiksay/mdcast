@@ -65,17 +65,20 @@ src/
 │  ├─ tests.rs        unit tests for the scanner and the QR renderer
 │  └─ chess_tests.rs  unit tests for fen/pgn blocks, attrs, ply selection, sizing
 ├─ preprocessor.rs    MarkdownPreprocessor trait + Identity/Chain/HtmlImageTags
+├─ process.rs         #[cfg(any(feature = "pandoc", feature = "typst"))] run_bounded() — the shared child runner (pandoc child, typst compile child, SVG-outline child): env cleared to PATH + TZ (when set) + caller-given vars (MDCAST_TOKEN never reaches a child), piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, RLIMIT_CORE=0 always + optional RLIMIT_AS/FSIZE/CPU, each clamped to the inherited hard limit; SpawnError (pub, re-exported) — the typed "engine could not be run" error. At the crate root so `pandoc` does not need `typst`
 ├─ pages/
 │  ├─ splitter.rs     PageSplitter trait + DefaultSplitter (line-based)
 │  └─ auto.rs         classify() — explicit > shape > positional > default
 ├─ backends/
-│  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal
+│  ├─ pandoc.rs       #[cfg(feature = "pandoc")]  docx/odt/pptx/html-reveal; PandocBackend (with_timeout/with_max_memory_bytes, DEFAULT_PANDOC_TIMEOUT 60 s), pandoc run via process::run_bounded in the temp root
+│  ├─ pandoc_input.rs #[cfg(feature = "pandoc")]  build_input()/project_slide() — the markdown pandoc reads (class projection, `.mdcast-page-break` divs)
+│  ├─ pandoc_filter.rs #[cfg(feature = "pandoc")] READER (`markdown-raw_html-raw_attribute-raw_tex-yaml_metadata_block`) + the per-render Lua filter: drops raw blocks, every image/resource attribute not `data:` or directly inside the render's assets dir, turns page-break divs into openxml/opendocument
+│  ├─ reveal_css.rs   #[cfg(feature = "pandoc")]  sanitize_css()/inline_style_safe() — strips host-file `url(...)`/`@import` from reveal.js CSS before `--embed-resources` inlines them
 │  ├─ pptx_autofit.rs #[cfg(feature = "pandoc")]  add_autofit() — post-render normAutofit patch (issue #56)
 │  ├─ reveal_assets.rs #[cfg(feature = "pandoc")] materialise_subtree()/brand_style_file()/brand_logo_file() — html-reveal temp-root materialisation
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
-│     ├─ process.rs     run_bounded() — the shared child runner: env cleared to PATH + caller-given vars (MDCAST_TOKEN never reaches a child), piped stdin/stdout/stderr serviced concurrently, capped reads, timeout+kill+reap, RLIMIT_CORE=0 always + optional RLIMIT_AS/FSIZE/CPU, each clamped to the inherited hard limit (typst compile child and SVG-outline child)
 │     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, temp dir stripped) — downcast by mdcast-server for `detail` (issue #96)
 │     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
@@ -264,7 +267,7 @@ happens to mirror them.
 |---------------------------------------|-----------------|
 | `typst/layouts/{target}/{class}.typ`  | typst backend   |
 | `revealjs/dist/...`, `revealjs/plugin/...` | pandoc html-reveal |
-| `revealjs/brand.css`                  | pandoc html-reveal — raw per-class CSS escape hatch, appended to the generated brand `<style>` block (issue #57) |
+| `revealjs/brand.css`                  | pandoc html-reveal — per-class CSS escape hatch, appended to the generated brand `<style>` block (issue #57) after `reveal_css` scrubbing (only `data:` URLs, + `http(s):` with `remote-images`; `</` and `&` escaped) |
 | `reference/reference.{docx,odt,pptx}` | pandoc (matching target) |
 | `mermaid/diagram-{N}.svg`             | mermaid pre-step output (`mermaid::render_diagrams`, `mermaid` feature) — the caller layers these over their provider |
 | `qr/qr-{N}.svg`                       | QR pre-step output (`generators::qr::render_qr_codes`, `qr` feature) — layered like mermaid's |
@@ -379,7 +382,7 @@ merge, tag `vX.Y.Z`, push the tag; once `docker.yml` has pushed the image,
 ## Run
 
 ```
-./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]
+./target/debug/mdcast render INPUT.md --target html-reveal --out out.html [--assets DIR] [--brand brand.toml] [--toc-depth N] [--html-image-tags] [--mermaid] [--qr] [--chess] [--layout-asset KEY]... [--layout-font KEY]... [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N] [--pandoc-timeout-secs N]
 ./target/debug/mdcast explain INPUT.md [--brand brand.toml] [--html-image-tags] [--mermaid] [--qr] [--chess]  # prints per-page (class, origin)
 ./target/debug/mdcast render-template TEMPLATE --data data.json --out out.pdf [--assets DIR] [--brand brand.toml] [--generated generated.json] [--format pdf|html] [--typst-compiler library|cli] [--typst-bin PATH] [--typst-timeout-secs N] [--typst-max-output-bytes N]  # typst-only, no markdown
 ```
@@ -452,6 +455,8 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli` compile may produce: output file's length checked before it is read; also `RLIMIT_FSIZE` (+1 MiB) on each child. Every child also gets `RLIMIT_CPU` = (timeout + 1) × cores + 5 s |
 | `MDCAST_MAX_CONCURRENT_RENDERS` | `available_parallelism()` | Render slots shared by `/v1/render` + `/v1/render/template`; `0` fails startup |
 | `MDCAST_RENDER_QUEUE_SECS` | `10`                    | Wait for a slot before `503 overloaded` + `Retry-After: max(this, 1)`; `0` = no wait |
+| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run; killed and reaped on expiry (`PandocBackend::with_timeout`, `Registry::with_pandoc_limits`) |
+| `MDCAST_PANDOC_MAX_MEMORY_BYTES` | unset — unbounded | `RLIMIT_AS` on the pandoc child (unix only) |
 | `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true` adds `detail` (sanitised typst diagnostics) to `422 render_failed`; off = byte-identical to before |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |
 
@@ -746,6 +751,33 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   feature gates a new `reqwest` dependency (`rustls-tls`, no native-tls) —
   off by default, no new dependency and byte-identical output for documents
   without remote images.
+- **Pandoc reads only what mdcast materialised.** Its writers read any
+  resource a document names from wherever it points (`/proc/self/environ`,
+  `/etc/…` were embedded verbatim before this). Three layers stop that:
+  `images::resolve_images` deletes every image reference that did not
+  resolve (provider miss, remote without/with a failed `remote-images`
+  fetch, `file://`; only inline `data:` survives) with a `tracing::warn!`,
+  same as the typst path; `backends/pandoc_filter.rs`'s Lua filter repeats
+  the rule on pandoc's *own* AST — pulldown-cmark and pandoc disagree on
+  e.g. a reference definition on another page — dropping every image and
+  `src`/`poster`/`background-*`/`data-background-*` attribute that is not
+  `data:` or a file directly inside the render's assets dir; and the reader
+  is `markdown-raw_html-raw_attribute-raw_tex-yaml_metadata_block` for all
+  four targets, so raw HTML, ```` ```{=format} ```` blocks, raw TeX and
+  in-document YAML metadata (`css:`, `header-includes:`) never reach a
+  writer. Behaviour change: html-reveal no longer passes raw HTML through
+  (docx/odt/pptx never rendered it); `--html-image-tags` still works
+  because it rewrites tags to markdown images before pandoc. docx/odt page
+  breaks are empty `.mdcast-page-break` divs the filter converts to raw
+  openxml/opendocument. html-reveal CSS (the brand block and every `.css`
+  under `revealjs/`) goes through `reveal_css::sanitize_css` (+
+  `inline_style_safe` for the inline block — pandoc decodes HTML entities
+  inside `<style>`). The pandoc child itself runs through
+  `process::run_bounded`: cwd + `HOME`/`XDG_*` in the temp root, env cleared
+  to PATH/TZ, timeout (`MDCAST_PANDOC_TIMEOUT_SECS`, default 60), no core
+  dumps, optional `RLIMIT_AS`. `tests/pandoc_local_files.rs` asserts no
+  target embeds a canary file, `/etc/hostname` or an env canary in any
+  encoding.
 - mdcast never validates or transcodes image bytes (except SVG on the typst
   targets, next bullet) — the per-target format
   support matrix (issue #55, documented in README's "Image formats" section)
@@ -801,7 +833,7 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   `TypstCompiler::Cli` and an `OutlineCommand` (`CliCompiler::with_outline`)
   the whole step — detection, inflate, validation parse, outlining, caps —
   runs in a child process (`svg_outline/child.rs`) under the compile's own
-  timeout + kill/reap + `RLIMIT_AS` (`process.rs::run_bounded`, shared with
+  timeout + kill/reap + `RLIMIT_AS` (`crate::process::run_bounded`, shared with
   the typst child), spawned only if some file is an SVG candidate. The child
   is our own binary in its hidden `__outline-svg` mode
   (`backends::typst::OUTLINE_CHILD_ARG`; a hidden clap subcommand in

@@ -32,7 +32,6 @@ mod context;
 mod diagnostics;
 mod fonts;
 mod markdown;
-mod process;
 mod svg_outline;
 mod template;
 #[cfg(test)]

@@ -32,7 +32,9 @@
 //! `--include-after-body`. See `reveal_assets::brand_style_file`/
 //! `::brand_logo_file` and the README's "Branding reveal.js decks" section.
 
+use std::ffi::OsStr;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
@@ -42,13 +44,20 @@ use tokio::process::Command;
 use crate::AssetProvider;
 use crate::assets::BoxFuture;
 use crate::images::resolve_images;
-use crate::pages::Page;
+use crate::process::{Bounds, run_bounded};
 use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
+use super::pandoc_filter::{READER, write_filter};
+pub use super::pandoc_input::build_input;
 use super::reveal_assets::{brand_logo_file, brand_style_file, materialise_subtree};
+
+/// Default for [`PandocBackend::with_timeout`].
+pub const DEFAULT_PANDOC_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub struct PandocBackend {
     target: Target,
+    timeout: Duration,
+    max_memory_bytes: Option<u64>,
 }
 
 impl PandocBackend {
@@ -57,7 +66,36 @@ impl PandocBackend {
             target,
             Target::Docx | Target::Odt | Target::Pptx | Target::HtmlReveal
         ));
-        Self { target }
+        Self {
+            target,
+            timeout: DEFAULT_PANDOC_TIMEOUT,
+            max_memory_bytes: None,
+        }
+    }
+
+    /// Wall-clock budget for one pandoc run; exceeded → the child is killed
+    /// and reaped, and the render fails.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// `RLIMIT_AS` for the pandoc child (Unix only). `None`, the default,
+    /// leaves it unbounded.
+    pub fn with_max_memory_bytes(mut self, bytes: Option<u64>) -> Self {
+        self.max_memory_bytes = bytes;
+        self
+    }
+
+    fn bounds(&self) -> Bounds {
+        Bounds {
+            timeout: self.timeout,
+            max_memory_bytes: self.max_memory_bytes,
+            max_file_bytes: None,
+            // Backs up the wall-clock timeout should this process die and
+            // leave the child unreaped; pandoc is effectively single-core.
+            cpu_secs: Some(self.timeout.as_secs().saturating_mul(2).saturating_add(5)),
+        }
     }
 }
 
@@ -80,12 +118,14 @@ impl Backend for PandocBackend {
             let root = tmp.path();
 
             // Resolve image references via the provider before handing the
-            // markdown to pandoc. Anything the provider doesn't know about is
-            // left intact so pandoc's own resolution path can have a go.
+            // markdown to pandoc; anything unresolved is dropped, and the
+            // filter enforces the same on pandoc's own AST (see
+            // `pandoc_filter`'s module docs for why both).
             let mut pages = doc.pages.clone();
             let assets_dir = root.join("assets");
             tokio::fs::create_dir_all(&assets_dir).await?;
             resolve_images(&mut pages, assets, &assets_dir, self.target).await?;
+            let filter = write_filter(root, &assets_dir).await?;
 
             let input = build_input(&pages, self.target);
             let input_path = root.join("input.md");
@@ -150,9 +190,13 @@ impl Backend for PandocBackend {
             };
 
             let mut cmd = Command::new("pandoc");
+            // Relative paths resolve inside the temp root, never in the
+            // server's own working directory.
+            cmd.current_dir(root);
             cmd.arg(&input_path);
             cmd.arg("-o").arg(&out_path);
-            cmd.arg("--from=markdown");
+            cmd.arg(format!("--from={READER}"));
+            cmd.arg(format!("--lua-filter={}", filter.display()));
             cmd.arg(format!("--to={}", pandoc_writer(self.target)));
             if matches!(self.target, Target::HtmlReveal) {
                 cmd.arg("--standalone").arg("--embed-resources");
@@ -189,12 +233,26 @@ impl Backend for PandocBackend {
                 cmd.arg(format!("--metadata=date={d}"));
             }
 
-            let status = cmd
-                .status()
-                .await
-                .context("spawn pandoc — is the `pandoc` binary on PATH?")?;
-            if !status.success() {
-                bail!("pandoc failed with status {status}");
+            // The environment is cleared except PATH/TZ (`run_bounded`);
+            // HOME and the XDG dirs point into the temp root, so pandoc's
+            // user data directory is empty and nothing lands in the server's
+            // own home.
+            let home = root.join("home");
+            tokio::fs::create_dir_all(&home).await?;
+            let env = [
+                ("HOME", home.as_os_str()),
+                ("XDG_DATA_HOME", home.as_os_str()),
+                ("XDG_CONFIG_HOME", home.as_os_str()),
+                ("XDG_CACHE_HOME", home.as_os_str()),
+                ("LANG", OsStr::new("C.UTF-8")),
+            ];
+            let done = run_bounded(cmd, &env, None, self.bounds(), 0, "pandoc").await?;
+            if !done.status.success() {
+                bail!(
+                    "pandoc failed with status {}:\n{}",
+                    done.status,
+                    String::from_utf8_lossy(&done.stderr)
+                );
             }
 
             let mut bytes = tokio::fs::read(&out_path)
@@ -270,91 +328,6 @@ fn pandoc_writer(target: Target) -> &'static str {
         Target::Pptx => "pptx",
         Target::HtmlReveal => "revealjs",
         _ => unreachable!(),
-    }
-}
-
-/// Build the markdown input fed to pandoc, projecting per-page class according
-/// to the target's idiom.
-///
-/// * **docx / odt** — page-based outputs; wrap each page's body in
-///   `::: {custom-style="<class>"}` so the matching paragraph style from the
-///   reference doc is applied. Pages are separated by a raw-format block pandoc
-///   passes straight through to the writer — `\pagebreak{}` is raw LaTeX and
-///   both writers silently drop it. Docx gets an `openxml` block inserting
-///   `<w:br w:type="page"/>` directly (no reference doc needed). Odt gets an
-///   `opendocument` block referencing the `PageBreak` paragraph style (defined
-///   in `embedded/reference/reference.odt` with `fo:break-before="page"`) —
-///   ODF has no reference-doc-free way to force a break, since page-break
-///   formatting can only live on a named style, not inline on the paragraph.
-/// * **pptx / html-reveal** — slide-based outputs; with `--slide-level=1` only
-///   an h1 starts a new slide, so we project the class *onto the h1* of each
-///   page, synthesising an empty h1 when the page has none. This is the
-///   pandoc-native way to put a class on a slide section.
-pub fn build_input(pages: &[Page], target: Target) -> String {
-    let mut s = String::new();
-    for (i, page) in pages.iter().enumerate() {
-        if i > 0 {
-            s.push('\n');
-            match target {
-                Target::Docx => {
-                    s.push_str(
-                        "```{=openxml}\n<w:p><w:r><w:br w:type=\"page\"/></w:r></w:p>\n```\n\n",
-                    );
-                }
-                Target::Odt => {
-                    s.push_str(
-                        "```{=opendocument}\n<text:p text:style-name=\"PageBreak\"/>\n```\n\n",
-                    );
-                }
-                _ => {}
-            }
-        }
-        match target {
-            Target::Docx | Target::Odt => {
-                s.push_str(&format!("::: {{custom-style=\"{}\"}}\n", page.class));
-                s.push_str(&page.body);
-                if !page.body.ends_with('\n') {
-                    s.push('\n');
-                }
-                s.push_str(":::\n");
-            }
-            Target::Pptx | Target::HtmlReveal => {
-                s.push_str(&project_slide(&page.body, &page.class));
-                if !s.ends_with('\n') {
-                    s.push('\n');
-                }
-            }
-            _ => unreachable!(),
-        }
-    }
-    s
-}
-
-/// Attach `{.<class>}` to the first h1 of `body`, or prepend an empty
-/// `# {.<class>}` if none exists. Only handles ATX-style (`#`) headings; setext
-/// underlining is rare enough to defer.
-fn project_slide(body: &str, class: &str) -> String {
-    let trimmed = body.trim_start_matches('\n');
-    let mut lines = trimmed.lines();
-    let Some(first) = lines.next() else {
-        return format!("# {{.{class}}}\n");
-    };
-    if let Some(title) = first.strip_prefix("# ") {
-        // Page already has an h1: append the class. We don't try to merge with
-        // an existing attribute spec — if authors hand-write `{...}` on an h1,
-        // the auto-class will collide; in that case they should set the class
-        // explicitly on the wrapper instead.
-        let rest: String = lines.collect::<Vec<_>>().join("\n");
-        let trailing_nl = if body.ends_with('\n') { "\n" } else { "" };
-        if rest.is_empty() {
-            format!("# {title} {{.{class}}}\n")
-        } else {
-            format!("# {title} {{.{class}}}\n{rest}{trailing_nl}")
-        }
-    } else {
-        // No h1: synthesise an empty one so pandoc starts a new slide.
-        let trailing_nl = if body.ends_with('\n') { "" } else { "\n" };
-        format!("# {{.{class}}}\n\n{body}{trailing_nl}")
     }
 }
 

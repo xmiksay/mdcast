@@ -34,6 +34,8 @@ fn token_alone_is_enough_and_everything_else_defaults() {
     assert_eq!(cfg.max_concurrent_renders, cores);
     assert_eq!(cfg.render_queue, Duration::from_secs(10));
     assert!(!cfg.expose_diagnostics);
+    assert_eq!(cfg.pandoc_timeout, Duration::from_secs(60));
+    assert_eq!(cfg.pandoc_max_memory_bytes, None);
 }
 
 #[test]
@@ -62,8 +64,13 @@ fn every_variable_is_honoured() {
         (MAX_CONCURRENT_RENDERS, "3"),
         (RENDER_QUEUE_SECS, "0"),
         (EXPOSE_DIAGNOSTICS, "1"),
+        (PANDOC_TIMEOUT_SECS, "7"),
+        (PANDOC_MAX_MEMORY_BYTES, "4096"),
     ])
     .unwrap();
+
+    assert_eq!(cfg.pandoc_timeout, Duration::from_secs(7));
+    assert_eq!(cfg.pandoc_max_memory_bytes, Some(4096));
 
     assert_eq!(cfg.max_concurrent_renders, 3);
     assert_eq!(cfg.render_queue, Duration::ZERO);

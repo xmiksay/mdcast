@@ -17,9 +17,9 @@ use anyhow::{Context, Result, bail};
 use tokio::process::Command;
 
 use super::super::compiler::OutlineCommand;
-use super::super::process::{Bounds, run_bounded};
 use super::resolve::{is_gzip, linked_kind};
 use super::{LIMITS, Outcome, Outlined, apply, classify, ipc, may_contain_text, svg_kind};
+use crate::process::{Bounds, run_bounded};
 
 pub(super) async fn outline_in_child(
     cmd: &OutlineCommand,

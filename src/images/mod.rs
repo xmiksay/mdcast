@@ -7,9 +7,11 @@
 //! temp directory and rewrites the markdown so the path points at the
 //! materialised file; the typst path (`backends/typst/mod.rs`) keeps the
 //! bytes in memory and registers them as virtual files with the compiler.
-//! Anything the provider returns `None` for is left untouched — backends
-//! will then fall back to whatever their engine does (pandoc's
-//! `--resource-path`, missing-image warning, etc.).
+//! Neither engine ever sees a reference the provider could not resolve: the
+//! typst converter drops it, and `resolve_images` deletes it from the
+//! markdown before pandoc runs — pandoc would otherwise read *any* local
+//! path the process can (`/proc/self/environ`, `/etc/…`) and embed it into
+//! the artifact.
 
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -183,6 +185,12 @@ async fn fetch_remote(url: &str) -> Option<Bytes> {
 /// Resolve every image reference in `pages` through `provider`. Mutates the
 /// page bodies in place; materialises bytes into `dest`. Returns the set of
 /// keys actually fetched (handy for tests and `--explain`).
+///
+/// A reference that did not resolve — a provider miss, an `http(s)` URL
+/// without the `remote-images` feature (or whose fetch failed), a `file://`
+/// URL — is removed from the body with a warning, the same treatment the
+/// typst path gives it (issue #54). Only inline `data:` URIs survive
+/// unresolved: they carry their own bytes, so pandoc reads nothing for them.
 pub async fn resolve_images(
     pages: &mut [Page],
     provider: &dyn AssetProvider,
@@ -218,6 +226,12 @@ pub async fn resolve_images(
                 let replacement =
                     render_image_ref(&r.alt, &local.display().to_string(), r.title.as_deref());
                 body.replace_range(r.range.clone(), &replacement);
+            } else if !r.dest_url.starts_with("data:") {
+                tracing::warn!(
+                    url = r.dest_url.as_str(),
+                    "image could not be resolved; dropping it"
+                );
+                body.replace_range(r.range.clone(), "");
             }
         }
         page.body = body;
