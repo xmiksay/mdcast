@@ -79,12 +79,13 @@ src/
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
-│     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, temp dir stripped) — downcast by mdcast-server for `detail` (issue #96)
+│     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, compile root then the whole temp dir stripped, canonical forms too; a clap usage error is never a diagnostic — is_usage_error()) — downcast by mdcast-server for `detail` (issue #96)
 │     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
-│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand, DEFAULT_MAX_OUTPUT_BYTES) — temp dir (`src/` = --root, `fonts/`, empty `packages/`, `home/`, output beside) + sealed `typst compile` (--ignore-system-fonts, empty package dirs, proxy vars → closed loopback port) via process::run_bounded, output-size cap before read, safe_join path-traversal guard
+│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand, DEFAULT_MAX_OUTPUT_BYTES) — temp dir (`src/` = --root, `fonts/`, empty `packages/`, `home/`, output beside) + sealed `typst compile` (--ignore-system-fonts, empty package dirs, proxy vars → closed loopback port) via process::run_bounded, output-size cap before read, safe_join path-traversal guard; a usage error from the binary → SpawnError (internal), not diagnostics
+│     │  ├─ version.rs  CliCompiler::check_version() + MIN_TYPST_CLI_VERSION (0.13 — first with `--features html`/`--format html`) — `TypstCompiler::check_startup()`, run by mdcast-server at startup (fails fast) and by the CLI for `--typst-compiler cli`
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/diagnostics/@preview refused/output cap/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
 │     ├─ svg_outline/     outline_svgs() — every SVG file headed for a typst compile that may contain text re-serialised by usvg with <text> → paths (issue #92)
@@ -112,12 +113,12 @@ src/
    ├─ main.rs           wiring only: hidden `__outline-svg` child mode check (argv[1], before config/runtime) → config → blob store → prefill → Registry → router → axum::serve
    ├─ config.rs         Config::from_env — every MDCAST_* variable (tests in config_tests.rs)
    ├─ auth.rs           require_bearer middleware + is_authorized (constant-time, subtle)
-   ├─ error.rs          ApiError → status + ErrorResponse; json_body(); render_failed(expose) (opt-in diagnostics `detail`); Overloaded → 503 + Retry-After; internal detail → log only
-   ├─ render_gate.rs    RenderGate — global render semaphore + queue timeout (issue #96), held by both render routes after validation/manifest resolution
+   ├─ error.rs          ApiError → status + ErrorResponse; json_body(); render_failed(expose) (opt-in diagnostics `detail`, capped at 100 entries / 64 KiB + `… N more`; a `SpawnError` in the chain → Internal, not RenderFailed); Overloaded → 503 + Retry-After; internal detail → log only (tests in error_tests.rs)
+   ├─ render_gate.rs    RenderGate — global render semaphore + queue timeout + bounded queue (`MDCAST_RENDER_QUEUE_MAX`, full → immediate 503) (issue #96), held by both render routes after validation/manifest resolution
    ├─ pandoc.rs          probe_pandoc() — startup `pandoc --version` check, feeds GET /v1/capabilities (issue #81)
    ├─ blobs/
    │  ├─ store.rs       BlobStore/BlobWriter — in-memory, byte-budgeted, second-chance ("lives") LRU, sha256-verified, pin()/mirror_path() for #72/pandoc
-   │  ├─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob
+   │  ├─ provider.rs    BlobAssets — AssetManifest-backed AssetProvider; resolve() reports every missing blob; recheck() repeats it after the render-gate wait
    │  └─ prefill.rs     prefill() — MDCAST_PREFILL_DIR startup warmup: walk, hash, ingest, pin, mirror (issue #72)
    └─ routes/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
@@ -449,12 +450,13 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_MAX_UPLOAD_BYTES` | `268435456` (256 MiB)    | Ceiling for **every** request body, not just uploads |
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `MDCAST_TYPST`            | `cli`                    | `cli` (shells out to a sealed-off `typst` binary per compile — issue #73; the server default since issue #96) or `library` (in-process, no time/memory limit — trusted callers only). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. The `mdcast` CLI's own default stays `library`. |
-| `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path |
+| `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path. `Config::check_typst` fails startup if it does not run or reports < 0.13 |
 | `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92) each get the full value, so a render's worst case is ~2× this. Exceeded → the child is killed and reaped before the request's error response is returned |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to each `cli`-mode child (typst compile and SVG outline). Unix-only; a no-op elsewhere |
 | `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli` compile may produce: output file's length checked before it is read; also `RLIMIT_FSIZE` (+1 MiB) on each child. Every child also gets `RLIMIT_CPU` = (timeout + 1) × cores + 5 s |
 | `MDCAST_MAX_CONCURRENT_RENDERS` | `available_parallelism()` | Render slots shared by `/v1/render` + `/v1/render/template`; `0` fails startup |
 | `MDCAST_RENDER_QUEUE_SECS` | `10`                    | Wait for a slot before `503 overloaded` + `Retry-After: max(this, 1)`; `0` = no wait |
+| `MDCAST_RENDER_QUEUE_MAX` | 2 × `MDCAST_MAX_CONCURRENT_RENDERS` | Renders allowed to wait at once; one more → `503 overloaded` immediately (a queued request holds its decoded body); `0` = never queue |
 | `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run; killed and reaped on expiry (`PandocBackend::with_timeout`, `Registry::with_pandoc_limits`) |
 | `MDCAST_PANDOC_MAX_MEMORY_BYTES` | unset — unbounded | `RLIMIT_AS` on the pandoc child (unix only) |
 | `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true` adds `detail` (sanitised typst diagnostics) to `422 render_failed`; off = byte-identical to before |
@@ -544,9 +546,13 @@ chain into `detail` — typed, never string-parsed in the server.
 (`render_gate.rs`) is a `tokio::sync::Semaphore`; both render handlers
 `enter()` it right after `BlobAssets::resolve` (so a `400`/`409` never holds a
 slot) and keep the permit for the rest of the handler. A wait longer than
-`MDCAST_RENDER_QUEUE_SECS` is `ApiError::Overloaded` → `503`, code
+`MDCAST_RENDER_QUEUE_SECS`, or arriving to a full queue
+(`MDCAST_RENDER_QUEUE_MAX` waiters), is `ApiError::Overloaded` → `503`, code
 `overloaded`, `Retry-After`. Blob routes, `/health` and capabilities never
-take a slot.
+take a slot. Right after `enter()` both handlers call
+`BlobAssets::recheck()` — presence only, no byte snapshot, so queued
+requests pin nothing — and answer `409` for anything evicted during the
+wait. README's "Sizing memory" / "Sizing `/tmp`" carry the formulas.
 
 ## HTTP client (`mdcast-client`)
 
@@ -587,7 +593,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
 - `Artifact { bytes, filename, content_type }` — headers win; the fallbacks
   are derived (`output.<Target::extension()>`, `application/octet-stream`) and
   a filename carrying a path separator is discarded rather than sanitised.
-- `Error` — `Config`, `Transport`, `Unauthorized` (401), `PayloadTooLarge`
+- `Error` (`#[non_exhaustive]`, as are `Error::Server`'s fields and the
+  wire's `ErrorCode`/`ErrorResponse` — since 0.5.0) — `Config`, `Transport`, `Unauthorized` (401), `PayloadTooLarge`
   (413), `Overloaded { message, retry_after }` (a `503` whose body says
   `overloaded`; a proxy's bare `503` stays `UnexpectedStatus`),
   `BlobsStillMissing` (the 409 that survived the retry),
@@ -1026,7 +1033,11 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   `MDCAST_TYPST_MAX_MEMORY_BYTES` can cap its address space via
   `setrlimit(RLIMIT_AS)`. Since issue #96 `cli` is the server's default
   (the `mdcast` CLI keeps `library`); `library` stays selectable for
-  trusted callers and keeps this limitation. Still do
+  trusted callers and keeps this limitation — and the render gate compounds
+  it: a hung compile keeps its slot for as long as its thread is wedged
+  (after `MDCAST_MAX_CONCURRENT_RENDERS` of them every render is a `503`),
+  while a client disconnect frees the slot even though the compile keeps
+  running (the gate then under-counts work in flight). Still do
   **not** paper over the `library`-mode limitation with a
   `tokio::time::timeout` — it would free the request without reclaiming the
   thread.
@@ -1040,7 +1051,9 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   The markdown route layers them normally, so an unmentioned
   `reference/reference.docx` or layout still resolves to the built-in.
 - Blob eviction can race a render: a blob present at manifest resolution may be
-  evicted before the render reads it, in which case `BlobAssets::get` returns
+  evicted before the render reads it. The render-gate queue wait — the long
+  window — is closed by `BlobAssets::recheck()` (→ `409`); what remains is the
+  short gap between that recheck and the read, in which case `BlobAssets::get` returns
   `None` and the asset degrades exactly as an unsupplied key does (warn +
   skip). Content addressing makes recovery trivial — upload and retry — so no
   lock or refcount is worth the complexity at a single instance.

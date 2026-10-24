@@ -38,6 +38,7 @@ impl TypstCompilerArgs {
     /// In `cli` mode the SVG-outline step runs as this same binary's hidden
     /// `__outline-svg` subcommand, under the compile's timeout.
     pub async fn build(&self) -> anyhow::Result<mdcast::backends::typst::TypstCompiler> {
+        use anyhow::Context;
         use mdcast::backends::typst::{CliCompiler, OutlineCommand, TypstCompiler};
         let compiler = match self.mode {
             TypstCompilerArg::Library => TypstCompiler::Library,
@@ -50,7 +51,10 @@ impl TypstCompilerArgs {
                 .with_outline(Some(OutlineCommand::current_exe()?)),
             ),
         };
-        compiler.log_startup_info().await;
+        compiler.check_startup().await.context(
+            "--typst-compiler cli needs a working typst binary (see --typst-bin); \
+             use --typst-compiler library to compile in-process instead",
+        )?;
         Ok(compiler)
     }
 }

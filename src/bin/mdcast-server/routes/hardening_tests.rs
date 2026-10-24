@@ -15,7 +15,7 @@ fn gated(
     compiler: TypstCompiler,
 ) -> (Router, Arc<AppState>) {
     let state = Arc::new(AppState {
-        render_gate: RenderGate::new(slots, queue),
+        render_gate: RenderGate::new(slots, queue, 2 * slots),
         expose_diagnostics,
         ..state(compiler, true, 1 << 20)
     });
@@ -95,6 +95,73 @@ async fn a_render_waits_in_the_queue_for_a_slot_to_free_up() {
     drop(held);
 
     assert_eq!(pending.await.unwrap(), StatusCode::OK);
+}
+
+/// A blob evicted while its render waited for a slot is a `409` the caller
+/// can recover from, not a `200` quietly missing that image.
+#[tokio::test]
+async fn a_blob_evicted_during_the_queue_wait_is_a_409() {
+    // Budget 10 bytes, one life: the 5-byte blob evicts the 8-byte one.
+    let state = Arc::new(AppState {
+        store: Arc::new(BlobStore::new(10, 1, 32).unwrap()),
+        render_gate: RenderGate::new(1, Duration::from_secs(30), 2),
+        ..state(TypstCompiler::Library, true, 1 << 20)
+    });
+    let app = router(state.clone(), Some(TOKEN), 1 << 20);
+    let doomed = sha256(b"a-doomed");
+    state.store.put(&doomed, b"a-doomed").unwrap();
+    let held = state.render_gate.enter().await.ok().unwrap();
+
+    let pending = tokio::spawn({
+        let app = app.clone();
+        let request = json_request(
+            "/v1/render",
+            serde_json::json!({
+                "markdown": "![](img/x.png)",
+                "target": "pdf",
+                "assets": { "img/x.png": doomed.as_str() },
+            }),
+        );
+        async move {
+            let (status, response) = send(&app, request).await;
+            (status, body_json(response).await)
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!pending.is_finished(), "resolved, now queued");
+    state.store.put(&sha256(b"bbbbb"), b"bbbbb").unwrap();
+    assert!(!state.store.contains(&doomed), "the test must really evict");
+    drop(held);
+
+    let (status, body) = pending.await.unwrap();
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(body["missing"][0]["key"], "img/x.png", "{body}");
+}
+
+/// Past `MDCAST_RENDER_QUEUE_MAX` waiting renders, the next is turned away at
+/// once instead of holding its body in memory for the whole queue time.
+#[tokio::test]
+async fn a_full_queue_answers_503_without_waiting() {
+    let state = Arc::new(AppState {
+        render_gate: RenderGate::new(1, Duration::from_secs(30), 1),
+        ..state(TypstCompiler::Library, true, 1 << 20)
+    });
+    let app = router(state.clone(), Some(TOKEN), 1 << 20);
+    let held = state.render_gate.enter().await.ok().unwrap();
+    let queued = tokio::spawn({
+        let app = app.clone();
+        async move { send(&app, pdf_request("# Hi")).await.0 }
+    });
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let start = std::time::Instant::now();
+    let (status, response) = send(&app, pdf_request("# Hi")).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(start.elapsed() < Duration::from_secs(5), "it did not wait");
+    assert_eq!(body_json(response).await["code"], "overloaded");
+
+    drop(held);
+    assert_eq!(queued.await.unwrap(), StatusCode::OK, "the queued one runs");
 }
 
 /// Cheap answers — a 400, a 409, blob traffic, health — never need a slot.

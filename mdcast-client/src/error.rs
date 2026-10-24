@@ -18,7 +18,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// error message — a misconfigured proxy can answer with a whole HTML page.
 const SNIPPET_CHARS: usize = 512;
 
+/// Non-exhaustive, like [`Error::Server`]'s fields: new failure modes and
+/// new server-supplied fields are not breaking changes, so a `match` needs a
+/// wildcard arm and a `Server { .. }` pattern a `..`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The client was built with a base URL or token it cannot use.
     #[error("invalid client configuration: {0}")]
@@ -64,6 +68,7 @@ pub enum Error {
     /// server with `MDCAST_EXPOSE_DIAGNOSTICS` on) are carried through
     /// verbatim.
     #[error("the mdcast server returned {status} ({code:?}): {message}")]
+    #[non_exhaustive]
     Server {
         status: u16,
         code: ErrorCode,
@@ -140,6 +145,7 @@ pub(crate) fn from_status(status: u16, retry_after: Option<Duration>, body: &[u8
                 code,
                 message,
                 detail,
+                ..
             }) => Error::Server {
                 status,
                 code,

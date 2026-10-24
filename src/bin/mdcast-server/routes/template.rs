@@ -76,6 +76,7 @@ pub async fn render(
         .map_err(ApiError::MissingBlobs)?;
     // Only now: a 400 or a 409 round trip never occupies a render slot.
     let _slot = state.render_gate.enter().await?;
+    blobs.recheck().map_err(ApiError::MissingBlobs)?;
     let provider = LayeredAssets {
         over: generated,
         base: LayeredAssets {

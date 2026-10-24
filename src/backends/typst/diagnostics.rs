@@ -80,21 +80,38 @@ fn describe(d: &SourceDiagnostic, sources: &[Source]) -> String {
 
 /// `Cli` mode: picks the diagnostic lines out of a `--diagnostic-format
 /// short` stderr — anything else there (package download progress, a
-/// panic) is not a diagnostic — and strips `root` from each. `None` when
-/// there are none, i.e. the child failed for some other reason.
-pub(super) fn from_cli_stderr(stderr: &str, root: &Path) -> Option<CompileDiagnostics> {
-    let mut roots = vec![root.to_path_buf()];
-    if let Ok(canonical) = root.canonicalize()
-        && canonical != root
-    {
-        roots.push(canonical);
+/// panic) is not a diagnostic — and strips each of `roots` (and its
+/// canonical form) from them. Pass the compile root before the temp dir that
+/// contains it: stripping the outer one first would leave `src/` behind.
+/// `None` when there are none, i.e. the child failed for some other reason.
+pub(super) fn from_cli_stderr(stderr: &str, roots: &[&Path]) -> Option<CompileDiagnostics> {
+    if is_usage_error(stderr) {
+        return None;
     }
+    let roots: Vec<std::path::PathBuf> = roots
+        .iter()
+        .flat_map(|root| {
+            let canonical = root.canonicalize().ok().filter(|c| c != root);
+            std::iter::once(root.to_path_buf()).chain(canonical)
+        })
+        .collect();
     let diagnostics: Vec<String> = stderr
         .lines()
         .filter(|l| is_diagnostic(l))
         .map(|l| strip_roots(l, &roots))
         .collect();
     (!diagnostics.is_empty()).then_some(CompileDiagnostics { diagnostics })
+}
+
+/// The command-line parser's own complaint (`error: unexpected argument
+/// '--x' found` … `Usage:` … `For more information, try '--help'.`) — a
+/// `typst` that does not understand mdcast's invocation, not a template
+/// error, however much its first line looks like one.
+pub(super) fn is_usage_error(stderr: &str) -> bool {
+    stderr.lines().any(|l| {
+        let l = l.trim_start();
+        l.starts_with("Usage:") || l.starts_with("For more information, try '--help'")
+    })
 }
 
 fn is_diagnostic(line: &str) -> bool {
@@ -124,7 +141,7 @@ mod tests {
                       main.typ:2:1: error: file not found (searched at /tmp/mdcast-typst-abc123/img/x.png)\n\
                       warning: unknown font family: nope\n";
 
-        let diags = from_cli_stderr(stderr, root).unwrap();
+        let diags = from_cli_stderr(stderr, &[root]).unwrap();
 
         assert_eq!(
             diags.diagnostics,
@@ -139,9 +156,37 @@ mod tests {
     #[test]
     fn cli_stderr_without_diagnostics_is_none() {
         assert_eq!(
-            from_cli_stderr("thread 'main' panicked\n", Path::new("/tmp/x")),
+            from_cli_stderr("thread 'main' panicked\n", &[Path::new("/tmp/x")]),
             None
         );
+    }
+
+    #[test]
+    fn the_compile_root_and_the_temp_dir_around_it_are_both_stripped() {
+        let dir = Path::new("/tmp/mdcast-typst-abc123");
+        let root = dir.join("src");
+        let stderr = "main.typ:1:1: error: file not found (searched at /tmp/mdcast-typst-abc123/src/a.png)\n\
+                      error: failed to load font /tmp/mdcast-typst-abc123/fonts/font-0.ttf\n";
+
+        let diags = from_cli_stderr(stderr, &[&root, dir]).unwrap();
+
+        assert_eq!(
+            diags.diagnostics,
+            [
+                "main.typ:1:1: error: file not found (searched at a.png)",
+                "error: failed to load font fonts/font-0.ttf",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_cli_usage_error_is_not_a_template_diagnostic() {
+        let stderr = "error: unexpected argument '--ignore-system-fonts' found\n\n\
+                      Usage: typst compile [OPTIONS] <INPUT> [OUTPUT]\n\n\
+                      For more information, try '--help'.\n";
+        assert!(is_usage_error(stderr));
+        assert_eq!(from_cli_stderr(stderr, &[Path::new("/tmp/x")]), None);
+        assert!(!is_usage_error("main.typ:1:1: error: unclosed delimiter\n"));
     }
 
     #[test]

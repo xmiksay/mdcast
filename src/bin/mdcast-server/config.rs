@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mdcast::backends::typst::{CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, TypstCompiler};
+use mdcast::backends::typst::{
+    CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, MIN_TYPST_CLI_VERSION, TypstCompiler,
+};
 
 pub const BIND: &str = "MDCAST_BIND";
 pub const TOKEN: &str = "MDCAST_TOKEN";
@@ -25,6 +27,7 @@ pub const TYPST_MAX_MEMORY_BYTES: &str = "MDCAST_TYPST_MAX_MEMORY_BYTES";
 pub const TYPST_MAX_OUTPUT_BYTES: &str = "MDCAST_TYPST_MAX_OUTPUT_BYTES";
 pub const MAX_CONCURRENT_RENDERS: &str = "MDCAST_MAX_CONCURRENT_RENDERS";
 pub const RENDER_QUEUE_SECS: &str = "MDCAST_RENDER_QUEUE_SECS";
+pub const RENDER_QUEUE_MAX: &str = "MDCAST_RENDER_QUEUE_MAX";
 pub const EXPOSE_DIAGNOSTICS: &str = "MDCAST_EXPOSE_DIAGNOSTICS";
 pub const PANDOC_TIMEOUT_SECS: &str = "MDCAST_PANDOC_TIMEOUT_SECS";
 pub const PANDOC_MAX_MEMORY_BYTES: &str = "MDCAST_PANDOC_MAX_MEMORY_BYTES";
@@ -71,6 +74,9 @@ pub struct Config {
     /// How long a render waits for a slot before it is answered `503`.
     /// Zero means it does not wait at all.
     pub render_queue: Duration,
+    /// Requests allowed to wait for a slot at once; one more is answered
+    /// `503` immediately. Defaults to twice `max_concurrent_renders`.
+    pub render_queue_max: usize,
     /// Whether a `render_failed` response carries the typst diagnostics as
     /// `detail`. Off by default: the response then names only an incident.
     pub expose_diagnostics: bool,
@@ -103,6 +109,10 @@ impl Config {
             bail!("{MAX_CACHE_LIVES} ({max_cache_lives}) must be >= {CACHE_LIVES} ({cache_lives})");
         }
 
+        let max_concurrent_renders = parse_concurrency(get(MAX_CONCURRENT_RENDERS))?;
+        let render_queue_max = parse_u32(get(RENDER_QUEUE_MAX), RENDER_QUEUE_MAX)?
+            .map_or(max_concurrent_renders.saturating_mul(2), |n| n as usize);
+
         Ok(Self {
             bind,
             token,
@@ -117,7 +127,8 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
             typst_compiler: parse_typst_compiler(&get)?,
-            max_concurrent_renders: parse_concurrency(get(MAX_CONCURRENT_RENDERS))?,
+            max_concurrent_renders,
+            render_queue_max,
             render_queue: Duration::from_secs(
                 parse_u32(get(RENDER_QUEUE_SECS), RENDER_QUEUE_SECS)?
                     .unwrap_or(DEFAULT_RENDER_QUEUE_SECS)
@@ -133,6 +144,20 @@ impl Config {
                 get(PANDOC_MAX_MEMORY_BYTES),
                 PANDOC_MAX_MEMORY_BYTES,
             )?,
+        })
+    }
+}
+
+impl Config {
+    /// Fails startup when `MDCAST_TYPST=cli` (the default) has no usable
+    /// `typst` binary — otherwise every PDF render would be a `500`.
+    pub async fn check_typst(&self) -> Result<()> {
+        self.typst_compiler.check_startup().await.with_context(|| {
+            format!(
+                "{TYPST}=cli (the default) needs a typst binary >= {}.{}.{} at {TYPST_BIN}; \
+                 set {TYPST}=library to compile in-process instead",
+                MIN_TYPST_CLI_VERSION.0, MIN_TYPST_CLI_VERSION.1, MIN_TYPST_CLI_VERSION.2
+            )
         })
     }
 }

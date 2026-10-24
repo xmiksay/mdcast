@@ -5,8 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 /// A failed request: something for a human (`message`) and something for the
-/// client to branch on (`code`).
+/// client to branch on (`code`). Non-exhaustive so a field can be added
+/// without a breaking release: build one with [`ErrorResponse::new`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct ErrorResponse {
     pub code: ErrorCode,
     pub message: String,
@@ -33,9 +35,12 @@ impl ErrorResponse {
     }
 }
 
-/// Machine-readable failure classification.
+/// Machine-readable failure classification. Non-exhaustive: a newer server
+/// may add codes (an unknown one decodes as [`ErrorCode::Unknown`]), so a
+/// `match` needs a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ErrorCode {
     /// The body did not parse, or a field is out of range.
     BadRequest,

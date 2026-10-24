@@ -11,7 +11,10 @@
 //! Resolution happens up front, in [`BlobAssets::resolve`]: the *whole*
 //! manifest is checked against the store before any rendering starts, so a
 //! caller learns about every missing blob in one `409` instead of discovering
-//! them one failed render at a time.
+//! them one failed render at a time. A render that then waited for a slot
+//! checks again ([`BlobAssets::recheck`]): the wait is long enough for
+//! eviction to matter, and a `409` is recoverable where a render quietly
+//! missing its images is not.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,17 +39,26 @@ impl BlobAssets {
         store: Arc<BlobStore>,
         manifest: AssetManifest,
     ) -> Result<Self, Vec<MissingBlob>> {
-        let mut missing = Vec::new();
-        for (key, digest) in manifest.entries() {
-            if !store.contains(digest) {
-                missing.push(MissingBlob {
-                    key: key.to_string(),
-                    digest: digest.clone(),
-                });
-            }
-        }
+        let assets = Self { store, manifest };
+        assets.recheck()?;
+        Ok(assets)
+    }
+
+    /// Every manifest entry the store no longer holds — empty `Ok` when all
+    /// are still there. Presence only, not a snapshot: holding the bytes
+    /// across a queue wait would pin every queued request's blobs in memory.
+    pub fn recheck(&self) -> Result<(), Vec<MissingBlob>> {
+        let missing: Vec<MissingBlob> = self
+            .manifest
+            .entries()
+            .filter(|(_, digest)| !self.store.contains(digest))
+            .map(|(key, digest)| MissingBlob {
+                key: key.to_string(),
+                digest: digest.clone(),
+            })
+            .collect();
         if missing.is_empty() {
-            Ok(Self { store, manifest })
+            Ok(())
         } else {
             Err(missing)
         }

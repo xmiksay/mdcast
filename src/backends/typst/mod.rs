@@ -37,7 +37,9 @@ mod template;
 #[cfg(test)]
 mod test_support;
 mod virtual_files;
-pub use compiler::{CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, OutlineCommand, TypstCompiler};
+pub use compiler::{
+    CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, MIN_TYPST_CLI_VERSION, OutlineCommand, TypstCompiler,
+};
 use compiler::{CompileFormat, CompileInputs};
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
 pub use diagnostics::CompileDiagnostics;

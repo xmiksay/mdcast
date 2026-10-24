@@ -33,6 +33,7 @@ fn token_alone_is_enough_and_everything_else_defaults() {
     let cores = std::thread::available_parallelism().unwrap().get();
     assert_eq!(cfg.max_concurrent_renders, cores);
     assert_eq!(cfg.render_queue, Duration::from_secs(10));
+    assert_eq!(cfg.render_queue_max, 2 * cores);
     assert!(!cfg.expose_diagnostics);
     assert_eq!(cfg.pandoc_timeout, Duration::from_secs(60));
     assert_eq!(cfg.pandoc_max_memory_bytes, None);
@@ -63,6 +64,7 @@ fn every_variable_is_honoured() {
         (TYPST_MAX_OUTPUT_BYTES, "4096"),
         (MAX_CONCURRENT_RENDERS, "3"),
         (RENDER_QUEUE_SECS, "0"),
+        (RENDER_QUEUE_MAX, "5"),
         (EXPOSE_DIAGNOSTICS, "1"),
         (PANDOC_TIMEOUT_SECS, "7"),
         (PANDOC_MAX_MEMORY_BYTES, "4096"),
@@ -74,6 +76,7 @@ fn every_variable_is_honoured() {
 
     assert_eq!(cfg.max_concurrent_renders, 3);
     assert_eq!(cfg.render_queue, Duration::ZERO);
+    assert_eq!(cfg.render_queue_max, 5);
     assert!(cfg.expose_diagnostics);
     assert_eq!(cfg.bind.to_string(), "0.0.0.0:9000");
     assert_eq!(cfg.max_cache_bytes, 1024);
@@ -105,6 +108,14 @@ fn typst_cli_is_the_default_and_library_stays_selectable() {
     }
     let cfg = config_from(&[(TOKEN, "t"), (TYPST, "library")]).unwrap();
     assert_eq!(cfg.typst_compiler, TypstCompiler::Library);
+}
+
+#[test]
+fn the_queue_defaults_to_twice_the_render_slots() {
+    let cfg = config_from(&[(TOKEN, "t"), (MAX_CONCURRENT_RENDERS, "3")]).unwrap();
+    assert_eq!(cfg.render_queue_max, 6);
+    let cfg = config_from(&[(TOKEN, "t"), (RENDER_QUEUE_MAX, "0")]).unwrap();
+    assert_eq!(cfg.render_queue_max, 0, "zero is allowed: never queue");
 }
 
 #[test]
@@ -183,4 +194,26 @@ fn max_cache_lives_below_cache_lives_refuses_to_start() {
         config_from(&[(TOKEN, "t"), (CACHE_LIVES, "10"), (MAX_CACHE_LIVES, "5")]).unwrap_err();
     assert!(err.to_string().contains(CACHE_LIVES), "{err}");
     assert!(err.to_string().contains(MAX_CACHE_LIVES), "{err}");
+}
+
+#[tokio::test]
+async fn a_missing_typst_binary_fails_startup_and_names_the_way_out() {
+    let cfg = config_from(&[(TOKEN, "t"), (TYPST_BIN, "/nonexistent/mdcast-typst")]).unwrap();
+
+    let err = cfg.check_typst().await.unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("MDCAST_TYPST=library"), "{message}");
+    assert!(message.contains("/nonexistent/mdcast-typst"), "{message}");
+}
+
+#[tokio::test]
+async fn library_mode_needs_no_typst_binary() {
+    let cfg = config_from(&[
+        (TOKEN, "t"),
+        (TYPST, "library"),
+        (TYPST_BIN, "/nonexistent/mdcast-typst"),
+    ])
+    .unwrap();
+    cfg.check_typst().await.unwrap();
 }

@@ -22,6 +22,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::http::StatusCode;
 use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
+use mdcast::SpawnError;
 use mdcast::backends::typst::CompileDiagnostics;
 use mdcast::mdcast_api::wire::{ErrorCode, ErrorResponse, MissingBlob, MissingBlobsError};
 use serde::de::DeserializeOwned;
@@ -63,21 +64,55 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
+/// Caps on what `detail` may carry, so one pathological template cannot turn
+/// an error response into megabytes of diagnostics.
+const MAX_DETAIL_ENTRIES: usize = 100;
+const MAX_DETAIL_BYTES: usize = 64 * 1024;
+
 /// The `map_err` for a render: with `expose`, the typst diagnostics anywhere
-/// in the error chain become the response's `detail`.
+/// in the error chain become the response's `detail`. An engine that could
+/// not even be run (`SpawnError`: binary missing, flags it does not know) is
+/// the deployment's fault, so it is `Internal`, not `RenderFailed`.
 pub fn render_failed(expose: bool) -> impl FnOnce(anyhow::Error) -> ApiError {
     move |error| {
+        if error.chain().any(|e| e.is::<SpawnError>()) {
+            return ApiError::Internal(error);
+        }
         let detail = if expose {
             error
                 .chain()
                 .find_map(|e| e.downcast_ref::<CompileDiagnostics>())
-                .map(|d| d.diagnostics.clone())
+                .map(|d| cap_detail(&d.diagnostics))
                 .unwrap_or_default()
         } else {
             Vec::new()
         };
         ApiError::RenderFailed { error, detail }
     }
+}
+
+/// At most [`MAX_DETAIL_ENTRIES`] entries and [`MAX_DETAIL_BYTES`] of text
+/// (an entry over the budget is cut on a char boundary), plus one
+/// `… N more` entry naming what was left out.
+fn cap_detail(diagnostics: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut budget = MAX_DETAIL_BYTES;
+    for d in diagnostics.iter().take(MAX_DETAIL_ENTRIES) {
+        if budget == 0 {
+            break;
+        }
+        let mut end = d.len().min(budget);
+        while !d.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push(d[..end].to_string());
+        budget -= end;
+    }
+    let omitted = diagnostics.len() - out.len();
+    if omitted > 0 {
+        out.push(format!("… {omitted} more"));
+    }
+    out
 }
 
 impl IntoResponse for ApiError {
@@ -199,133 +234,5 @@ pub fn json_body<T: DeserializeOwned>(body: Result<Json<T>, JsonRejection>) -> R
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::body::to_bytes;
-    use mdcast::mdcast_api::Digest;
-
-    async fn parts(error: ApiError) -> (StatusCode, String) {
-        let response = error.into_response();
-        let status = response.status();
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        (status, String::from_utf8(bytes.to_vec()).unwrap())
-    }
-
-    #[tokio::test]
-    async fn each_variant_maps_to_its_status_and_code() {
-        for (error, status, code) in [
-            (
-                ApiError::BadRequest("nope".into()),
-                StatusCode::BAD_REQUEST,
-                "bad_request",
-            ),
-            (
-                ApiError::Unauthorized,
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-            ),
-            (
-                ApiError::PayloadTooLarge,
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "payload_too_large",
-            ),
-            (
-                render_failed(false)(anyhow::anyhow!("boom")),
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "render_failed",
-            ),
-            (
-                ApiError::Overloaded {
-                    retry_after_secs: 1,
-                },
-                StatusCode::SERVICE_UNAVAILABLE,
-                "overloaded",
-            ),
-            (
-                ApiError::Internal(anyhow::anyhow!("boom")),
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "internal",
-            ),
-        ] {
-            let (got_status, body) = parts(error).await;
-            assert_eq!(got_status, status, "{body}");
-            assert!(body.contains(code), "expected code {code} in {body}");
-        }
-    }
-
-    #[cfg(not(feature = "typst-html"))]
-    #[tokio::test]
-    async fn an_unsupported_format_is_a_501() {
-        let (status, body) = parts(ApiError::Unsupported("no html here".into())).await;
-
-        assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
-        assert!(body.contains("unsupported_target"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn internal_errors_never_leak_their_message() {
-        let secret = "/var/lib/mdcast/blobs/ab/deadbeef: permission denied";
-        let (_, body) = parts(ApiError::Internal(anyhow::anyhow!("{secret}"))).await;
-
-        assert!(!body.contains(secret), "leaked the internal error: {body}");
-        assert!(body.contains("incident"), "{body}");
-    }
-
-    #[tokio::test]
-    async fn missing_blobs_answers_409_with_every_missing_entry() {
-        let missing: Vec<MissingBlob> = ["img/a.png", "img/b.png"]
-            .iter()
-            .enumerate()
-            .map(|(i, key)| MissingBlob {
-                key: key.to_string(),
-                digest: Digest::from_sha256([i as u8; 32]),
-            })
-            .collect();
-
-        let (status, body) = parts(ApiError::MissingBlobs(missing)).await;
-
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert!(
-            body.contains("img/a.png") && body.contains("img/b.png"),
-            "{body}"
-        );
-    }
-
-    #[tokio::test]
-    async fn overloaded_says_when_to_retry() {
-        let response = ApiError::Overloaded {
-            retry_after_secs: 7,
-        }
-        .into_response();
-
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(response.headers()[RETRY_AFTER], "7");
-    }
-
-    fn compile_failure() -> anyhow::Error {
-        anyhow::Error::from(CompileDiagnostics {
-            diagnostics: vec!["main.typ:1:9: error: unclosed delimiter".into()],
-        })
-        .context("render template")
-    }
-
-    #[tokio::test]
-    async fn diagnostics_are_exposed_only_when_asked_for() {
-        let (_, hidden) = parts(render_failed(false)(compile_failure())).await;
-        assert!(!hidden.contains("\"detail\""), "{hidden}");
-        assert!(!hidden.contains("unclosed"), "{hidden}");
-
-        let (status, shown) = parts(render_failed(true)(compile_failure())).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-        let body: ErrorResponse = serde_json::from_str(&shown).unwrap();
-        assert_eq!(body.detail, ["main.typ:1:9: error: unclosed delimiter"]);
-        assert!(body.message.contains("incident"), "{shown}");
-    }
-
-    #[tokio::test]
-    async fn a_failure_without_diagnostics_has_no_detail_even_when_exposed() {
-        let (_, body) = parts(render_failed(true)(anyhow::anyhow!("/tmp/x: boom"))).await;
-        assert!(!body.contains("\"detail\""), "{body}");
-        assert!(!body.contains("/tmp/x"), "{body}");
-    }
-}
+#[path = "error_tests.rs"]
+mod tests;

@@ -22,8 +22,10 @@ use anyhow::Result;
 
 mod cli;
 mod library;
+mod version;
 
 pub use cli::{CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, OutlineCommand};
+pub use version::MIN_TYPST_CLI_VERSION;
 
 /// Everything a compile needs, already resolved to plain data — no
 /// `AssetProvider`, no `ResolvedDoc`. Paths are relative, `/`-separated, and
@@ -71,13 +73,15 @@ impl TypstCompiler {
         }
     }
 
-    /// Best-effort: logs the `typst` binary's reported version so version
-    /// skew between it and the linked `typst` crate is visible up front
-    /// instead of discovered as a rendering difference (issue #73 notes this
-    /// is now an operational concern). A no-op for `Library`.
-    pub async fn log_startup_info(&self) {
-        if let TypstCompiler::Cli(cli) = self {
-            cli.log_version().await;
+    /// Fails unless `Cli`'s binary runs and is at least
+    /// [`MIN_TYPST_CLI_VERSION`]; logs the version it found, so skew against
+    /// the linked `typst` crate is visible up front. A no-op for `Library`.
+    /// Meant for startup: a missing or too-old binary otherwise fails every
+    /// render instead of the deployment.
+    pub async fn check_startup(&self) -> Result<()> {
+        match self {
+            TypstCompiler::Library => Ok(()),
+            TypstCompiler::Cli(cli) => cli.check_version().await,
         }
     }
 }

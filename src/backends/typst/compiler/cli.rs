@@ -46,6 +46,7 @@ use tokio::process::Command;
 
 use super::super::diagnostics;
 use super::{CompileFormat, CompileInputs};
+use crate::SpawnError;
 use crate::process::{Bounds, run_bounded};
 
 /// Default for [`CliCompiler::max_output_bytes`].
@@ -168,32 +169,6 @@ impl CliCompiler {
         }
     }
 
-    /// Runs `<bin> --version` and logs the result — see `mod.rs`'s
-    /// `TypstCompiler::log_startup_info`.
-    pub(super) async fn log_version(&self) {
-        match Command::new(&self.bin).arg("--version").output().await {
-            Ok(out) if out.status.success() => {
-                let version = String::from_utf8_lossy(&out.stdout);
-                tracing::info!(
-                    bin = %self.bin,
-                    version = version.trim(),
-                    "typst CLI compiler selected"
-                );
-            }
-            Ok(out) => tracing::warn!(
-                bin = %self.bin,
-                status = %out.status,
-                stderr = %String::from_utf8_lossy(&out.stderr),
-                "`typst --version` did not succeed; MDCAST_TYPST=cli may not work"
-            ),
-            Err(error) => tracing::warn!(
-                bin = %self.bin,
-                %error,
-                "could not run the typst CLI binary; MDCAST_TYPST=cli may not work"
-            ),
-        }
-    }
-
     /// Layout of the temp dir: `src/` is typst's `--root` and holds only
     /// [`CompileInputs`]; fonts, the empty package dirs, `HOME` and the output
     /// sit beside it, so a template can neither read them nor plant a fake
@@ -257,7 +232,16 @@ impl CliCompiler {
         let done = run_bounded(cmd, &env, None, self.bounds(), 0, "typst compile").await?;
         if !done.status.success() {
             let stderr = String::from_utf8_lossy(&done.stderr);
-            if let Some(diags) = diagnostics::from_cli_stderr(&stderr, &root) {
+            if diagnostics::is_usage_error(&stderr) {
+                // The binary rejected mdcast's own flags: a deployment fault.
+                return Err(SpawnError {
+                    what: "typst compile".into(),
+                    program: self.bin.clone(),
+                    source: std::io::Error::other(stderr.trim().to_string()),
+                }
+                .into());
+            }
+            if let Some(diags) = diagnostics::from_cli_stderr(&stderr, &[&root, dir.path()]) {
                 return Err(diags.into());
             }
             bail!("typst compile failed ({}):\n{stderr}", done.status);

@@ -55,6 +55,7 @@ pub async fn markdown(
         .map_err(ApiError::MissingBlobs)?;
     // Only now: a 400 or a 409 round trip never occupies a render slot.
     let _slot = state.render_gate.enter().await?;
+    blobs.recheck().map_err(ApiError::MissingBlobs)?;
 
     // Blobs over the built-in catalog — also what a `<qr path="…">` tag reads
     // through, so it resolves the same keys the render itself will.

@@ -83,11 +83,7 @@ async fn serve() -> Result<()> {
     let mut config = Config::from_env()?;
     config.typst_compiler = outline_in_self(config.typst_compiler)?;
     warn_if_unauthenticated(&config);
-    // Best-effort: logs the CLI binary's reported version so version skew
-    // between it and mdcast's linked `typst` crate is visible at startup
-    // rather than discovered as a rendering difference (issue #73). A no-op
-    // when `typst_compiler` is `Library`.
-    config.typst_compiler.log_startup_info().await;
+    config.check_typst().await?;
     // Feeds GET /v1/capabilities (issue #81): the pandoc-backed targets only
     // advertise as available when a real binary answered at startup.
     let pandoc_available = pandoc::probe_pandoc().await;
@@ -118,6 +114,7 @@ async fn serve() -> Result<()> {
         render_gate: render_gate::RenderGate::new(
             config.max_concurrent_renders,
             config.render_queue,
+            config.render_queue_max,
         ),
         expose_diagnostics: config.expose_diagnostics,
     });
@@ -135,6 +132,7 @@ async fn serve() -> Result<()> {
         typst_compiler = ?config.typst_compiler,
         max_concurrent_renders = config.max_concurrent_renders,
         render_queue_secs = config.render_queue.as_secs(),
+        render_queue_max = config.render_queue_max,
         pandoc_timeout_secs = config.pandoc_timeout.as_secs(),
         expose_diagnostics = config.expose_diagnostics,
         pandoc_available,

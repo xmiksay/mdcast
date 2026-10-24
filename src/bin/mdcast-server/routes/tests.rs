@@ -36,7 +36,7 @@ fn state(typst_compiler: TypstCompiler, pandoc_available: bool, max_upload: u64)
         typst_compiler,
         pandoc_available,
         max_upload_bytes: max_upload,
-        render_gate: RenderGate::new(16, std::time::Duration::from_secs(10)),
+        render_gate: RenderGate::new(16, std::time::Duration::from_secs(10), 32),
         expose_diagnostics: false,
     }
 }
