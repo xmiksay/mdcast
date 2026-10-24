@@ -779,7 +779,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   openxml/opendocument. html-reveal CSS (the brand block and every `.css`
   under `revealjs/`) goes through `reveal_css::sanitize_css` (+
   `inline_style_safe` for the inline block — pandoc decodes HTML entities
-  inside `<style>`). The pandoc child itself runs through
+  inside `<style>`); brand-block removals warn, dist removals log at debug
+  (the vendored league theme's web-font import would warn every render). The pandoc child itself runs through
   `process::run_bounded`: cwd + `HOME`/`XDG_*` in the temp root, env cleared
   to PATH/TZ, timeout (`MDCAST_PANDOC_TIMEOUT_SECS`, default 60), no core
   dumps, optional `RLIMIT_AS`. `tests/pandoc_local_files.rs` asserts no

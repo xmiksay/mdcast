@@ -62,7 +62,12 @@ fn strip_imports(css: &str, allow_relative: bool, origin: &str) -> String {
         let target = after.trim_start();
         match quoted(target) {
             Some((url, _)) if !allowed(url, allow_relative) => {
-                tracing::warn!(origin, url, "dropping a CSS @import pandoc would embed");
+                report(
+                    allow_relative,
+                    origin,
+                    url,
+                    "dropping a CSS @import pandoc would embed",
+                );
                 rest = after.find(';').map_or("", |end| &after[end + 1..]);
             }
             _ => {
@@ -86,7 +91,12 @@ fn strip_urls(css: &str, allow_relative: bool, origin: &str) -> String {
         if allowed(url, allow_relative) {
             out.push_str(&rest[at..at + "url(".len() + consumed]);
         } else {
-            tracing::warn!(origin, url, "dropping a CSS url() pandoc would embed");
+            report(
+                allow_relative,
+                origin,
+                url,
+                "dropping a CSS url() pandoc would embed",
+            );
             out.push_str("none");
         }
         rest = &after[consumed..];
@@ -127,6 +137,17 @@ fn quoted(s: &str) -> Option<(&str, usize)> {
         }
     }
     Some((inner, s.len()))
+}
+
+/// A scrubbed caller brand block warns; the reveal.js dist logs at debug,
+/// because the vendored `league` theme's web-font `@import` would otherwise
+/// warn on every html-reveal render, theme in use or not.
+fn report(dist: bool, origin: &str, url: &str, what: &str) {
+    if dist {
+        tracing::debug!(origin, url, "{what}");
+    } else {
+        tracing::warn!(origin, url, "{what}");
+    }
 }
 
 /// ASCII-case-insensitive `find`; lowercasing ASCII keeps byte offsets.

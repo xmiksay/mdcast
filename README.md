@@ -227,7 +227,9 @@ escaped (`<\/`, `\26 `) so the block can neither close its `<style>` early
 nor smuggle a path past the scrub as an HTML character reference — which
 means a CSS-nesting `&` selector does not work here. The same scrub applies
 to every `.css` file under `revealjs/` (an overridden theme, say), which may
-additionally keep relative URLs that stay inside the reveal.js directory.
+additionally keep relative URLs that stay inside the reveal.js directory;
+removals there are logged at `debug`, since the vendored `league` theme's
+Google Fonts `@import` is one of them on every html-reveal render.
 
 ## Typst layout context: `doc-meta` / `brand` / `asset-path`
 
