@@ -55,6 +55,13 @@ fn typst_cli_compiler(timeout: std::time::Duration) -> Option<TypstCompiler> {
     ))
 }
 
+/// Held by every test that spawns a real `typst` child, so the timeout test's
+/// child count is not thrown off by a sibling's compile still running.
+fn typst_process_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 fn authorized(method: &str, uri: &str) -> axum::http::request::Builder {
     Request::builder()
         .method(method)

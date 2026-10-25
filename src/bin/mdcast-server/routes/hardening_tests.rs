@@ -238,6 +238,7 @@ async fn template_diagnostics_are_exposed_only_on_opt_in_library() {
 
 #[tokio::test]
 async fn template_diagnostics_are_exposed_only_on_opt_in_cli() {
+    let _guard = typst_process_lock().lock().await;
     let Some(compiler) = typst_cli_compiler(Duration::from_secs(20)) else {
         eprintln!("skipping: no `typst` binary on PATH");
         return;

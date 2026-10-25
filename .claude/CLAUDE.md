@@ -1028,8 +1028,8 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   now offers: each compile is a real child process, so
   `MDCAST_TYPST_TIMEOUT_SECS` bounds it with an actual kill+reap (verified by
   `cli::tests::timeout_kills_and_reaps_a_non_terminating_compile` and
-  `routes::tests::a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request`
-  — both assert the process/thread count returns to baseline, the specific
+  `routes::tests::template_tests::a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request`
+  — both assert the test process's `typst` child count returns to baseline, the specific
   check `library` mode structurally cannot pass), and
   `MDCAST_TYPST_MAX_MEMORY_BYTES` can cap its address space via
   `setrlimit(RLIMIT_AS)`. Since issue #96 `cli` is the server's default

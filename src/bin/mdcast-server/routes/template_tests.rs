@@ -148,6 +148,7 @@ async fn html_template_output_works_when_the_feature_is_on() {
 /// binary is on `PATH`.
 #[tokio::test]
 async fn html_template_output_works_in_cli_mode_without_the_feature() {
+    let _guard = typst_process_lock().lock().await;
     let Some(compiler) = typst_cli_compiler(std::time::Duration::from_secs(20)) else {
         eprintln!("skipping: no `typst` binary on PATH");
         return;
@@ -167,6 +168,7 @@ async fn html_template_output_works_in_cli_mode_without_the_feature() {
 /// binary is on `PATH`.
 #[tokio::test]
 async fn a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request() {
+    let _guard = typst_process_lock().lock().await;
     let Some(compiler) = typst_cli_compiler(std::time::Duration::from_millis(300)) else {
         eprintln!("skipping: no `typst` binary on PATH");
         return;
@@ -189,6 +191,7 @@ async fn a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request(
         }),
     );
 
+    let before = count_child_processes_named("typst");
     let start = std::time::Instant::now();
     let (status, response) = send(&app, request).await;
 
@@ -198,6 +201,51 @@ async fn a_non_terminating_cli_compile_times_out_instead_of_hanging_the_request(
     );
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body_json(response).await["code"], "render_failed");
+    let mut after = count_child_processes_named("typst");
+    for _ in 0..20 {
+        if after <= before {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        after = count_child_processes_named("typst");
+    }
+    assert!(
+        after <= before,
+        "typst child left behind: before={before} after={after}"
+    );
+}
+
+/// The lib's `test_support` helper is `#[cfg(test)]` inside `mdcast`, so not
+/// reachable from this binary. Direct children only (an unreaped zombie keeps
+/// its ppid); the ppid is the second field after the last `)`, since `comm`
+/// may contain `)`. Linux-only; 0 elsewhere, never a false failure.
+fn count_child_processes_named(name: &str) -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        let me = std::process::id().to_string();
+        entries
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok())
+            .filter(|e| {
+                std::fs::read_to_string(e.path().join("comm")).is_ok_and(|c| c.trim() == name)
+            })
+            .filter(|e| {
+                std::fs::read_to_string(e.path().join("stat")).is_ok_and(|stat| {
+                    stat.rsplit_once(')')
+                        .and_then(|(_, rest)| rest.split_whitespace().nth(1).map(|p| p == me))
+                        .unwrap_or(false)
+                })
+            })
+            .count()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = name;
+        0
+    }
 }
 
 fn generated_request(generated: serde_json::Value, assets: serde_json::Value) -> Request<Body> {
