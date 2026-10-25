@@ -107,7 +107,8 @@ mod tests {
     async fn a_binary_without_a_version_fails_the_check() {
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
-        let fake = dir.path().join("typst");
+        // Not named `typst`: cli_tests' leak test counts `typst` children.
+        let fake = dir.path().join("fake-typst");
         std::fs::write(&fake, "#!/bin/sh\necho typst nightly\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
 

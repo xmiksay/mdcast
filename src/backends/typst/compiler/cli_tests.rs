@@ -8,14 +8,14 @@ use tokio::sync::Mutex;
 use super::*;
 use crate::backends::typst::test_support::count_child_processes_named;
 
-/// Every test below spawns a `typst` child (the real binary, or a fake script
-/// named `typst`), and `timeout_kills_and_reaps_a_non_terminating_compile`
-/// counts this process's `typst` children before/after its own compile.
-/// Cargo runs a test binary's `#[tokio::test]`s concurrently on multiple
-/// threads by default, so without this lock a sibling test's still-running
-/// child gets counted as a leak that isn't one. Scoped to this file only: no
-/// other test in the `mdcast` lib spawns a `typst` child (the rest use
-/// `TypstCompiler::Library`, in-process).
+/// `timeout_kills_and_reaps_a_non_terminating_compile` counts this process's
+/// `typst` children before/after its own compile, and cargo runs a test
+/// binary's `#[tokio::test]`s concurrently, so every test that spawns the real
+/// `typst` takes this lock — otherwise a sibling's still-running child reads
+/// as a leak. Fake binaries are deliberately *not* named `typst` (a shebang
+/// script's `/proc/<pid>/comm` is its basename, so it would be counted) and
+/// need no lock. Scoped to this file: no other test in the `mdcast` lib spawns
+/// a `typst`-named child.
 fn typst_process_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -316,9 +316,8 @@ async fn a_usage_line_in_a_template_error_is_still_a_compile_diagnostic() {
 async fn a_clap_usage_error_is_a_spawn_error() {
     use std::os::unix::fs::PermissionsExt;
 
-    let _guard = typst_process_lock().lock().await;
     let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("typst");
+    let bin = dir.path().join("fake-typst");
     std::fs::write(
         &bin,
         "#!/bin/sh\necho \"error: unexpected argument '--x' found\" >&2\n\
