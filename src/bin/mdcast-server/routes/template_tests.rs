@@ -103,6 +103,29 @@ async fn html_template_output_says_so_when_the_feature_is_off() {
     assert_eq!(body_json(response).await["code"], "unsupported_target");
 }
 
+/// The 501 comes before blob resolution: no 409 upload round trip (and no
+/// render slot) for output the server could never produce.
+#[cfg(not(feature = "typst-html"))]
+#[tokio::test]
+async fn unsupported_html_output_is_a_501_even_with_missing_blobs() {
+    let (app, _) = app();
+    let missing = sha256(b"never uploaded");
+
+    let request = json_request(
+        "/v1/render/template",
+        serde_json::json!({
+            "template_source": "= Hi\n",
+            "data": "{}",
+            "format": "html",
+            "assets": { "img/logo.png": missing.as_str() },
+        }),
+    );
+    let (status, response) = send(&app, request).await;
+
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
+    assert_eq!(body_json(response).await["code"], "unsupported_target");
+}
+
 #[cfg(feature = "typst-html")]
 #[tokio::test]
 async fn html_template_output_works_when_the_feature_is_on() {

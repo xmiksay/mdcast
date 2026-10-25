@@ -35,10 +35,10 @@ pub async fn capabilities(State(state): State<Arc<AppState>>) -> Json<Capabiliti
     })
 }
 
-/// Mirrors `template.rs`'s own gate on `format: "html"`: `Cli` mode always
-/// supports `--features html` regardless of how mdcast itself was built;
-/// `Library` mode needs the `typst-html` cargo feature.
-fn html_template_export_available(typst_compiler: &TypstCompiler) -> bool {
+/// Also `template.rs`'s gate on `format: "html"`, so the two cannot drift:
+/// `Cli` mode always supports `--features html` regardless of how mdcast
+/// itself was built; `Library` mode needs the `typst-html` cargo feature.
+pub(super) fn html_template_export_available(typst_compiler: &TypstCompiler) -> bool {
     matches!(typst_compiler, TypstCompiler::Cli(_)) || cfg!(feature = "typst-html")
 }
 

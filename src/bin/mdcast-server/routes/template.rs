@@ -39,12 +39,19 @@ use mdcast::{AssetProvider, BrandHandle, LayeredAssets, MemoryAssets, sync_provi
 use crate::blobs::BlobAssets;
 use crate::error::{ApiError, json_body, render_failed};
 
+#[cfg(not(feature = "typst-html"))]
+use super::capabilities::html_template_export_available;
 use super::{AppState, artifact_response};
 
 /// Virtual key the submitted template source is served under. At the root, so
 /// a `#import "partials/header.typ"` resolves against the manifest keys the
 /// caller uploaded, exactly as it would against a filesystem.
 const TEMPLATE_KEY: &str = "main.typ";
+
+#[cfg(not(feature = "typst-html"))]
+const HTML_UNSUPPORTED: &str = "this server was built without the `typst-html` feature; \
+     only \"pdf\" template output is available in `library` mode — set \
+     MDCAST_TYPST=cli to get HTML output without this build feature";
 
 pub async fn render(
     State(state): State<Arc<AppState>>,
@@ -60,6 +67,15 @@ pub async fn render(
         fonts,
         generated,
     } = json_body(body)?;
+
+    // First: an output this server cannot produce must not cost the caller a
+    // 409 upload round trip or a render slot before the 501.
+    #[cfg(not(feature = "typst-html"))]
+    if matches!(format, TemplateFormat::Html)
+        && !html_template_export_available(&state.typst_compiler)
+    {
+        return Err(ApiError::Unsupported(HTML_UNSUPPORTED.into()));
+    }
 
     // `data` travels as raw JSON text and ends up in the virtual /data.json.
     // Parsing it here is not a round trip for its own sake: it turns "your
@@ -170,10 +186,5 @@ async fn html_library(
     _provider: &dyn AssetProvider,
     _expose_diagnostics: bool,
 ) -> Result<Response, ApiError> {
-    Err(ApiError::Unsupported(
-        "this server was built without the `typst-html` feature; \
-         only \"pdf\" template output is available in `library` mode — set \
-         MDCAST_TYPST=cli to get HTML output without this build feature"
-            .into(),
-    ))
+    Err(ApiError::Unsupported(HTML_UNSUPPORTED.into()))
 }
