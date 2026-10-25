@@ -85,9 +85,6 @@ fn describe(d: &SourceDiagnostic, sources: &[Source]) -> String {
 /// contains it: stripping the outer one first would leave `src/` behind.
 /// `None` when there are none, i.e. the child failed for some other reason.
 pub(super) fn from_cli_stderr(stderr: &str, roots: &[&Path]) -> Option<CompileDiagnostics> {
-    if is_usage_error(stderr) {
-        return None;
-    }
     let roots: Vec<std::path::PathBuf> = roots
         .iter()
         .flat_map(|root| {
@@ -106,7 +103,8 @@ pub(super) fn from_cli_stderr(stderr: &str, roots: &[&Path]) -> Option<CompileDi
 /// The command-line parser's own complaint (`error: unexpected argument
 /// '--x' found` … `Usage:` … `For more information, try '--help'.`) — a
 /// `typst` that does not understand mdcast's invocation, not a template
-/// error, however much its first line looks like one.
+/// error, however much its first line looks like one. Only conclusive
+/// together with clap's exit code 2: a template can print these lines too.
 pub(super) fn is_usage_error(stderr: &str) -> bool {
     stderr.lines().any(|l| {
         let l = l.trim_start();
@@ -180,12 +178,11 @@ mod tests {
     }
 
     #[test]
-    fn a_cli_usage_error_is_not_a_template_diagnostic() {
+    fn is_usage_error_recognises_clap_output() {
         let stderr = "error: unexpected argument '--ignore-system-fonts' found\n\n\
                       Usage: typst compile [OPTIONS] <INPUT> [OUTPUT]\n\n\
                       For more information, try '--help'.\n";
         assert!(is_usage_error(stderr));
-        assert_eq!(from_cli_stderr(stderr, &[Path::new("/tmp/x")]), None);
         assert!(!is_usage_error("main.typ:1:1: error: unclosed delimiter\n"));
     }
 

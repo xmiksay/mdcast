@@ -232,7 +232,9 @@ impl CliCompiler {
         let done = run_bounded(cmd, &env, None, self.bounds(), 0, "typst compile").await?;
         if !done.status.success() {
             let stderr = String::from_utf8_lossy(&done.stderr);
-            if diagnostics::is_usage_error(&stderr) {
+            // clap exits 2 on a usage error, a failed compile exits 1: the
+            // stderr shape alone is spoofable by a template's own message.
+            if done.status.code() == Some(2) && diagnostics::is_usage_error(&stderr) {
                 // The binary rejected mdcast's own flags: a deployment fault.
                 return Err(SpawnError {
                     what: "typst compile".into(),

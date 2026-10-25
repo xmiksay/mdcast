@@ -280,3 +280,61 @@ fn bounds_cap_file_size_and_cpu_time() {
     let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
     assert_eq!(bounds.cpu_secs, Some(11 * cores + 5));
 }
+
+/// A template's own error message can contain clap's `Usage:` line; only
+/// the exit code tells a usage error (2) from a failed compile (1).
+#[tokio::test]
+async fn a_usage_line_in_a_template_error_is_still_a_compile_diagnostic() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![(
+                "main.typ",
+                "#assert(false, message: \"boom\\nUsage: x\\nFor more information, try '--help'.\")\n",
+            )],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.downcast_ref::<SpawnError>().is_none(), "{err:#}");
+    let diags = err
+        .downcast_ref::<crate::backends::typst::CompileDiagnostics>()
+        .unwrap_or_else(|| panic!("not typed diagnostics: {err:#}"));
+    assert!(diags.diagnostics.join("\n").contains("boom"), "{diags:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_clap_usage_error_is_a_spawn_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("typst");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho \"error: unexpected argument '--x' found\" >&2\n\
+         echo 'Usage: typst compile [OPTIONS] <INPUT>' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli = CliCompiler::new(bin.to_string_lossy(), Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "Hi")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.downcast_ref::<SpawnError>().is_some(), "{err:#}");
+}
