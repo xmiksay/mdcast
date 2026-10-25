@@ -125,6 +125,15 @@ fn zero_concurrent_renders_refuses_to_start() {
 }
 
 #[test]
+fn a_zero_child_timeout_refuses_to_start() {
+    for name in [PANDOC_TIMEOUT_SECS, TYPST_TIMEOUT_SECS] {
+        let err = config_from(&[(TOKEN, "t"), (name, "0")]).unwrap_err();
+        assert!(err.to_string().contains(name), "{err}");
+        assert!(err.to_string().contains("at least 1"), "{err}");
+    }
+}
+
+#[test]
 fn expose_diagnostics_accepts_only_boolean_spellings() {
     for (raw, expected) in [("0", false), ("false", false), ("", false), ("true", true)] {
         let cfg = config_from(&[(TOKEN, "t"), (EXPOSE_DIAGNOSTICS, raw)]).unwrap();

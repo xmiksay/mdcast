@@ -69,7 +69,11 @@ enum Cmd {
         /// Wall-clock budget for one pandoc run (docx/odt/pptx/html-reveal);
         /// exceeded → pandoc is killed and the render fails.
         #[cfg(feature = "pandoc")]
-        #[arg(long, default_value_t = mdcast::backends::pandoc::DEFAULT_PANDOC_TIMEOUT.as_secs())]
+        #[arg(
+            long,
+            default_value_t = mdcast::backends::pandoc::DEFAULT_PANDOC_TIMEOUT.as_secs(),
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
         pandoc_timeout_secs: u64,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
@@ -246,4 +250,27 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::OutlineSvg => unreachable!("dispatched in main before the runtime starts"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A zero timeout kills every child before it can finish.
+    #[test]
+    fn zero_child_timeouts_are_rejected_at_parse_time() {
+        let base = ["mdcast", "render", "in.md", "-t", "pdf", "-o", "out.pdf"];
+        #[allow(unused_mut)]
+        let mut flags: Vec<&str> = Vec::new();
+        #[cfg(feature = "pandoc")]
+        flags.push("--pandoc-timeout-secs");
+        #[cfg(feature = "typst")]
+        flags.push("--typst-timeout-secs");
+        for flag in flags {
+            let zero = base.iter().copied().chain([flag, "0"]);
+            assert!(Cli::try_parse_from(zero).is_err(), "{flag} 0 accepted");
+            let one = base.iter().copied().chain([flag, "1"]);
+            assert!(Cli::try_parse_from(one).is_ok(), "{flag} 1 rejected");
+        }
+    }
 }

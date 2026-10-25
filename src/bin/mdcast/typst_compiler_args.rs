@@ -20,7 +20,11 @@ pub struct TypstCompilerArgs {
     bin: String,
     /// Compile timeout. Exceeded → the child is killed and reaped before the
     /// command reports the failure.
-    #[arg(long = "typst-timeout-secs", default_value_t = 30)]
+    #[arg(
+        long = "typst-timeout-secs",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     timeout_secs: u64,
     /// Largest artifact a compile may produce; a bigger one fails the render
     /// before it is read into memory.

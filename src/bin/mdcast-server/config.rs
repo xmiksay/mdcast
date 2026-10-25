@@ -135,11 +135,11 @@ impl Config {
                     .into(),
             ),
             expose_diagnostics: parse_flag(get(EXPOSE_DIAGNOSTICS), EXPOSE_DIAGNOSTICS)?,
-            pandoc_timeout: Duration::from_secs(
-                parse_u32(get(PANDOC_TIMEOUT_SECS), PANDOC_TIMEOUT_SECS)?
-                    .unwrap_or(DEFAULT_PANDOC_TIMEOUT_SECS)
-                    .into(),
-            ),
+            pandoc_timeout: parse_timeout(
+                get(PANDOC_TIMEOUT_SECS),
+                PANDOC_TIMEOUT_SECS,
+                DEFAULT_PANDOC_TIMEOUT_SECS,
+            )?,
             pandoc_max_memory_bytes: parse_bytes(
                 get(PANDOC_MAX_MEMORY_BYTES),
                 PANDOC_MAX_MEMORY_BYTES,
@@ -193,6 +193,15 @@ fn parse_concurrency(raw: Option<String>) -> Result<usize> {
     }
 }
 
+/// A zero timeout kills every child before it can finish, so every render
+/// would fail: refuse it at startup instead.
+fn parse_timeout(raw: Option<String>, name: &str, default_secs: u32) -> Result<Duration> {
+    match parse_u32(raw, name)? {
+        Some(0) => bail!("{name} must be at least 1"),
+        secs => Ok(Duration::from_secs(secs.unwrap_or(default_secs).into())),
+    }
+}
+
 fn parse_flag(raw: Option<String>, name: &str) -> Result<bool> {
     match raw.as_deref().map(str::trim) {
         None | Some("" | "0" | "false") => Ok(false),
@@ -211,15 +220,18 @@ fn parse_typst_compiler(get: &impl Fn(&str) -> Option<String>) -> Result<TypstCo
             let bin = get(TYPST_BIN)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_TYPST_BIN.to_string());
-            let timeout_secs = parse_u32(get(TYPST_TIMEOUT_SECS), TYPST_TIMEOUT_SECS)?
-                .unwrap_or(DEFAULT_TYPST_TIMEOUT_SECS);
+            let timeout = parse_timeout(
+                get(TYPST_TIMEOUT_SECS),
+                TYPST_TIMEOUT_SECS,
+                DEFAULT_TYPST_TIMEOUT_SECS,
+            )?;
             let max_memory_bytes =
                 parse_bytes(get(TYPST_MAX_MEMORY_BYTES), TYPST_MAX_MEMORY_BYTES)?;
             let max_output_bytes =
                 parse_bytes(get(TYPST_MAX_OUTPUT_BYTES), TYPST_MAX_OUTPUT_BYTES)?
                     .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
             Ok(TypstCompiler::Cli(
-                CliCompiler::new(bin, Duration::from_secs(timeout_secs.into()))
+                CliCompiler::new(bin, timeout)
                     .with_max_memory_bytes(max_memory_bytes)
                     .with_max_output_bytes(max_output_bytes),
             ))
