@@ -3,4 +3,3 @@ target/
 .github/
 examples/
 tests/
-deploy.yml

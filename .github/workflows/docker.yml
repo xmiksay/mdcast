@@ -1,6 +1,6 @@
 # Build the mdcast-server image and push it to GHCR. Runs on version tags
 # (the same v* tags release.yml publishes crates from) and on manual
-# dispatch; the k8s deployment (deploy.yml) pulls ghcr.io/xmiksay/mdcast.
+# dispatch; ArgoCD (outside this repo) deploys ghcr.io/xmiksay/mdcast.
 name: Docker image
 
 on:
