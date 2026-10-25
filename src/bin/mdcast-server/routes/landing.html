@@ -64,15 +64,16 @@
   li { border-bottom: 1px solid var(--line); }
   a {
     display: flex;
+    flex-wrap: wrap;
     justify-content: space-between;
-    gap: 12px;
+    gap: 0 12px;
     padding: 12px 2px;
     color: var(--ink);
     text-decoration: none;
   }
   a:hover, a:focus-visible { color: var(--accent); }
-  a code { font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-  a span { color: var(--muted); font-size: 14px; text-align: right; }
+  a code { min-width: 0; overflow-wrap: anywhere; font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  a span { margin-left: auto; color: var(--muted); font-size: 14px; text-align: right; }
 </style>
 </head>
 <body>
@@ -91,7 +92,7 @@
   <ul>
     <li><a href="/health"><code>/health</code><span>liveness check</span></a></li>
     <li><a href="/v1/capabilities"><code>/v1/capabilities</code><span>what this deployment can render</span></a></li>
-    <li><a href="https://github.com/xmiksay/mdcast" rel="noopener noreferrer"><code>github.com/xmiksay/mdcast</code><span>source &amp; docs</span></a></li>
+    <li><a href="https://github.com/xmiksay/mdcast" rel="noreferrer"><code>github.com/xmiksay/mdcast</code><span>source &amp; docs</span></a></li>
   </ul>
 </main>
 </body>

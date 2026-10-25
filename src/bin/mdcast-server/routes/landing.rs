@@ -11,7 +11,7 @@ use axum::response::IntoResponse;
 
 /// The page inlines all of its CSS and SVG, so nothing else is needed —
 /// `default-src 'none'` also blocks any script, frame or outbound request.
-pub(super) const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; \
+const CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; \
      base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 static PAGE: LazyLock<String> = LazyLock::new(|| {

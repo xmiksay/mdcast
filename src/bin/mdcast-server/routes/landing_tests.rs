@@ -25,7 +25,11 @@ async fn landing_page_is_public_html_with_the_version() {
     let headers = response.headers().clone();
     assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
     assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
-    assert_eq!(headers[header::CONTENT_SECURITY_POLICY], landing::CSP);
+    assert_eq!(
+        headers[header::CONTENT_SECURITY_POLICY],
+        "default-src 'none'; style-src 'unsafe-inline'; \
+         base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    );
     let body = String::from_utf8(body_bytes(response).await.to_vec()).unwrap();
     assert!(body.starts_with("<!doctype html>"));
     assert!(body.contains(env!("CARGO_PKG_VERSION")));
