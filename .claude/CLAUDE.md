@@ -79,12 +79,12 @@ src/
 │  ├─ reveal_brand.rs #[cfg(feature = "pandoc")]  brand_css()/logo_html() — brand → reveal.js CSS/HTML projection (issue #57), pure string-building
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
-│     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, compile root then the whole temp dir stripped, canonical forms too; a clap usage error is never a diagnostic — is_usage_error()) — downcast by mdcast-server for `detail` (issue #96)
+│     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, compile root then the whole temp dir stripped, canonical forms too; is_usage_error() recognises clap output, conclusive only with exit code 2) — downcast by mdcast-server for `detail` (issue #96)
 │     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
-│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand, DEFAULT_MAX_OUTPUT_BYTES) — temp dir (`src/` = --root, `fonts/`, empty `packages/`, `home/`, output beside) + sealed `typst compile` (--ignore-system-fonts, empty package dirs, proxy vars → closed loopback port) via process::run_bounded, output-size cap before read, safe_join path-traversal guard; a usage error from the binary → SpawnError (internal), not diagnostics
+│     │  ├─ cli.rs      TypstCompiler::Cli/CliCompiler (+ OutlineCommand, DEFAULT_MAX_OUTPUT_BYTES) — temp dir (`src/` = --root, `fonts/`, empty `packages/`, `home/`, output beside) + sealed `typst compile` (--ignore-system-fonts, empty package dirs, proxy vars → closed loopback port) via process::run_bounded, output-size cap before read, safe_join path-traversal guard; a usage error from the binary (exit 2 + is_usage_error(); a compile failure exits 1, so a template printing `Usage:` stays a diagnostic) → SpawnError (internal), not diagnostics
 │     │  ├─ version.rs  CliCompiler::check_version() + MIN_TYPST_CLI_VERSION (0.13 — first with `--features html`/`--format html`) — `TypstCompiler::check_startup()`, run by mdcast-server at startup (fails fast) and by the CLI for `--typst-compiler cli`
 │     │  └─ cli_tests.rs  real-`typst`-binary tests (pdf/html/error/diagnostics/@preview refused/output cap/timeout+reap), skip gracefully without one on PATH
 │     ├─ virtual_files.rs  fetch_deduped() + collect_images_for_typst()/collect_layout_assets()
@@ -296,7 +296,7 @@ make test                # cargo test --workspace — default features only; uni
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 100 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 111 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -451,13 +451,13 @@ cargo build --features server && MDCAST_TOKEN=… ./target/debug/mdcast-server
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets (fonts, brand logo, house `reference.docx`, shared layouts) to warm into the blob store at startup — see below (issue #72) |
 | `MDCAST_TYPST`            | `cli`                    | `cli` (shells out to a sealed-off `typst` binary per compile — issue #73; the server default since issue #96) or `library` (in-process, no time/memory limit — trusted callers only). The remaining `MDCAST_TYPST_*` variables only matter in `cli` mode. The `mdcast` CLI's own default stays `library`. |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary name/path for `cli` mode, looked up on `PATH` unless it's itself a path. `Config::check_typst` fails startup if it does not run or reports < 0.13 |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92) each get the full value, so a render's worst case is ~2× this. Exceeded → the child is killed and reaped before the request's error response is returned |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child — the typst compile and the SVG-outline child (issue #92) each get the full value, so a render's worst case is ~2× this. Exceeded → the child is killed and reaped before the request's error response is returned; `0` fails startup |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | Address-space cap (`setrlimit(RLIMIT_AS)`) applied to each `cli`-mode child (typst compile and SVG outline). Unix-only; a no-op elsewhere |
 | `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli` compile may produce: output file's length checked before it is read; also `RLIMIT_FSIZE` (+1 MiB) on each child. Every child also gets `RLIMIT_CPU` = (timeout + 1) × cores + 5 s |
 | `MDCAST_MAX_CONCURRENT_RENDERS` | `available_parallelism()` | Render slots shared by `/v1/render` + `/v1/render/template`; `0` fails startup |
 | `MDCAST_RENDER_QUEUE_SECS` | `10`                    | Wait for a slot before `503 overloaded` + `Retry-After: max(this, 1)`; `0` = no wait |
 | `MDCAST_RENDER_QUEUE_MAX` | 2 × `MDCAST_MAX_CONCURRENT_RENDERS` | Renders allowed to wait at once; one more → `503 overloaded` immediately (a queued request holds its decoded body); `0` = never queue |
-| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run; killed and reaped on expiry (`PandocBackend::with_timeout`, `Registry::with_pandoc_limits`) |
+| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run; killed and reaped on expiry (`PandocBackend::with_timeout`, `Registry::with_pandoc_limits`); `0` fails startup |
 | `MDCAST_PANDOC_MAX_MEMORY_BYTES` | unset — unbounded | `RLIMIT_AS` on the pandoc child (unix only) |
 | `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true` adds `detail` (sanitised typst diagnostics) to `422 render_failed`; off = byte-identical to before |
 | `RUST_LOG`                | `info`                   | Same `tracing` filter the CLI uses |

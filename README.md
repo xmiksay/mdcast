@@ -671,8 +671,8 @@ own name and bytes, not the `image()` call.
   timeout, a `cli`-mode render's worst case is about twice
   `MDCAST_TYPST_TIMEOUT_SECS`. A child that times out, hits the
   memory cap or answers garbage fails the render exactly like a failed
-  `cli` compile (`render_failed` from the server). In the default `library`
-  mode it runs in-process on a blocking thread with **no** time or memory
+  `cli` compile (`render_failed` from the server). In `library` mode (the
+  `mdcast` CLI's default; the server defaults to `cli`) it runs in-process on a blocking thread with **no** time or memory
   bound — the same as the in-process typst compile itself. A library
   embedder building `CliCompiler` (via `CliCompiler::new(...)` and its
   `with_*` methods — the struct is `#[non_exhaustive]`) without
@@ -1172,7 +1172,8 @@ to a `typst` binary instead — see "Selecting the Typst compiler" below.
 Ignored by pandoc targets.
 
 `--pandoc-timeout-secs` (default 60) bounds each pandoc run; a run past it is
-killed and the render fails. Ignored by typst targets.
+killed and the render fails. Ignored by typst targets. Both timeout flags
+must be at least 1.
 
 ## HTTP service (`server` feature)
 
@@ -1242,13 +1243,13 @@ the container's memory limit.
 | `MDCAST_PREFILL_DIR`      | unset — no prefill       | Directory of predefined assets to warm into the blob store at startup — see "Startup prefill" below |
 | `MDCAST_TYPST`            | `cli`                    | `cli` (shell out to a sealed-off `typst` binary per compile, killable and resource-capped — the server default since issue #96) or `library` (in-process, no time or memory limit — trusted callers only) — see "Selecting the Typst compiler" above |
 | `MDCAST_TYPST_BIN`        | `typst`                  | Binary for `cli` mode, looked up on `PATH` unless it's itself a path. Must run and report ≥ 0.13, or startup fails |
-| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline) — each gets the full value, so a render's worst case is ~2× this; the child is killed and reaped on expiry |
+| `MDCAST_TYPST_TIMEOUT_SECS` | `30`                    | Timeout for each `cli`-mode child (typst compile, SVG outline) — each gets the full value, so a render's worst case is ~2× this; the child is killed and reaped on expiry. `0` refuses to start |
 | `MDCAST_TYPST_MAX_MEMORY_BYTES` | unset — unbounded  | `setrlimit(RLIMIT_AS)` cap on each `cli`-mode child — typst compile and SVG outline (unix only) |
 | `MDCAST_TYPST_MAX_OUTPUT_BYTES` | `268435456` (256 MiB) | Largest artifact a `cli`-mode compile may produce — checked before the file is read into memory, and enforced on the child as `RLIMIT_FSIZE` (+1 MiB) |
 | `MDCAST_MAX_CONCURRENT_RENDERS` | number of CPUs     | Renders allowed to run at once (both render routes together); `0` refuses to start |
 | `MDCAST_RENDER_QUEUE_SECS` | `10`                    | How long a render waits for a slot before a `503 overloaded` (`Retry-After` = this, min 1); `0` = don't wait |
 | `MDCAST_RENDER_QUEUE_MAX` | 2 × `MDCAST_MAX_CONCURRENT_RENDERS` | Renders allowed to wait for a slot at once; one more is answered `503 overloaded` immediately. `0` = never queue |
-| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run (docx/odt/pptx/html-reveal); the child is killed and reaped on expiry |
+| `MDCAST_PANDOC_TIMEOUT_SECS` | `60`                  | Timeout for each pandoc run (docx/odt/pptx/html-reveal); the child is killed and reaped on expiry. `0` refuses to start |
 | `MDCAST_PANDOC_MAX_MEMORY_BYTES` | unset — unbounded | `setrlimit(RLIMIT_AS)` cap on the pandoc child (unix only) |
 | `MDCAST_EXPOSE_DIAGNOSTICS` | unset — off            | `1`/`true`: a `422 render_failed` also carries `detail`, the typst errors and warnings as `path:line:col: severity: message` with virtual paths only (temp-dir paths stripped), at most 100 entries / 64 KiB (then a `… N more` entry). Off, the response is just the incident id |
 | `RUST_LOG`                | `info`                   | `tracing` filter, same as the CLI |
