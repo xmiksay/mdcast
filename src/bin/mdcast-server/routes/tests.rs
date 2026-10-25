@@ -390,3 +390,6 @@ mod capabilities_tests;
 
 #[path = "hardening_tests.rs"]
 mod hardening_tests;
+
+#[path = "landing_tests.rs"]
+mod landing_tests;

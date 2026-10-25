@@ -122,6 +122,7 @@ src/
    │  └─ prefill.rs     prefill() — MDCAST_PREFILL_DIR startup warmup: walk, hash, ingest, pin, mirror (issue #72)
    └─ routes/
       ├─ mod.rs         AppState, router(), /health, artifact_response/content_type
+      ├─ landing.rs     GET / — static, unauthenticated HTML landing page (`landing.html`: inline SVG wordmark + CSS, version filled once into a LazyLock; nosniff + strict CSP), takes no render slot (issue #99); router tests in landing_tests.rs
       ├─ capabilities.rs GET /v1/capabilities — unauthenticated deployment-shape probe (targets/template_formats/max_upload_bytes/version, issue #81)
       ├─ blobs.rs       POST /v1/blobs/check + POST /v1/blobs (multipart, streamed, idempotent)
       ├─ render.rs      POST /v1/render — resolve_doc()/provider_stack(), the CLI pipeline minus the filesystem
@@ -296,7 +297,7 @@ make test                # cargo test --workspace — default features only; uni
 make test-api-toml       # cargo test -p mdcast-api --features toml (off-by-default BrandSpec::from_toml, issue #80)
 make test-typst-html     # cargo test -p mdcast --features typst-html (off-by-default HTML export, issue #53)
 make test-remote-images  # cargo test -p mdcast --features remote-images (off-by-default http(s) image fetch, issue #54)
-make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 111 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
+make test-server         # cargo test -p mdcast --features server (+ the server,typst-html bin) — 115 mdcast-server tests; a handful skip gracefully (printed, not failed) without a `typst` binary on PATH (TypstCompiler::Cli, issue #73)
 make lint                # cargo fmt --all --check + cargo clippy --workspace --all-targets -- -D warnings (+ mdcast-api toml, + typst-html, + remote-images, + server, + server,typst-html)
 make coverage            # cargo llvm-cov → lcov.info + summary (needs cargo-llvm-cov)
 make verify              # lint + check-all + test + test-api-toml + test-typst-html + test-remote-images + test-server — the pre-"done" gate
@@ -500,6 +501,7 @@ sees a `200` on its very first request instead of a `409` round trip.
 
 | Endpoint | Auth | Success | Failure |
 |---|---|---|---|
+| `GET /` | no | `200` HTML landing page | — |
 | `GET /health` | no | `200 ok` | — |
 | `GET /v1/capabilities` | no | `200 CapabilitiesResponse` | — |
 | `POST /v1/blobs/check` | if `MDCAST_TOKEN` set | `200 BlobCheckResponse` | `400`/`401`/`413` |

@@ -3,6 +3,7 @@
 //!
 //! | Method + path        | Auth | Body → response |
 //! |----------------------|------|-----------------|
+//! | `GET /`              | no   | static HTML landing page (`landing.rs`) |
 //! | `GET /health`        | no   | `ok` |
 //! | `GET /v1/capabilities` | no | → `CapabilitiesResponse` |
 //! | `POST /v1/blobs/check` | if configured | `BlobCheckRequest` → `BlobCheckResponse` |
@@ -36,6 +37,7 @@ use crate::render_gate::RenderGate;
 
 mod blobs;
 mod capabilities;
+mod landing;
 mod render;
 mod template;
 
@@ -90,6 +92,7 @@ pub fn router(state: Arc<AppState>, token: Option<&str>, max_body_bytes: usize) 
     v1 = v1.route("/capabilities", get(capabilities::capabilities));
 
     Router::new()
+        .route("/", get(landing::landing))
         .route("/health", get(health))
         .nest("/v1", v1)
         .layer(DefaultBodyLimit::max(max_body_bytes))
