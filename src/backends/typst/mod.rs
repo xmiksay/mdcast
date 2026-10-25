@@ -29,17 +29,20 @@ use crate::{Backend, RenderedArtifact, ResolvedDoc, Target};
 
 mod compiler;
 mod context;
+mod diagnostics;
 mod fonts;
 mod markdown;
-mod process;
 mod svg_outline;
 mod template;
 #[cfg(test)]
 mod test_support;
 mod virtual_files;
-pub use compiler::{CliCompiler, OutlineCommand, TypstCompiler};
+pub use compiler::{
+    CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, MIN_TYPST_CLI_VERSION, OutlineCommand, TypstCompiler,
+};
 use compiler::{CompileFormat, CompileInputs};
 use context::{CONTEXT_VIRTUAL_PATH, build_context_source};
+pub use diagnostics::CompileDiagnostics;
 use fonts::collect_fonts;
 pub use markdown::md_to_typst;
 use markdown::typst_string;
@@ -299,31 +302,6 @@ fn alias_for(class: &str) -> String {
 /// input domain, kept separate deliberately rather than reused.
 fn sanitize_class(class: &str) -> String {
     class.replace(['/', '\\'], "_")
-}
-
-fn format_lib_error(err: typst_as_lib::TypstAsLibError) -> anyhow::Error {
-    use typst_as_lib::TypstAsLibError as E;
-    match err {
-        E::TypstSource(diags) => format_diagnostics(diags),
-        other => anyhow::anyhow!(other.to_string()),
-    }
-}
-
-fn format_diagnostics(
-    diags: impl IntoIterator<Item = typst::diag::SourceDiagnostic>,
-) -> anyhow::Error {
-    let mut out = String::from("typst compilation errors:\n");
-    for e in diags {
-        let sev = match e.severity {
-            typst::diag::Severity::Error => "error",
-            typst::diag::Severity::Warning => "warning",
-        };
-        out.push_str(&format!("  [{sev}] {}\n", e.message));
-        for hint in &e.hints {
-            out.push_str(&format!("    hint: {hint}\n"));
-        }
-    }
-    anyhow::anyhow!(out)
 }
 
 #[cfg(test)]

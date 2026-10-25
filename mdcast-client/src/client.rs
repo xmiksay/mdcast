@@ -16,6 +16,9 @@ use mdcast_api::wire::{
     CapabilitiesResponse, MissingBlob, MissingBlobsError, RenderMarkdownRequest,
     RenderTemplateRequest, TemplateFormat,
 };
+use std::time::Duration;
+
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::{Response, StatusCode};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -168,7 +171,11 @@ impl Client {
             let body: MissingBlobsError = decode(status, &bytes)?;
             return Ok(Attempt::Missing(body.missing));
         }
-        Err(error::from_status(status.as_u16(), &bytes))
+        Err(error::from_status(
+            status.as_u16(),
+            retry_after(&headers),
+            &bytes,
+        ))
     }
 
     pub(crate) fn url(&self, path: &str) -> String {
@@ -188,22 +195,20 @@ impl Client {
     /// Read a JSON response body, mapping any non-success status onto the
     /// typed error first.
     pub(crate) async fn json_response<T: DeserializeOwned>(&self, response: Response) -> Result<T> {
+        if !response.status().is_success() {
+            return Err(error_of(response).await?);
+        }
         let status = response.status();
         let bytes = response.bytes().await?;
-        if !status.is_success() {
-            return Err(error::from_status(status.as_u16(), &bytes));
-        }
         decode(status, &bytes)
     }
 
     /// A response whose only interesting property is that it succeeded.
     pub(crate) async fn expect_success(&self, response: Response) -> Result<()> {
-        let status = response.status();
-        if status.is_success() {
+        if response.status().is_success() {
             return Ok(());
         }
-        let bytes = response.bytes().await?;
-        Err(error::from_status(status.as_u16(), &bytes))
+        Err(error_of(response).await?)
     }
 }
 
@@ -211,6 +216,27 @@ impl Client {
 enum Attempt {
     Rendered(Artifact),
     Missing(Vec<MissingBlob>),
+}
+
+/// The typed error for a non-success response; `Err` only when its body
+/// could not be read at all.
+async fn error_of(response: Response) -> Result<Error> {
+    let status = response.status().as_u16();
+    let retry_after = retry_after(response.headers());
+    let bytes = response.bytes().await?;
+    Ok(error::from_status(status, retry_after, &bytes))
+}
+
+/// `Retry-After` in its delay-seconds form, the only one mdcast sends.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let secs = headers
+        .get(RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    Some(Duration::from_secs(secs))
 }
 
 fn decode<T: DeserializeOwned>(status: StatusCode, bytes: &[u8]) -> Result<T> {

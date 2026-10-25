@@ -10,6 +10,9 @@
 //! | `POST /v1/render`    | if configured  | `RenderMarkdownRequest` → artifact bytes |
 //! | `POST /v1/render/template` | if configured | `RenderTemplateRequest` → artifact bytes |
 //!
+//! The two render routes share one concurrency limit (`render_gate.rs`): a
+//! render that cannot get a slot within the queue time is a `503`.
+//!
 //! "if configured" means `MDCAST_TOKEN` was set at startup — see `config.rs`
 //! and `main::warn_if_unauthenticated`. When it wasn't, every `/v1` route is
 //! open, same as `/health`. `GET /v1/capabilities` is never gated, in either
@@ -29,6 +32,7 @@ use mdcast::mdcast_api::Target;
 
 use crate::auth::require_bearer;
 use crate::blobs::BlobStore;
+use crate::render_gate::RenderGate;
 
 mod blobs;
 mod capabilities;
@@ -51,6 +55,12 @@ pub struct AppState {
     /// Echoed by `GET /v1/capabilities` — `MDCAST_MAX_UPLOAD_BYTES`, so a
     /// client can reject an oversized bundle before any round trip.
     pub max_upload_bytes: u64,
+    /// The slot both render routes hold for their whole render
+    /// (`MDCAST_MAX_CONCURRENT_RENDERS` / `MDCAST_RENDER_QUEUE_SECS`).
+    pub render_gate: RenderGate,
+    /// `MDCAST_EXPOSE_DIAGNOSTICS`: a `render_failed` carries the typst
+    /// diagnostics as `detail`.
+    pub expose_diagnostics: bool,
 }
 
 /// Everything under `/v1` sits behind the bearer gate when `token` is

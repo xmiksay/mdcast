@@ -37,14 +37,21 @@ use mdcast::mdcast_api::wire::{GeneratedAsset, RenderTemplateRequest, TemplateFo
 use mdcast::{AssetProvider, BrandHandle, LayeredAssets, MemoryAssets, sync_provider};
 
 use crate::blobs::BlobAssets;
-use crate::error::{ApiError, json_body};
+use crate::error::{ApiError, json_body, render_failed};
 
+#[cfg(not(feature = "typst-html"))]
+use super::capabilities::html_template_export_available;
 use super::{AppState, artifact_response};
 
 /// Virtual key the submitted template source is served under. At the root, so
 /// a `#import "partials/header.typ"` resolves against the manifest keys the
 /// caller uploaded, exactly as it would against a filesystem.
 const TEMPLATE_KEY: &str = "main.typ";
+
+#[cfg(not(feature = "typst-html"))]
+const HTML_UNSUPPORTED: &str = "this server was built without the `typst-html` feature; \
+     only \"pdf\" template output is available in `library` mode — set \
+     MDCAST_TYPST=cli to get HTML output without this build feature";
 
 pub async fn render(
     State(state): State<Arc<AppState>>,
@@ -61,6 +68,15 @@ pub async fn render(
         generated,
     } = json_body(body)?;
 
+    // First: an output this server cannot produce must not cost the caller a
+    // 409 upload round trip or a render slot before the 501.
+    #[cfg(not(feature = "typst-html"))]
+    if matches!(format, TemplateFormat::Html)
+        && !html_template_export_available(&state.typst_compiler)
+    {
+        return Err(ApiError::Unsupported(HTML_UNSUPPORTED.into()));
+    }
+
     // `data` travels as raw JSON text and ends up in the virtual /data.json.
     // Parsing it here is not a round trip for its own sake: it turns "your
     // JSON is malformed" into a 400 instead of a confusing typst error.
@@ -74,6 +90,9 @@ pub async fn render(
     let blobs = BlobAssets::resolve(state.store.clone(), assets)
         .await
         .map_err(ApiError::MissingBlobs)?;
+    // Only now: a 400 or a 409 round trip never occupies a render slot.
+    let _slot = state.render_gate.enter().await?;
+    blobs.recheck().map_err(ApiError::MissingBlobs)?;
     let provider = LayeredAssets {
         over: generated,
         base: LayeredAssets {
@@ -97,10 +116,10 @@ pub async fn render(
         TemplateFormat::Pdf => {
             let artifact = render_template_with(&doc, &provider, &state.typst_compiler)
                 .await
-                .map_err(ApiError::RenderFailed)?;
+                .map_err(render_failed(state.expose_diagnostics))?;
             Ok(artifact_response("application/pdf", artifact))
         }
-        TemplateFormat::Html => html(&doc, &provider, &state.typst_compiler).await,
+        TemplateFormat::Html => html(&doc, &provider, &state).await,
     }
 }
 
@@ -129,17 +148,18 @@ fn render_generated(
 async fn html(
     doc: &TemplateDoc,
     provider: &dyn AssetProvider,
-    compiler: &TypstCompiler,
+    state: &AppState,
 ) -> Result<Response, ApiError> {
+    let compiler = &state.typst_compiler;
     match compiler {
         TypstCompiler::Cli(_) => {
             let artifact =
                 mdcast::backends::typst::render_template_html_with(doc, provider, compiler)
                     .await
-                    .map_err(ApiError::RenderFailed)?;
+                    .map_err(render_failed(state.expose_diagnostics))?;
             Ok(artifact_response("text/html; charset=utf-8", artifact))
         }
-        TypstCompiler::Library => html_library(doc, provider).await,
+        TypstCompiler::Library => html_library(doc, provider, state.expose_diagnostics).await,
     }
 }
 
@@ -147,10 +167,11 @@ async fn html(
 async fn html_library(
     doc: &TemplateDoc,
     provider: &dyn AssetProvider,
+    expose_diagnostics: bool,
 ) -> Result<Response, ApiError> {
     let artifact = mdcast::backends::typst::render_template_html(doc, provider)
         .await
-        .map_err(ApiError::RenderFailed)?;
+        .map_err(render_failed(expose_diagnostics))?;
     Ok(artifact_response("text/html; charset=utf-8", artifact))
 }
 
@@ -163,11 +184,7 @@ async fn html_library(
 async fn html_library(
     _doc: &TemplateDoc,
     _provider: &dyn AssetProvider,
+    _expose_diagnostics: bool,
 ) -> Result<Response, ApiError> {
-    Err(ApiError::Unsupported(
-        "this server was built without the `typst-html` feature; \
-         only \"pdf\" template output is available in `library` mode — set \
-         MDCAST_TYPST=cli to get HTML output without this build feature"
-            .into(),
-    ))
+    Err(ApiError::Unsupported(HTML_UNSUPPORTED.into()))
 }

@@ -66,6 +66,15 @@ enum Cmd {
         #[cfg(feature = "typst")]
         #[command(flatten)]
         typst_compiler: TypstCompilerArgs,
+        /// Wall-clock budget for one pandoc run (docx/odt/pptx/html-reveal);
+        /// exceeded → pandoc is killed and the render fails.
+        #[cfg(feature = "pandoc")]
+        #[arg(
+            long,
+            default_value_t = mdcast::backends::pandoc::DEFAULT_PANDOC_TIMEOUT.as_secs(),
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        pandoc_timeout_secs: u64,
     },
     /// Print per-page (class, origin) for an input — useful for debugging the
     /// auto-classifier and explicit-wrapper parsing.
@@ -160,6 +169,8 @@ async fn run(cli: Cli) -> Result<()> {
             layout_fonts,
             #[cfg(feature = "typst")]
             typst_compiler,
+            #[cfg(feature = "pandoc")]
+            pandoc_timeout_secs,
         } => {
             // Provider stack, innermost first: embedded catalog, `--assets`
             // dir override, then the SVGs the pre-steps render. Boxed because
@@ -185,6 +196,9 @@ async fn run(cli: Cli) -> Result<()> {
             let registry = Registry::with_typst_compiler(typst_compiler.build().await?);
             #[cfg(not(feature = "typst"))]
             let registry = Registry::with_defaults();
+            #[cfg(feature = "pandoc")]
+            let registry = registry
+                .with_pandoc_limits(std::time::Duration::from_secs(pandoc_timeout_secs), None);
             if !generated.is_empty() {
                 let svgs: std::collections::HashMap<String, bytes::Bytes> =
                     generated.into_iter().collect();
@@ -236,4 +250,27 @@ async fn run(cli: Cli) -> Result<()> {
         Cmd::OutlineSvg => unreachable!("dispatched in main before the runtime starts"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A zero timeout kills every child before it can finish.
+    #[test]
+    fn zero_child_timeouts_are_rejected_at_parse_time() {
+        let base = ["mdcast", "render", "in.md", "-t", "pdf", "-o", "out.pdf"];
+        #[allow(unused_mut)]
+        let mut flags: Vec<&str> = Vec::new();
+        #[cfg(feature = "pandoc")]
+        flags.push("--pandoc-timeout-secs");
+        #[cfg(feature = "typst")]
+        flags.push("--typst-timeout-secs");
+        for flag in flags {
+            let zero = base.iter().copied().chain([flag, "0"]);
+            assert!(Cli::try_parse_from(zero).is_err(), "{flag} 0 accepted");
+            let one = base.iter().copied().chain([flag, "1"]);
+            assert!(Cli::try_parse_from(one).is_ok(), "{flag} 1 rejected");
+        }
+    }
 }

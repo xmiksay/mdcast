@@ -19,22 +19,20 @@
 //! auth.rs      shared-bearer-token gate for /v1
 //! error.rs     ApiError → ErrorResponse/status, with internal detail kept in the log
 //! pandoc.rs    startup probe for a working `pandoc` binary (issue #81)
+//! render_gate.rs  global render concurrency limit + queue timeout (issue #96)
 //! blobs/       content-addressed store + the manifest-backed AssetProvider + startup prefill
 //! routes/      router, /health, /v1/blobs*, /v1/render, /v1/render/template, /v1/capabilities
 //! ```
 //!
-//! **Known limitation, mitigated by `MDCAST_TYPST=cli` (issue #73; see
-//! README's "Known limitations"):** with the default `MDCAST_TYPST=library`,
-//! a caller-supplied typst template that loops forever wedges a
-//! `spawn_blocking` thread for the life of the process — `spawn_blocking`
-//! cannot be cancelled — and there is no compile time or memory limit. The
-//! trust boundary is internal callers, so `library` mode accepts this rather
-//! than designs around it. Setting `MDCAST_TYPST=cli` runs each compile as a
-//! killable child process instead: `MDCAST_TYPST_TIMEOUT_SECS` bounds it and
-//! `MDCAST_TYPST_MAX_MEMORY_BYTES` can cap its address space, and a
-//! timed-out compile is killed and reaped before the request's error
-//! response is returned — the server's thread and process counts return to
-//! baseline, which `library` mode cannot offer.
+//! **Compiles run in a child process by default (`MDCAST_TYPST=cli`, issue
+//! #96; see README's "Known limitations"):** each compile is a killable
+//! `typst` child — `MDCAST_TYPST_TIMEOUT_SECS` bounds it with a kill+reap,
+//! `MDCAST_TYPST_MAX_MEMORY_BYTES` / `MDCAST_TYPST_MAX_OUTPUT_BYTES` cap its
+//! address space and output, and it sees neither system fonts, packages, the
+//! network nor this process's environment. `MDCAST_TYPST=library` stays
+//! selectable, but there a template that loops forever wedges a
+//! `spawn_blocking` thread for the life of the process (it cannot be
+//! cancelled) with no time or memory limit — only for trusted callers.
 
 use std::sync::Arc;
 
@@ -47,6 +45,7 @@ mod blobs;
 mod config;
 mod error;
 mod pandoc;
+mod render_gate;
 mod routes;
 
 use blobs::BlobStore;
@@ -84,11 +83,7 @@ async fn serve() -> Result<()> {
     let mut config = Config::from_env()?;
     config.typst_compiler = outline_in_self(config.typst_compiler)?;
     warn_if_unauthenticated(&config);
-    // Best-effort: logs the CLI binary's reported version so version skew
-    // between it and mdcast's linked `typst` crate is visible at startup
-    // rather than discovered as a rendering difference (issue #73). A no-op
-    // when `typst_compiler` is `Library`.
-    config.typst_compiler.log_startup_info().await;
+    config.check_typst().await?;
     // Feeds GET /v1/capabilities (issue #81): the pandoc-backed targets only
     // advertise as available when a real binary answered at startup.
     let pandoc_available = pandoc::probe_pandoc().await;
@@ -111,10 +106,17 @@ async fn serve() -> Result<()> {
     }
     let state = Arc::new(AppState {
         store: Arc::new(store),
-        registry: Registry::with_typst_compiler(config.typst_compiler.clone()),
+        registry: Registry::with_typst_compiler(config.typst_compiler.clone())
+            .with_pandoc_limits(config.pandoc_timeout, config.pandoc_max_memory_bytes),
         typst_compiler: config.typst_compiler.clone(),
         pandoc_available,
         max_upload_bytes: config.max_upload_bytes as u64,
+        render_gate: render_gate::RenderGate::new(
+            config.max_concurrent_renders,
+            config.render_queue,
+            config.render_queue_max,
+        ),
+        expose_diagnostics: config.expose_diagnostics,
     });
     let app = routes::router(state, config.token.as_deref(), config.max_upload_bytes);
 
@@ -128,6 +130,11 @@ async fn serve() -> Result<()> {
         cache_lives = config.cache_lives,
         max_cache_lives = config.max_cache_lives,
         typst_compiler = ?config.typst_compiler,
+        max_concurrent_renders = config.max_concurrent_renders,
+        render_queue_secs = config.render_queue.as_secs(),
+        render_queue_max = config.render_queue_max,
+        pandoc_timeout_secs = config.pandoc_timeout.as_secs(),
+        expose_diagnostics = config.expose_diagnostics,
         pandoc_available,
         "mdcast-server listening"
     );

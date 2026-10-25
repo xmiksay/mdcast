@@ -1,10 +1,11 @@
-//! `--typst-compiler`/`--typst-bin`/`--typst-timeout-secs`, shared by
-//! `render` and `render-template` (issue #73) via `#[command(flatten)]`.
+//! `--typst-compiler`/`--typst-bin`/`--typst-timeout-secs`/
+//! `--typst-max-output-bytes`, shared by `render` and `render-template`
+//! (issue #73) via `#[command(flatten)]`.
 //! Split out of `main.rs` to keep it under the size cap.
 
-/// `--typst-bin` and `--typst-timeout-secs` only matter when
-/// `--typst-compiler cli` is selected — `library` (the default) ignores
-/// them.
+/// `--typst-bin`, `--typst-timeout-secs` and `--typst-max-output-bytes` only
+/// matter when `--typst-compiler cli` is selected — `library` (the default)
+/// ignores them.
 #[derive(clap::Args)]
 pub struct TypstCompilerArgs {
     /// Typst compiler backend: the in-process library (default), or a
@@ -19,8 +20,16 @@ pub struct TypstCompilerArgs {
     bin: String,
     /// Compile timeout. Exceeded → the child is killed and reaped before the
     /// command reports the failure.
-    #[arg(long = "typst-timeout-secs", default_value_t = 30)]
+    #[arg(
+        long = "typst-timeout-secs",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     timeout_secs: u64,
+    /// Largest artifact a compile may produce; a bigger one fails the render
+    /// before it is read into memory.
+    #[arg(long = "typst-max-output-bytes", default_value_t = mdcast::backends::typst::DEFAULT_MAX_OUTPUT_BYTES)]
+    max_output_bytes: u64,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -33,6 +42,7 @@ impl TypstCompilerArgs {
     /// In `cli` mode the SVG-outline step runs as this same binary's hidden
     /// `__outline-svg` subcommand, under the compile's timeout.
     pub async fn build(&self) -> anyhow::Result<mdcast::backends::typst::TypstCompiler> {
+        use anyhow::Context;
         use mdcast::backends::typst::{CliCompiler, OutlineCommand, TypstCompiler};
         let compiler = match self.mode {
             TypstCompilerArg::Library => TypstCompiler::Library,
@@ -41,10 +51,14 @@ impl TypstCompilerArgs {
                     self.bin.clone(),
                     std::time::Duration::from_secs(self.timeout_secs),
                 )
+                .with_max_output_bytes(self.max_output_bytes)
                 .with_outline(Some(OutlineCommand::current_exe()?)),
             ),
         };
-        compiler.log_startup_info().await;
+        compiler.check_startup().await.context(
+            "--typst-compiler cli needs a working typst binary (see --typst-bin); \
+             use --typst-compiler library to compile in-process instead",
+        )?;
         Ok(compiler)
     }
 }

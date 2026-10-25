@@ -7,6 +7,8 @@
 //! wire [`ErrorCode`] rather than a flattened string, so a caller can match on
 //! `RenderFailed` versus `Internal` without parsing prose.
 
+use std::time::Duration;
+
 use mdcast_api::Digest;
 use mdcast_api::wire::{ErrorCode, ErrorResponse, MissingBlob};
 
@@ -16,7 +18,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// error message — a misconfigured proxy can answer with a whole HTML page.
 const SNIPPET_CHARS: usize = 512;
 
+/// Non-exhaustive, like [`Error::Server`]'s fields: new failure modes and
+/// new server-supplied fields are not breaking changes, so a `match` needs a
+/// wildcard arm and a `Server { .. }` pattern a `..`.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The client was built with a base URL or token it cannot use.
     #[error("invalid client configuration: {0}")]
@@ -38,6 +44,15 @@ pub enum Error {
     #[error("the mdcast server refused the request body as too large: {message}")]
     PayloadTooLarge { message: String },
 
+    /// `503` with code `overloaded` — every render slot stayed busy for the
+    /// server's whole queue wait. The request itself is fine: send it again
+    /// after `retry_after` (the server's `Retry-After`, when it sent one).
+    #[error("the mdcast server is overloaded: {message}")]
+    Overloaded {
+        message: String,
+        retry_after: Option<Duration>,
+    },
+
     /// A second `409` for the same render after the missing blobs were
     /// uploaded. The client retries exactly once — the same digests coming
     /// back means eviction is racing the retry or the server is misbehaving,
@@ -48,13 +63,17 @@ pub enum Error {
     )]
     BlobsStillMissing { missing: Vec<MissingBlob> },
 
-    /// The server answered with its own [`ErrorResponse`] — the code and the
-    /// message are carried through verbatim.
+    /// The server answered with its own [`ErrorResponse`] — the code, the
+    /// message and any `detail` (sanitised engine diagnostics, sent only by a
+    /// server with `MDCAST_EXPOSE_DIAGNOSTICS` on) are carried through
+    /// verbatim.
     #[error("the mdcast server returned {status} ({code:?}): {message}")]
+    #[non_exhaustive]
     Server {
         status: u16,
         code: ErrorCode,
         message: String,
+        detail: Vec<String>,
     },
 
     /// A status this protocol does not define, or one whose body is not an
@@ -101,8 +120,10 @@ pub enum Error {
 
 /// Project a non-success, non-`409` response onto the typed error. `401` and
 /// `413` keep their identity even when the body is not an `ErrorResponse`,
-/// because an intermediary can answer either one with its own page.
-pub(crate) fn from_status(status: u16, body: &[u8]) -> Error {
+/// because an intermediary can answer either one with its own page. A `503`
+/// is only [`Error::Overloaded`] when mdcast itself said so — a proxy's `503`
+/// means the server is unreachable, not busy.
+pub(crate) fn from_status(status: u16, retry_after: Option<Duration>, body: &[u8]) -> Error {
     let parsed = serde_json::from_slice::<ErrorResponse>(body).ok();
     match status {
         401 => Error::Unauthorized {
@@ -112,10 +133,24 @@ pub(crate) fn from_status(status: u16, body: &[u8]) -> Error {
             message: message_of(parsed, body),
         },
         _ => match parsed {
-            Some(ErrorResponse { code, message }) => Error::Server {
+            Some(ErrorResponse {
+                code: ErrorCode::Overloaded,
+                message,
+                ..
+            }) if status == 503 => Error::Overloaded {
+                message,
+                retry_after,
+            },
+            Some(ErrorResponse {
+                code,
+                message,
+                detail,
+                ..
+            }) => Error::Server {
                 status,
                 code,
                 message,
+                detail,
             },
             None => Error::UnexpectedStatus {
                 status,
@@ -150,11 +185,11 @@ mod tests {
     #[test]
     fn unauthorized_and_too_large_get_their_own_variants() {
         assert!(matches!(
-            from_status(401, &body("unauthorized", "missing or invalid bearer token")),
+            from_status(401, None, &body("unauthorized", "missing or invalid bearer token")),
             Error::Unauthorized { message } if message.contains("bearer token")
         ));
         assert!(matches!(
-            from_status(413, &body("payload_too_large", "too big")),
+            from_status(413, None, &body("payload_too_large", "too big")),
             Error::PayloadTooLarge { message } if message == "too big"
         ));
     }
@@ -162,21 +197,27 @@ mod tests {
     #[test]
     fn an_intermediarys_bodyless_401_is_still_unauthorized() {
         assert!(matches!(
-            from_status(401, b"<html>Forbidden by the proxy</html>"),
+            from_status(401, None, b"<html>Forbidden by the proxy</html>"),
             Error::Unauthorized { message } if message.contains("proxy")
         ));
     }
 
     #[test]
     fn a_server_error_response_carries_its_code_through() {
-        let err = from_status(422, &body("render_failed", "render failed (incident 7-0)"));
+        let err = from_status(
+            422,
+            None,
+            &body("render_failed", "render failed (incident 7-0)"),
+        );
 
         match err {
             Error::Server {
                 status,
                 code,
                 message,
+                detail,
             } => {
+                assert!(detail.is_empty());
                 assert_eq!(status, 422);
                 assert_eq!(code, ErrorCode::RenderFailed);
                 assert!(message.contains("incident 7-0"), "{message}");
@@ -184,14 +225,14 @@ mod tests {
             other => panic!("expected Server, got {other:?}"),
         }
         assert!(matches!(
-            from_status(501, &body("unsupported_target", "no typst-html here")),
+            from_status(501, None, &body("unsupported_target", "no typst-html here")),
             Error::Server {
                 code: ErrorCode::UnsupportedTarget,
                 ..
             }
         ));
         assert!(matches!(
-            from_status(500, &body("internal", "internal error")),
+            from_status(500, None, &body("internal", "internal error")),
             Error::Server {
                 code: ErrorCode::Internal,
                 ..
@@ -201,7 +242,7 @@ mod tests {
 
     #[test]
     fn a_body_that_is_not_an_error_response_is_unexpected() {
-        match from_status(502, b"<html>bad gateway</html>") {
+        match from_status(502, None, b"<html>bad gateway</html>") {
             Error::UnexpectedStatus { status, body } => {
                 assert_eq!(status, 502);
                 assert_eq!(body, "<html>bad gateway</html>");
@@ -214,12 +255,43 @@ mod tests {
     fn an_oversized_body_is_truncated_on_a_char_boundary() {
         let huge = "é".repeat(SNIPPET_CHARS * 2).into_bytes();
 
-        match from_status(502, &huge) {
+        match from_status(502, None, &huge) {
             Error::UnexpectedStatus { body, .. } => {
                 assert_eq!(body.chars().count(), SNIPPET_CHARS + 1, "{body}");
                 assert!(body.ends_with('…'));
             }
             other => panic!("expected UnexpectedStatus, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_overloaded_503_carries_its_retry_after() {
+        let err = from_status(
+            503,
+            Some(Duration::from_secs(7)),
+            &body("overloaded", "all render slots busy"),
+        );
+        assert!(matches!(
+            err,
+            Error::Overloaded { message, retry_after: Some(d) }
+                if message == "all render slots busy" && d == Duration::from_secs(7)
+        ));
+    }
+
+    #[test]
+    fn a_proxys_503_is_not_overloaded() {
+        assert!(matches!(
+            from_status(503, None, b"<html>no healthy upstream</html>"),
+            Error::UnexpectedStatus { status: 503, .. }
+        ));
+    }
+
+    #[test]
+    fn render_failed_detail_is_carried_through() {
+        let body = br#"{"code":"render_failed","message":"m","detail":["main.typ:1:1: error: x"]}"#;
+        assert!(matches!(
+            from_status(422, None, body),
+            Error::Server { detail, .. } if detail == ["main.typ:1:1: error: x"]
+        ));
     }
 }

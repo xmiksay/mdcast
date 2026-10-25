@@ -12,6 +12,8 @@ pub mod images;
 pub mod mermaid;
 pub mod pages;
 pub mod preprocessor;
+#[cfg(any(feature = "pandoc", feature = "typst"))]
+mod process;
 
 use std::path::{Path, PathBuf};
 
@@ -34,6 +36,8 @@ pub use mdcast_api::{DocMeta, Target};
 pub use pages::splitter::{DefaultSplitter, PageSplitter};
 pub use pages::{Page, PageOrigin, RawPage};
 pub use preprocessor::{Chain, HtmlImageTags, Identity, MarkdownPreprocessor};
+#[cfg(any(feature = "pandoc", feature = "typst"))]
+pub use process::SpawnError;
 
 /// Opaque handle into a `BrandSpec` so backends don't carry the whole spec around.
 #[derive(Debug, Clone)]

@@ -21,26 +21,15 @@ fn slide_input_attaches_class_to_existing_h1() {
 }
 
 #[test]
-fn page_input_uses_raw_openxml_pagebreak_for_docx() {
-    let out = build_input(&[p("hero", "intro"), p("content", "body")], Target::Docx);
-    assert!(out.contains("```{=openxml}"), "{out}");
-    assert!(out.contains(r#"<w:br w:type="page"/>"#), "{out}");
-    assert!(!out.contains(r"\pagebreak"), "{out}");
-    assert!(out.contains(r#"custom-style="hero""#));
-    assert!(out.contains(r#"custom-style="content""#));
-}
-
-#[test]
-fn page_input_uses_raw_opendocument_pagebreak_for_odt() {
-    let out = build_input(&[p("hero", "intro"), p("content", "body")], Target::Odt);
-    assert!(out.contains("```{=opendocument}"), "{out}");
-    assert!(
-        out.contains(r#"<text:p text:style-name="PageBreak"/>"#),
-        "{out}"
-    );
-    assert!(!out.contains(r"\pagebreak"), "{out}");
-    assert!(out.contains(r#"custom-style="hero""#));
-    assert!(out.contains(r#"custom-style="content""#));
+fn page_input_marks_page_breaks_for_the_filter_on_docx_and_odt() {
+    for target in [Target::Docx, Target::Odt] {
+        let out = build_input(&[p("hero", "intro"), p("content", "body")], target);
+        assert!(out.contains("::: {.mdcast-page-break}\n:::\n"), "{out}");
+        assert!(!out.contains("```{="), "no raw blocks of our own: {out}");
+        assert!(!out.contains(r"\pagebreak"), "{out}");
+        assert!(out.contains(r#"custom-style="hero""#));
+        assert!(out.contains(r#"custom-style="content""#));
+    }
 }
 
 #[test]
@@ -71,8 +60,7 @@ fn toc_args_ignored_for_slide_targets() {
 fn single_page_has_no_separator() {
     let out = build_input(&[p("hero", "just one")], Target::HtmlReveal);
     assert!(!out.contains(r"\pagebreak"));
-    assert!(!out.contains("openxml"));
-    assert!(!out.contains("opendocument"));
+    assert!(!out.contains("mdcast-page-break"));
     assert!(out.starts_with("# {.hero}"));
 }
 
@@ -234,4 +222,33 @@ async fn materialise_reports_false_when_the_provider_has_nothing() {
 
     assert!(!materialised);
     assert!(!dest_path.exists());
+}
+
+#[tokio::test]
+async fn a_pandoc_run_over_its_timeout_is_killed_and_fails_the_render() {
+    let pandoc_on_path = std::process::Command::new("pandoc")
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success());
+    if !pandoc_on_path {
+        eprintln!("pandoc not on PATH; skipping");
+        return;
+    }
+    let doc = ResolvedDoc {
+        pages: vec![p("content", "# Hi")],
+        meta: crate::DocMeta::default(),
+        brand: crate::BrandHandle(std::sync::Arc::new(crate::BrandSpec::default())),
+        assets: Vec::new(),
+        fonts: Vec::new(),
+        toc: None,
+    };
+    let backend = PandocBackend::new(Target::Docx).with_timeout(Duration::from_nanos(1));
+
+    let err = backend
+        .render_to_bytes(&doc, &crate::EmbeddedAssets)
+        .await
+        .err()
+        .unwrap();
+
+    assert!(format!("{err:#}").contains("timed out"), "{err:#}");
 }

@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use mdcast::backends::typst::{CliCompiler, TypstCompiler};
+use mdcast::backends::typst::{
+    CliCompiler, DEFAULT_MAX_OUTPUT_BYTES, MIN_TYPST_CLI_VERSION, TypstCompiler,
+};
 
 pub const BIND: &str = "MDCAST_BIND";
 pub const TOKEN: &str = "MDCAST_TOKEN";
@@ -22,6 +24,13 @@ pub const TYPST: &str = "MDCAST_TYPST";
 pub const TYPST_BIN: &str = "MDCAST_TYPST_BIN";
 pub const TYPST_TIMEOUT_SECS: &str = "MDCAST_TYPST_TIMEOUT_SECS";
 pub const TYPST_MAX_MEMORY_BYTES: &str = "MDCAST_TYPST_MAX_MEMORY_BYTES";
+pub const TYPST_MAX_OUTPUT_BYTES: &str = "MDCAST_TYPST_MAX_OUTPUT_BYTES";
+pub const MAX_CONCURRENT_RENDERS: &str = "MDCAST_MAX_CONCURRENT_RENDERS";
+pub const RENDER_QUEUE_SECS: &str = "MDCAST_RENDER_QUEUE_SECS";
+pub const RENDER_QUEUE_MAX: &str = "MDCAST_RENDER_QUEUE_MAX";
+pub const EXPOSE_DIAGNOSTICS: &str = "MDCAST_EXPOSE_DIAGNOSTICS";
+pub const PANDOC_TIMEOUT_SECS: &str = "MDCAST_PANDOC_TIMEOUT_SECS";
+pub const PANDOC_MAX_MEMORY_BYTES: &str = "MDCAST_PANDOC_MAX_MEMORY_BYTES";
 
 const DEFAULT_BIND: &str = "127.0.0.1:8080";
 const DEFAULT_MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
@@ -30,6 +39,8 @@ const DEFAULT_CACHE_LIVES: u32 = 3;
 const DEFAULT_MAX_CACHE_LIVES: u32 = 32;
 const DEFAULT_TYPST_BIN: &str = "typst";
 const DEFAULT_TYPST_TIMEOUT_SECS: u32 = 30;
+const DEFAULT_RENDER_QUEUE_SECS: u32 = 10;
+const DEFAULT_PANDOC_TIMEOUT_SECS: u32 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -54,9 +65,25 @@ pub struct Config {
     /// entirely opt-in.
     pub prefill_dir: Option<PathBuf>,
     /// Which Typst compiler `/v1/render` and `/v1/render/template` use
-    /// (issue #73). Defaults to `Library` — an existing deployment that sets
-    /// none of the `MDCAST_TYPST*` variables sees byte-identical behaviour.
+    /// (issue #73). Defaults to `Cli` (issue #96): only a child process can
+    /// be killed on timeout and resource-capped, and the server compiles
+    /// templates it did not write. `library` stays selectable.
     pub typst_compiler: TypstCompiler,
+    /// Renders allowed to run at once; the rest queue for a slot (issue #96).
+    pub max_concurrent_renders: usize,
+    /// How long a render waits for a slot before it is answered `503`.
+    /// Zero means it does not wait at all.
+    pub render_queue: Duration,
+    /// Requests allowed to wait for a slot at once; one more is answered
+    /// `503` immediately. Defaults to twice `max_concurrent_renders`.
+    pub render_queue_max: usize,
+    /// Whether a `render_failed` response carries the typst diagnostics as
+    /// `detail`. Off by default: the response then names only an incident.
+    pub expose_diagnostics: bool,
+    /// Wall-clock budget for one pandoc run; exceeded → killed and reaped.
+    pub pandoc_timeout: Duration,
+    /// `RLIMIT_AS` for the pandoc child; `None` (the default) is unbounded.
+    pub pandoc_max_memory_bytes: Option<u64>,
 }
 
 impl Config {
@@ -82,6 +109,10 @@ impl Config {
             bail!("{MAX_CACHE_LIVES} ({max_cache_lives}) must be >= {CACHE_LIVES} ({cache_lives})");
         }
 
+        let max_concurrent_renders = parse_concurrency(get(MAX_CONCURRENT_RENDERS))?;
+        let render_queue_max = parse_u32(get(RENDER_QUEUE_MAX), RENDER_QUEUE_MAX)?
+            .map_or(max_concurrent_renders.saturating_mul(2), |n| n as usize);
+
         Ok(Self {
             bind,
             token,
@@ -96,6 +127,37 @@ impl Config {
                 .filter(|s| !s.is_empty())
                 .map(PathBuf::from),
             typst_compiler: parse_typst_compiler(&get)?,
+            max_concurrent_renders,
+            render_queue_max,
+            render_queue: Duration::from_secs(
+                parse_u32(get(RENDER_QUEUE_SECS), RENDER_QUEUE_SECS)?
+                    .unwrap_or(DEFAULT_RENDER_QUEUE_SECS)
+                    .into(),
+            ),
+            expose_diagnostics: parse_flag(get(EXPOSE_DIAGNOSTICS), EXPOSE_DIAGNOSTICS)?,
+            pandoc_timeout: parse_timeout(
+                get(PANDOC_TIMEOUT_SECS),
+                PANDOC_TIMEOUT_SECS,
+                DEFAULT_PANDOC_TIMEOUT_SECS,
+            )?,
+            pandoc_max_memory_bytes: parse_bytes(
+                get(PANDOC_MAX_MEMORY_BYTES),
+                PANDOC_MAX_MEMORY_BYTES,
+            )?,
+        })
+    }
+}
+
+impl Config {
+    /// Fails startup when `MDCAST_TYPST=cli` (the default) has no usable
+    /// `typst` binary — otherwise every PDF render would be a `500`.
+    pub async fn check_typst(&self) -> Result<()> {
+        self.typst_compiler.check_startup().await.with_context(|| {
+            format!(
+                "{TYPST}=cli (the default) needs a typst binary >= {}.{}.{} at {TYPST_BIN}; \
+                 set {TYPST}=library to compile in-process instead",
+                MIN_TYPST_CLI_VERSION.0, MIN_TYPST_CLI_VERSION.1, MIN_TYPST_CLI_VERSION.2
+            )
         })
     }
 }
@@ -120,23 +182,58 @@ fn parse_u32(raw: Option<String>, name: &str) -> Result<Option<u32>> {
     .transpose()
 }
 
-/// `MDCAST_TYPST` selects the compiler; `cli` mode reads the remaining
-/// `MDCAST_TYPST_*` variables, all of which are meaningless (and ignored) in
-/// `library` mode.
+/// Defaults to the machine's parallelism: a render is mostly one busy core
+/// (a typst compile, a pandoc run), so more slots than cores only adds
+/// memory pressure. Zero would refuse every render, so it fails startup.
+fn parse_concurrency(raw: Option<String>) -> Result<usize> {
+    match parse_u32(raw, MAX_CONCURRENT_RENDERS)? {
+        Some(0) => bail!("{MAX_CONCURRENT_RENDERS} must be at least 1"),
+        Some(n) => Ok(n as usize),
+        None => Ok(std::thread::available_parallelism().map_or(1, |n| n.get())),
+    }
+}
+
+/// A zero timeout kills every child before it can finish, so every render
+/// would fail: refuse it at startup instead.
+fn parse_timeout(raw: Option<String>, name: &str, default_secs: u32) -> Result<Duration> {
+    match parse_u32(raw, name)? {
+        Some(0) => bail!("{name} must be at least 1"),
+        secs => Ok(Duration::from_secs(secs.unwrap_or(default_secs).into())),
+    }
+}
+
+fn parse_flag(raw: Option<String>, name: &str) -> Result<bool> {
+    match raw.as_deref().map(str::trim) {
+        None | Some("" | "0" | "false") => Ok(false),
+        Some("1" | "true") => Ok(true),
+        Some(other) => bail!("{name} must be 1/true or 0/false, got {other:?}"),
+    }
+}
+
+/// `MDCAST_TYPST` selects the compiler (`cli` unless set); `cli` mode reads
+/// the remaining `MDCAST_TYPST_*` variables, all of which are meaningless
+/// (and ignored) in `library` mode.
 fn parse_typst_compiler(get: &impl Fn(&str) -> Option<String>) -> Result<TypstCompiler> {
-    match get(TYPST).as_deref().unwrap_or("library").trim() {
-        "" | "library" => Ok(TypstCompiler::Library),
-        "cli" => {
+    match get(TYPST).as_deref().unwrap_or("cli").trim() {
+        "library" => Ok(TypstCompiler::Library),
+        "" | "cli" => {
             let bin = get(TYPST_BIN)
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_TYPST_BIN.to_string());
-            let timeout_secs = parse_u32(get(TYPST_TIMEOUT_SECS), TYPST_TIMEOUT_SECS)?
-                .unwrap_or(DEFAULT_TYPST_TIMEOUT_SECS);
+            let timeout = parse_timeout(
+                get(TYPST_TIMEOUT_SECS),
+                TYPST_TIMEOUT_SECS,
+                DEFAULT_TYPST_TIMEOUT_SECS,
+            )?;
             let max_memory_bytes =
                 parse_bytes(get(TYPST_MAX_MEMORY_BYTES), TYPST_MAX_MEMORY_BYTES)?;
+            let max_output_bytes =
+                parse_bytes(get(TYPST_MAX_OUTPUT_BYTES), TYPST_MAX_OUTPUT_BYTES)?
+                    .unwrap_or(DEFAULT_MAX_OUTPUT_BYTES);
             Ok(TypstCompiler::Cli(
-                CliCompiler::new(bin, Duration::from_secs(timeout_secs.into()))
-                    .with_max_memory_bytes(max_memory_bytes),
+                CliCompiler::new(bin, timeout)
+                    .with_max_memory_bytes(max_memory_bytes)
+                    .with_max_output_bytes(max_output_bytes),
             ))
         }
         other => bail!("{TYPST} must be \"library\" or \"cli\", got {other:?}"),
@@ -144,145 +241,5 @@ fn parse_typst_compiler(get: &impl Fn(&str) -> Option<String>) -> Result<TypstCo
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::HashMap;
-
-    fn config_from(pairs: &[(&str, &str)]) -> Result<Config> {
-        let map: HashMap<String, String> = pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect();
-        Config::from_lookup(|k| map.get(k).cloned())
-    }
-
-    #[test]
-    fn token_alone_is_enough_and_everything_else_defaults() {
-        let cfg = config_from(&[(TOKEN, "s3cret")]).unwrap();
-
-        assert_eq!(cfg.token.as_deref(), Some("s3cret"));
-        assert_eq!(cfg.bind.to_string(), DEFAULT_BIND);
-        assert_eq!(cfg.max_cache_bytes, DEFAULT_MAX_CACHE_BYTES);
-        assert_eq!(cfg.max_upload_bytes, DEFAULT_MAX_UPLOAD_BYTES);
-        assert_eq!(cfg.cache_lives, DEFAULT_CACHE_LIVES);
-        assert_eq!(cfg.max_cache_lives, DEFAULT_MAX_CACHE_LIVES);
-        assert_eq!(cfg.prefill_dir, None);
-        assert_eq!(cfg.typst_compiler, TypstCompiler::Library);
-    }
-
-    #[test]
-    fn a_missing_or_empty_token_starts_unauthenticated_rather_than_erroring() {
-        for pairs in [&[][..], &[(TOKEN, "")][..]] {
-            let cfg = config_from(pairs).unwrap();
-            assert_eq!(cfg.token, None);
-        }
-    }
-
-    #[test]
-    fn every_variable_is_honoured() {
-        let cfg = config_from(&[
-            (TOKEN, "t"),
-            (BIND, "0.0.0.0:9000"),
-            (MAX_CACHE_BYTES, "1024"),
-            (MAX_UPLOAD_BYTES, "2048"),
-            (CACHE_LIVES, "5"),
-            (MAX_CACHE_LIVES, "50"),
-            (PREFILL_DIR, "/srv/mdcast/prefill"),
-            (TYPST, "cli"),
-            (TYPST_BIN, "/opt/typst/typst"),
-            (TYPST_TIMEOUT_SECS, "5"),
-            (TYPST_MAX_MEMORY_BYTES, "1024"),
-        ])
-        .unwrap();
-
-        assert_eq!(cfg.bind.to_string(), "0.0.0.0:9000");
-        assert_eq!(cfg.max_cache_bytes, 1024);
-        assert_eq!(cfg.max_upload_bytes, 2048);
-        assert_eq!(cfg.cache_lives, 5);
-        assert_eq!(cfg.max_cache_lives, 50);
-        assert_eq!(cfg.prefill_dir, Some(PathBuf::from("/srv/mdcast/prefill")));
-        assert_eq!(
-            cfg.typst_compiler,
-            TypstCompiler::Cli(
-                CliCompiler::new("/opt/typst/typst", Duration::from_secs(5))
-                    .with_max_memory_bytes(Some(1024))
-            )
-        );
-    }
-
-    #[test]
-    fn an_empty_prefill_dir_is_treated_as_unset() {
-        let cfg = config_from(&[(TOKEN, "t"), (PREFILL_DIR, "")]).unwrap();
-        assert_eq!(cfg.prefill_dir, None);
-    }
-
-    #[test]
-    fn typst_library_is_the_default_and_the_explicit_choice() {
-        for pairs in [&[(TOKEN, "t")][..], &[(TOKEN, "t"), (TYPST, "library")][..]] {
-            let cfg = config_from(pairs).unwrap();
-            assert_eq!(cfg.typst_compiler, TypstCompiler::Library);
-        }
-    }
-
-    #[test]
-    fn typst_cli_reads_bin_timeout_and_memory_cap() {
-        let cfg = config_from(&[
-            (TOKEN, "t"),
-            (TYPST, "cli"),
-            (TYPST_BIN, "/opt/typst/typst"),
-            (TYPST_TIMEOUT_SECS, "5"),
-            (TYPST_MAX_MEMORY_BYTES, "1073741824"),
-        ])
-        .unwrap();
-
-        assert_eq!(
-            cfg.typst_compiler,
-            TypstCompiler::Cli(
-                CliCompiler::new("/opt/typst/typst", Duration::from_secs(5))
-                    .with_max_memory_bytes(Some(1024 * 1024 * 1024))
-            )
-        );
-    }
-
-    #[test]
-    fn typst_cli_defaults_bin_and_timeout_when_unset() {
-        let cfg = config_from(&[(TOKEN, "t"), (TYPST, "cli")]).unwrap();
-
-        assert_eq!(
-            cfg.typst_compiler,
-            TypstCompiler::Cli(CliCompiler::new(
-                DEFAULT_TYPST_BIN,
-                Duration::from_secs(DEFAULT_TYPST_TIMEOUT_SECS.into())
-            ))
-        );
-    }
-
-    #[test]
-    fn an_unknown_typst_mode_names_the_variable() {
-        let err = config_from(&[(TOKEN, "t"), (TYPST, "subprocess")]).unwrap_err();
-        assert!(err.to_string().contains(TYPST), "{err}");
-    }
-
-    #[test]
-    fn a_malformed_value_names_its_variable() {
-        let err = config_from(&[(TOKEN, "t"), (BIND, "not-an-address")]).unwrap_err();
-        assert!(err.to_string().contains(BIND), "{err}");
-
-        let err = config_from(&[(TOKEN, "t"), (MAX_CACHE_BYTES, "2GiB")]).unwrap_err();
-        assert!(err.to_string().contains(MAX_CACHE_BYTES), "{err}");
-
-        let err = config_from(&[(TOKEN, "t"), (CACHE_LIVES, "not-a-number")]).unwrap_err();
-        assert!(err.to_string().contains(CACHE_LIVES), "{err}");
-
-        let err = config_from(&[(TOKEN, "t"), (MAX_CACHE_LIVES, "not-a-number")]).unwrap_err();
-        assert!(err.to_string().contains(MAX_CACHE_LIVES), "{err}");
-    }
-
-    #[test]
-    fn max_cache_lives_below_cache_lives_refuses_to_start() {
-        let err =
-            config_from(&[(TOKEN, "t"), (CACHE_LIVES, "10"), (MAX_CACHE_LIVES, "5")]).unwrap_err();
-        assert!(err.to_string().contains(CACHE_LIVES), "{err}");
-        assert!(err.to_string().contains(MAX_CACHE_LIVES), "{err}");
-    }
-}
+#[path = "config_tests.rs"]
+mod tests;

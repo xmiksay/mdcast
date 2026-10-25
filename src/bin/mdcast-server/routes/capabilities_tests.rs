@@ -8,15 +8,8 @@ fn app_with(
     max_upload_bytes: u64,
     typst_compiler: TypstCompiler,
 ) -> Router {
-    let store = Arc::new(BlobStore::new(1 << 20, 3, 32).unwrap());
-    let state = Arc::new(AppState {
-        store,
-        registry: Registry::with_typst_compiler(typst_compiler.clone()),
-        typst_compiler,
-        pandoc_available,
-        max_upload_bytes,
-    });
-    router(state, Some(TOKEN), 1 << 20)
+    let state = state(typst_compiler, pandoc_available, max_upload_bytes);
+    router(Arc::new(state), Some(TOKEN), 1 << 20)
 }
 
 fn get(uri: &str) -> Request<Body> {

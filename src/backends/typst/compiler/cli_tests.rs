@@ -6,16 +6,16 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::backends::typst::test_support::count_processes_named;
+use crate::backends::typst::test_support::count_child_processes_named;
 
-/// Every test below spawns a real `typst` subprocess, and
-/// `timeout_kills_and_reaps_a_non_terminating_compile` asserts on the
-/// system-wide `typst` process count before/after its own compile. Cargo
-/// runs a test binary's `#[tokio::test]`s concurrently on multiple threads
-/// by default, so without this lock a sibling test's still-running compile
-/// gets counted as a leak that isn't one. Scoped to this file only: no other
-/// test in the `mdcast` lib spawns a real `typst` binary (the rest use
-/// `TypstCompiler::Library`, in-process).
+/// `timeout_kills_and_reaps_a_non_terminating_compile` counts this process's
+/// `typst` children before/after its own compile, and cargo runs a test
+/// binary's `#[tokio::test]`s concurrently, so every test that spawns the real
+/// `typst` takes this lock — otherwise a sibling's still-running child reads
+/// as a leak. Fake binaries are deliberately *not* named `typst` (a shebang
+/// script's `/proc/<pid>/comm` is its basename, so it would be counted) and
+/// need no lock. Scoped to this file: no other test in the `mdcast` lib spawns
+/// a `typst`-named child.
 fn typst_process_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -159,7 +159,7 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
 #x
 "#;
 
-    let before = count_processes_named("typst");
+    let before = count_child_processes_named("typst");
     let start = std::time::Instant::now();
 
     let err = cli
@@ -180,16 +180,161 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
     // The killed child must be reaped, not left a zombie or orphan — this is
     // the behaviour `Library` mode structurally cannot offer (spawn_blocking
     // cannot be cancelled).
-    let mut after = count_processes_named("typst");
+    let mut after = count_child_processes_named("typst");
     for _ in 0..20 {
         if after <= before {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        after = count_processes_named("typst");
+        after = count_child_processes_named("typst");
     }
     assert!(
         after <= before,
         "typst process count did not return to baseline: before={before} after={after}"
     );
+}
+
+#[tokio::test]
+async fn compile_errors_are_typed_diagnostics_without_the_temp_dir() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "= Hi\n#image(\"missing.png\")\n")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    let diags = err
+        .downcast_ref::<crate::backends::typst::CompileDiagnostics>()
+        .unwrap_or_else(|| panic!("not typed diagnostics: {err:#}"));
+    let all = diags.diagnostics.join("\n");
+    assert!(all.starts_with("main.typ:2:"), "{all}");
+    assert!(all.contains("missing.png"), "{all}");
+    assert!(!all.contains("mdcast-typst-"), "temp dir leaked: {all}");
+}
+
+/// A `@preview` import must fail, promptly, without a download: the proxy
+/// variables point every request at a closed loopback port.
+#[tokio::test]
+async fn a_package_import_fails_fast_without_downloading() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+    let start = std::time::Instant::now();
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "#import \"@preview/cetz:0.3.0\": *\nHi\n")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(start.elapsed() < Duration::from_secs(10), "{err:#}");
+    let message = format!("{err:#}");
+    assert!(message.contains("cetz"), "{message}");
+    assert!(
+        message.contains("refused"),
+        "not refused locally: {message}"
+    );
+}
+
+#[tokio::test]
+async fn output_over_the_cap_is_rejected_before_it_is_read() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20)).with_max_output_bytes(64);
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "= Hello")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.to_string().contains("64-byte cap"), "{err:#}");
+}
+
+#[test]
+fn bounds_cap_file_size_and_cpu_time() {
+    let cli = CliCompiler::new("typst", Duration::from_secs(10)).with_max_output_bytes(1000);
+    let bounds = cli.bounds();
+    assert_eq!(bounds.max_file_bytes, Some(1000 + (1 << 20)));
+    let cores = std::thread::available_parallelism().map_or(1, |n| n.get() as u64);
+    assert_eq!(bounds.cpu_secs, Some(11 * cores + 5));
+}
+
+/// A template's own error message can contain clap's `Usage:` line; only
+/// the exit code tells a usage error (2) from a failed compile (1).
+#[tokio::test]
+async fn a_usage_line_in_a_template_error_is_still_a_compile_diagnostic() {
+    let _guard = typst_process_lock().lock().await;
+    let Some(bin) = typst_on_path() else {
+        eprintln!("skipping: no `typst` binary on PATH");
+        return;
+    };
+    let cli = CliCompiler::new(bin, Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![(
+                "main.typ",
+                "#assert(false, message: \"boom\\nUsage: x\\nFor more information, try '--help'.\")\n",
+            )],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.downcast_ref::<SpawnError>().is_none(), "{err:#}");
+    let diags = err
+        .downcast_ref::<crate::backends::typst::CompileDiagnostics>()
+        .unwrap_or_else(|| panic!("not typed diagnostics: {err:#}"));
+    assert!(diags.diagnostics.join("\n").contains("boom"), "{diags:?}");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn a_clap_usage_error_is_a_spawn_error() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("fake-typst");
+    std::fs::write(
+        &bin,
+        "#!/bin/sh\necho \"error: unexpected argument '--x' found\" >&2\n\
+         echo 'Usage: typst compile [OPTIONS] <INPUT>' >&2\nexit 2\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let cli = CliCompiler::new(bin.to_string_lossy(), Duration::from_secs(20));
+
+    let err = cli
+        .compile(inputs(
+            "main.typ",
+            vec![("main.typ", "Hi")],
+            CompileFormat::Pdf,
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(err.downcast_ref::<SpawnError>().is_some(), "{err:#}");
 }

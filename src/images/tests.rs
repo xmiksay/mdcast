@@ -28,13 +28,39 @@ async fn rewrites_resolved_keys_only() {
     assert_eq!(resolved, vec!["img/diagram.svg".to_string()]);
     assert!(pages[0].body.contains("img__diagram.svg"));
     assert!(
-        pages[0].body.contains("img/missing.png"),
-        "missing keys preserved"
+        !pages[0].body.contains("img/missing.png"),
+        "a missing key must never reach pandoc: {}",
+        pages[0].body
     );
     assert!(
-        pages[0].body.contains("https://img.invalid/p.png"),
-        "remote URLs preserved when remote-images feature is off (and unresolvable when on — `.invalid` never resolves per RFC 2606)"
+        !pages[0].body.contains("img.invalid"),
+        "an unfetched remote URL is dropped too, with or without remote-images \
+         (`.invalid` never resolves per RFC 2606): {}",
+        pages[0].body
     );
+}
+
+/// Every syntax pulldown-cmark recognises as an image, pointing at a host
+/// file: none may survive to be read by pandoc. `data:` URIs carry their own
+/// bytes and are kept.
+#[tokio::test]
+async fn unresolved_local_paths_are_dropped_in_every_syntax() {
+    let provider = sync_provider(|_| Ok(None));
+    let tmp = tempfile::tempdir().unwrap();
+    let mut pages = vec![page(
+        "a ![](/proc/self/environ) b ![t](/etc/hostname \"title\") c ![](</etc/hostname>) \
+         d ![x][r] e ![](file:///etc/hostname) f ![ok](data:image/png;base64,AA==)\n\n\
+         [r]: /etc/hostname\n",
+    )];
+    resolve_images(&mut pages, &provider, tmp.path(), Target::Docx)
+        .await
+        .unwrap();
+
+    let body = &pages[0].body;
+    for gone in ["![](/proc", "![t]", "![](<", "![x][r]", "file://"] {
+        assert!(!body.contains(gone), "{gone:?} survived: {body}");
+    }
+    assert!(body.contains("![ok](data:image/png;base64,AA==)"), "{body}");
 }
 
 #[tokio::test]
@@ -172,8 +198,8 @@ async fn remote_images_feature_warns_and_skips_on_error_status() {
 
     assert!(resolved.is_empty());
     assert!(
-        pages[0].body.contains(&url),
-        "unresolved remote url left in place: {}",
+        !pages[0].body.contains(&url),
+        "a failed remote fetch is dropped, never left for pandoc to fetch: {}",
         pages[0].body
     );
 }
