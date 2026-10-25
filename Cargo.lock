@@ -2038,7 +2038,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "mdcast"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -2077,7 +2077,7 @@ dependencies = [
 
 [[package]]
 name = "mdcast-api"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -2086,7 +2086,7 @@ dependencies = [
 
 [[package]]
 name = "mdcast-client"
-version = "0.4.2"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "mdcast-api",
