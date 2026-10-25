@@ -6,15 +6,15 @@ use std::sync::OnceLock;
 use tokio::sync::Mutex;
 
 use super::*;
-use crate::backends::typst::test_support::count_processes_named;
+use crate::backends::typst::test_support::count_child_processes_named;
 
-/// Every test below spawns a real `typst` subprocess, and
-/// `timeout_kills_and_reaps_a_non_terminating_compile` asserts on the
-/// system-wide `typst` process count before/after its own compile. Cargo
-/// runs a test binary's `#[tokio::test]`s concurrently on multiple threads
-/// by default, so without this lock a sibling test's still-running compile
-/// gets counted as a leak that isn't one. Scoped to this file only: no other
-/// test in the `mdcast` lib spawns a real `typst` binary (the rest use
+/// Every test below spawns a `typst` child (the real binary, or a fake script
+/// named `typst`), and `timeout_kills_and_reaps_a_non_terminating_compile`
+/// counts this process's `typst` children before/after its own compile.
+/// Cargo runs a test binary's `#[tokio::test]`s concurrently on multiple
+/// threads by default, so without this lock a sibling test's still-running
+/// child gets counted as a leak that isn't one. Scoped to this file only: no
+/// other test in the `mdcast` lib spawns a `typst` child (the rest use
 /// `TypstCompiler::Library`, in-process).
 fn typst_process_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -159,7 +159,7 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
 #x
 "#;
 
-    let before = count_processes_named("typst");
+    let before = count_child_processes_named("typst");
     let start = std::time::Instant::now();
 
     let err = cli
@@ -180,13 +180,13 @@ async fn timeout_kills_and_reaps_a_non_terminating_compile() {
     // The killed child must be reaped, not left a zombie or orphan — this is
     // the behaviour `Library` mode structurally cannot offer (spawn_blocking
     // cannot be cancelled).
-    let mut after = count_processes_named("typst");
+    let mut after = count_child_processes_named("typst");
     for _ in 0..20 {
         if after <= before {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        after = count_processes_named("typst");
+        after = count_child_processes_named("typst");
     }
     assert!(
         after <= before,
@@ -316,6 +316,7 @@ async fn a_usage_line_in_a_template_error_is_still_a_compile_diagnostic() {
 async fn a_clap_usage_error_is_a_spawn_error() {
     use std::os::unix::fs::PermissionsExt;
 
+    let _guard = typst_process_lock().lock().await;
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("typst");
     std::fs::write(

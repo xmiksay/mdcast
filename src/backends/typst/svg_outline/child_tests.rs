@@ -10,7 +10,7 @@ use super::super::tests::{NO_TEXT, PNG_1X1};
 use super::super::{Outcome, outline_svgs};
 use super::*;
 use crate::backends::typst::compiler::{CliCompiler, TypstCompiler};
-use crate::backends::typst::test_support::count_processes_named;
+use crate::backends::typst::test_support::count_child_processes_named;
 
 const TEXT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10"><text y="8">Hi ↔</text></svg>"#;
 
@@ -69,7 +69,7 @@ fn run_child_rejects_a_garbled_request() {
 
 #[tokio::test]
 async fn a_child_that_never_answers_is_killed_and_reaped() {
-    let before = count_processes_named("sleep");
+    let before = count_child_processes_named("sleep");
     let start = Instant::now();
 
     let err = outline_in_child(
@@ -87,13 +87,13 @@ async fn a_child_that_never_answers_is_killed_and_reaped() {
         start.elapsed() < Duration::from_secs(10),
         "did not return promptly"
     );
-    let mut after = count_processes_named("sleep");
+    let mut after = count_child_processes_named("sleep");
     for _ in 0..20 {
         if after <= before {
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
-        after = count_processes_named("sleep");
+        after = count_child_processes_named("sleep");
     }
     assert!(
         after <= before,

@@ -80,7 +80,7 @@ src/
 │  └─ typst/          #[cfg(feature = "typst")]   pdf/pdf-presentation
 │     ├─ mod.rs         TypstBackend, driver assembly, builds CompileInputs, hands off to compiler::TypstCompiler
 │     ├─ diagnostics.rs CompileDiagnostics — typed error for a failed compile's errors+warnings as `path:line:col: severity: message`, virtual paths only; from_source() (library) / from_cli_stderr() (cli, `--diagnostic-format short`, compile root then the whole temp dir stripped, canonical forms too; is_usage_error() recognises clap output, conclusive only with exit code 2) — downcast by mdcast-server for `detail` (issue #96)
-│     ├─ test_support.rs #[cfg(test)] count_processes_named() — /proc headcount shared by the subprocess leak tests
+│     ├─ test_support.rs #[cfg(test)] count_child_processes_named() — /proc headcount of this process's direct children, shared by the subprocess leak tests
 │     ├─ compiler/      the compiler seam (issue #73) — selectable in-process/subprocess
 │     │  ├─ mod.rs      CompileInputs/CompileFormat, TypstCompiler enum (Library default / Cli)
 │     │  ├─ library.rs  TypstCompiler::Library — today's in-process TypstEngine compile, unified over CompileInputs
