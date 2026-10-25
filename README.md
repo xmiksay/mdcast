@@ -1313,12 +1313,20 @@ only logs a warning rather than resolving itself.
 
 | Method + path              | Auth | Request → response |
 |----------------------------|------|--------------------|
+| `GET /`                    | no   | → static HTML landing page: what this service is, version, links to `/health`, `/v1/capabilities` and the repo |
 | `GET /health`              | no   | → `ok` (for load balancers and container health checks) |
 | `GET /v1/capabilities`     | no   | → `CapabilitiesResponse` — which targets/formats this deployment can actually produce |
 | `POST /v1/blobs/check`     | if `MDCAST_TOKEN` is set  | `BlobCheckRequest` → `BlobCheckResponse` — which digests am I missing? |
 | `POST /v1/blobs`           | if `MDCAST_TOKEN` is set  | `multipart/form-data`, one part per blob → `204` |
 | `POST /v1/render`          | if `MDCAST_TOKEN` is set  | `RenderMarkdownRequest` → artifact bytes |
 | `POST /v1/render/template` | if `MDCAST_TOKEN` is set  | `RenderTemplateRequest` → artifact bytes |
+
+`GET /` (issue #99) is a small static page for anyone who opens the service
+in a browser: an mdcast wordmark, what the service does, the running version
+and links to the two public endpoints and the repository. It is compiled into
+the binary with inline CSS/SVG only (no external fonts, scripts or images,
+enforced by a `default-src 'none'` CSP), shows no deployment detail, needs no
+token and takes no render slot.
 
 `GET /v1/capabilities` (issue #81) is unauthenticated in both modes, same as
 `/health` — a client can feature-gate its UI (hide a "download PPTX" button,
