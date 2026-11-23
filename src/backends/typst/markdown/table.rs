@@ -104,7 +104,7 @@ mod tests {
     fn table_cell_inline_marks_render_styled() {
         let md = "| H |\n|---|\n| **bold** and _em_ and `code` |\n";
         let out = md_to_typst(md, &BTreeMap::new());
-        assert!(out.contains(r#"[*bold* and _em_ and #raw("code")]"#));
+        assert!(out.contains(r#"[*bold* and _em_ and #raw("code");]"#));
     }
 
     #[test]

@@ -620,7 +620,12 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
   "markup")`. Code block text is passed through verbatim (not escaped) inside
   the fence, with the fence language forwarded from the markdown info string;
   inline code renders via `#raw(...)` (a function call, not the backtick
-  shorthand) so embedded backticks can't break out of it. Tables project to a
+  shorthand) so embedded backticks can't break out of it. Every inline call
+  the converter emits (`#raw`, `#link`, `#footnote`, `#image` —
+  `mod.rs::push_call`) ends in an explicit `;` (issue #104): otherwise typst
+  swallows a directly following `;` as the expression terminator and
+  continues it on `(`/`[`/`.ident` (call args, trailing content block,
+  field access). Tables project to a
   structural `#table(columns:, align:, table.header(...), ...)` call — column
   count and per-column alignment come from the GFM alignment row, header
   cells are wrapped in `table.header(...)`, ragged rows are padded/truncated

@@ -103,7 +103,7 @@ fn link_text_supports_emphasis_and_escaping() {
 fn link_inside_table_cell_stays_scoped_to_the_cell() {
     let md = "| H |\n|---|\n| [F13](https://f13.tech) |\n";
     let out = md_to_typst(md, &BTreeMap::new());
-    assert!(out.contains(r#"[#link("https://f13.tech")[F13]]"#));
+    assert!(out.contains(r#"[#link("https://f13.tech")[F13];]"#));
 }
 
 #[test]
@@ -162,4 +162,103 @@ fn unresolved_image_leaves_no_placeholder_text_in_output() {
     let out = md_to_typst("![alt](https://example.com/missing.png)", &BTreeMap::new());
     assert!(!out.contains("unresolved"));
     assert!(!out.contains("https://example.com/missing.png"));
+}
+
+// Issue #104: in typst markup an embedded expression (`#raw(...)`,
+// `#link(...)[...]`, …) swallows a directly following `;` as its terminator,
+// and a directly following `(` / `[` / `.ident` extends it (call args,
+// trailing content block, field access). Every emitted call therefore ends
+// in an explicit `;`, so whatever text follows is plain markup again.
+#[test]
+fn inline_code_is_terminated_before_following_text() {
+    for (md, expected) in [
+        (
+            "Use `foo`; then `bar`.\n",
+            r#"Use #raw("foo");; then #raw("bar");."#,
+        ),
+        ("`f`(x)\n", r#"#raw("f");(x)"#),
+        ("`a`[b]\n", r#"#raw("a");\[b\]"#),
+        ("`s`.len\n", r#"#raw("s");.len"#),
+    ] {
+        let out = md_to_typst(md, &BTreeMap::new());
+        assert!(out.contains(expected), "{md:?} → {out:?}");
+    }
+}
+
+#[test]
+fn link_footnote_and_image_calls_are_terminated() {
+    let out = md_to_typst("[F13](https://f13.tech); (x).y\n", &BTreeMap::new());
+    assert!(
+        out.contains(r#"#link("https://f13.tech")[F13];; (x).y"#),
+        "{out}"
+    );
+
+    let out = md_to_typst("See[^1]; (x).\n\n[^1]: Note.\n", &BTreeMap::new());
+    assert!(out.contains("See#footnote[Note.];; (x)."), "{out}");
+
+    let images = BTreeMap::from([("a.png".to_string(), "/images/a.png".to_string())]);
+    let out = md_to_typst("![](a.png).png; ok\n", &images);
+    assert!(out.contains(r#"#image("/images/a.png");.png; ok"#), "{out}");
+}
+
+/// Compiles `md_to_typst`'s output in-process and returns the laid-out
+/// text with all whitespace removed (typst splits runs into separate
+/// `TextItem`s, and inter-item spacing is not text).
+fn rendered_text(md: &str) -> String {
+    use typst::layout::{Frame, FrameItem, PagedDocument};
+    use typst_as_lib::TypstEngine;
+
+    fn walk(frame: &Frame, out: &mut String) {
+        for (_, item) in frame.items() {
+            match item {
+                FrameItem::Text(t) => out.push_str(&t.text),
+                FrameItem::Group(g) => walk(&g.frame, out),
+                _ => {}
+            }
+        }
+    }
+
+    let src = md_to_typst(md, &BTreeMap::new());
+    let engine = TypstEngine::builder()
+        .main_file(src)
+        .search_fonts_with(typst_as_lib::typst_kit_options::TypstKitFontOptions::default())
+        .build();
+    let doc: PagedDocument = engine
+        .compile()
+        .output
+        .unwrap_or_else(|e| panic!("{md:?} failed to compile: {e:?}"));
+    let mut text = String::new();
+    for page in &doc.pages {
+        walk(&page.frame, &mut text);
+    }
+    text.split_whitespace().collect()
+}
+
+#[test]
+fn punctuation_after_inline_constructs_survives_typst_compile() {
+    for (md, expected) in [
+        ("Use `foo`; then `bar`.\n", "Usefoo;thenbar."),
+        (
+            "Call `f`(x) and `g`[y] and `s`.len here.\n",
+            "Callf(x)andg[y]ands.lenhere.",
+        ),
+        ("[F13](https://f13.tech); (x).len\n", "F13;(x).len"),
+        ("See[^1]; (x).\n\n[^1]: Note.\n", "See1;(x)."),
+        // The same call in every capture/block context the converter emits.
+        ("# Head `h`; (x)\n", "Headh;(x)"),
+        ("- item `i`; (x)\n- `j`.len\n", "•itemi;(x)•j.len"),
+        ("> quoted `q`; (x)\n", "quotedq;(x)"),
+        (
+            "Some _em `e`; (x)_ and **`s`[y]**.\n",
+            "Someeme;(x)ands[y].",
+        ),
+        ("[`c`; (x)](https://f13.tech); z\n", "c;(x);z"),
+        ("| H |\n|---|\n| `t`; (x) |\n", "Ht;(x)"),
+        ("A[^n].\n\n[^n]: Uses `n`; (x).\n", "A1.1Usesn;(x)."),
+        // A call ending its paragraph/line leaves no stray `;`.
+        ("End `x`\n\nNext `y`\nline\n", "EndxNextyline"),
+    ] {
+        let got = rendered_text(md);
+        assert!(got.contains(expected), "{md:?} rendered as {got:?}");
+    }
 }
