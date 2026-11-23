@@ -612,7 +612,9 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
 ## Known limitations
 
 - The md→Typst converter (`typst/markdown/mod.rs::md_to_typst`) covers a v1
-  subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
+  subset: headings, paragraphs, emphasis/strong, lists (ordered ones as explicit
+  `N. ` markers keeping the markdown start number, nested items indented past
+  their marker — issue #105), blockquotes, images,
   inline code, code blocks, tables, links (inline and reference-style),
   autolinks (`<https://…>`, `<user@host>`), and footnotes. Raw HTML blocks are
   dropped (their text content still comes through). Layouts receive the

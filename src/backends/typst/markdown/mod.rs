@@ -56,6 +56,10 @@ fn render_events(
     let mut footnote_label_stack: Vec<String> = Vec::new();
     let mut table: Option<TableBuilder> = None;
     let mut collected_defs = BTreeMap::new();
+    // Per open list: `Some(next number)` for an ordered list, `None` for a
+    // bullet list. `item_stack` holds each open item's start offset in `out`.
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut item_stack: Vec<usize> = Vec::new();
 
     for ev in events {
         match ev {
@@ -73,10 +77,36 @@ fn render_events(
             Event::Start(Tag::Strong) => push_char(&mut out, &mut stack, '*'),
             Event::End(TagEnd::Strong) => push_char(&mut out, &mut stack, '*'),
 
-            Event::Start(Tag::List(_)) => {}
-            Event::End(TagEnd::List(_)) => out.push('\n'),
-            Event::Start(Tag::Item) => out.push_str("- "),
-            Event::End(TagEnd::Item) => out.push('\n'),
+            // Lists (issue #105): an ordered list's items get explicit
+            // `N. ` markers counted from the markdown start number, so a
+            // `3.`-started list keeps its numbering and nothing leaks into
+            // the next list; bullets stay `- `. Each item's body is buffered
+            // in `out` from its start offset and re-emitted at `End(Item)`
+            // with its continuation lines indented past the marker, which is
+            // how typst attaches nested lists / further paragraphs to it.
+            Event::Start(Tag::List(start)) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                list_stack.push(*start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                out.push('\n');
+            }
+            Event::Start(Tag::Item) => item_stack.push(out.len()),
+            Event::End(TagEnd::Item) => {
+                let body = out.split_off(item_stack.pop().unwrap_or(out.len()));
+                let marker = match list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let m = format!("{n}. ");
+                        *n += 1;
+                        m
+                    }
+                    _ => "- ".to_string(),
+                };
+                push_item(&mut out, &marker, &body);
+            }
 
             Event::Start(Tag::BlockQuote(_)) => out.push_str("#quote(block: true)[\n"),
             Event::End(TagEnd::BlockQuote(_)) => out.push_str("\n]\n\n"),
@@ -221,6 +251,25 @@ fn render_events(
         }
     }
     (out, collected_defs)
+}
+
+/// Emits one list item: `marker`, then the item's rendered `body` with every
+/// non-empty continuation line indented by the marker's width — typst keeps
+/// a line in an item only while it is indented past the marker's column, so
+/// nested lists and later paragraphs stay inside the item.
+fn push_item(out: &mut String, marker: &str, body: &str) {
+    let indent = " ".repeat(marker.len());
+    out.push_str(marker);
+    for (i, line) in body.trim_matches('\n').trim_end().lines().enumerate() {
+        if i > 0 {
+            out.push('\n');
+            if !line.is_empty() {
+                out.push_str(&indent);
+            }
+        }
+        out.push_str(line);
+    }
+    out.push('\n');
 }
 
 /// Writes into the innermost open capture buffer (table cell / link text /

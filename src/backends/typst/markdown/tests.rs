@@ -262,3 +262,92 @@ fn punctuation_after_inline_constructs_survives_typst_compile() {
         assert!(got.contains(expected), "{md:?} rendered as {got:?}");
     }
 }
+
+// Issue #105: ordered lists used to come out as `- ` bullets.
+#[test]
+fn ordered_list_emits_numbered_markers() {
+    let out = md_to_typst("1. Alpha\n2. Beta\n3. Gamma\n", &BTreeMap::new());
+    assert_eq!(out, "1. Alpha\n2. Beta\n3. Gamma\n\n");
+}
+
+#[test]
+fn ordered_list_keeps_start_number_without_leaking() {
+    let out = md_to_typst("3. Three\n4. Four\n\npara\n\n1. One\n", &BTreeMap::new());
+    assert!(out.starts_with("3. Three\n4. Four\n"), "{out:?}");
+    assert!(out.contains("\n1. One\n"), "{out:?}");
+}
+
+#[test]
+fn bullet_list_still_emits_dashes() {
+    let out = md_to_typst("- a\n- b\n", &BTreeMap::new());
+    assert_eq!(out, "- a\n- b\n\n");
+}
+
+#[test]
+fn nested_lists_are_indented_past_their_marker() {
+    let md = "- outer\n  1. one\n  2. two\n     - deep\n- next\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert_eq!(
+        out, "- outer\n  1. one\n  2. two\n     - deep\n- next\n\n",
+        "{out:?}"
+    );
+}
+
+#[test]
+fn multi_paragraph_item_keeps_continuation_indented() {
+    let md = "1. first `x`; para\n\n   second para\n2. next\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert!(
+        out.starts_with("1. first #raw(\"x\");; para\n\n   second para\n2. next\n"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn ordered_lists_render_numbers_through_typst() {
+    for (md, expected) in [
+        (
+            "# T\n\n1. Alpha\n2. Beta\n3. Gamma\n",
+            "T1.Alpha2.Beta3.Gamma",
+        ),
+        ("3. Three\n4. Four\n", "3.Three4.Four"),
+        // Start number doesn't leak into a following list.
+        (
+            "3. Three\n\ntext\n\n1. One\n2. Two\n",
+            "3.Threetext1.One2.Two",
+        ),
+        // Ordered inside ordered.
+        (
+            "1. Outer\n   1. Inner a\n   2. Inner b\n2. Outer two\n",
+            "1.Outer1.Innera2.Innerb2.Outertwo",
+        ),
+        // Ordered inside bullet.
+        (
+            "- Bullet\n  1. Step one\n  2. Step two\n",
+            "•Bullet1.Stepone2.Steptwo",
+        ),
+        // Bullet inside ordered.
+        (
+            "1. Step\n   - detail\n2. Step two\n",
+            "1.Step•detail2.Steptwo",
+        ),
+        // Multi-paragraph item and inline code inside an item.
+        (
+            "1. Run `make`; then\n\n   wait.\n2. Done\n",
+            "1.Runmake;thenwait.2.Done",
+        ),
+        // Code block inside an item.
+        (
+            "1. Code:\n\n   ```\n   x = 1\n   ```\n2. After\n",
+            "1.Code:x=12.After",
+        ),
+    ] {
+        let got = rendered_text(md);
+        assert_eq!(
+            got,
+            expected,
+            "{md:?} -> {:?}",
+            md_to_typst(md, &BTreeMap::new())
+        );
+    }
+}
