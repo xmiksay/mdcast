@@ -205,13 +205,19 @@ fn link_footnote_and_image_calls_are_terminated() {
 /// text with all whitespace removed (typst splits runs into separate
 /// `TextItem`s, and inter-item spacing is not text).
 fn rendered_text(md: &str) -> String {
+    rendered_runs(md).concat().split_whitespace().collect()
+}
+
+/// Every shaped text run of `md`'s compiled output, in frame order, with
+/// whitespace intact (so a code line's leading indentation stays visible).
+fn rendered_runs(md: &str) -> Vec<String> {
     use typst::layout::{Frame, FrameItem, PagedDocument};
     use typst_as_lib::TypstEngine;
 
-    fn walk(frame: &Frame, out: &mut String) {
+    fn walk(frame: &Frame, out: &mut Vec<String>) {
         for (_, item) in frame.items() {
             match item {
-                FrameItem::Text(t) => out.push_str(&t.text),
+                FrameItem::Text(t) => out.push(t.text.to_string()),
                 FrameItem::Group(g) => walk(&g.frame, out),
                 _ => {}
             }
@@ -227,11 +233,11 @@ fn rendered_text(md: &str) -> String {
         .compile()
         .output
         .unwrap_or_else(|e| panic!("{md:?} failed to compile: {e:?}"));
-    let mut text = String::new();
+    let mut runs = Vec::new();
     for page in &doc.pages {
-        walk(&page.frame, &mut text);
+        walk(&page.frame, &mut runs);
     }
-    text.split_whitespace().collect()
+    runs
 }
 
 #[test]
@@ -349,5 +355,80 @@ fn ordered_lists_render_numbers_through_typst() {
             "{md:?} -> {:?}",
             md_to_typst(md, &BTreeMap::new())
         );
+    }
+}
+
+// Review of #105: the item re-indentation must not leak into a fenced code
+// block's content — typst dedents a raw block by its common indentation
+// (closing fence included), so relative indentation survives exactly.
+#[test]
+fn code_block_in_item_keeps_its_own_indentation() {
+    let md = "1. Code:\n\n   ```\n       first\n   def f():\n       x\n\n   y\n   ```\n";
+    let runs = rendered_runs(md);
+    for line in ["    first", "def f():", "    x", "y"] {
+        assert!(runs.iter().any(|r| r == line), "{line:?} not in {runs:?}");
+    }
+}
+
+// Lists inside footnote definitions used to emit their markers into the main
+// flow (where the definition sat) and fuse the items inside the footnote.
+#[test]
+fn list_and_paragraphs_inside_footnote_stay_in_the_footnote() {
+    let md = "Text[^1] end.\n\n[^1]: Note:\n\n    1. a\n    2. b\n\n    Para two.\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert_eq!(
+        out, "Text#footnote[Note:\n\n1. a\n2. b\n\nPara two.]; end.\n\n",
+        "{out:?}"
+    );
+    assert_eq!(rendered_text(md), "Text1end.1Note:1.a2.bParatwo.");
+}
+
+#[test]
+fn lists_in_blockquotes_and_blockquotes_in_items_render() {
+    for (md, expected) in [
+        ("> 1. a\n> 2. b\n>\n> after\n", "1.a2.bafter"),
+        ("1. > quoted\n   > - in\n2. two\n", "1.quoted•in2.two"),
+        ("1. a  \n   hard\n2. b\n", "1.ahard2.b"),
+        ("- | a | b |\n  |---|---|\n  | 1 | 2 |\n- x\n", "•ab12•x"),
+        // Loose list: one list, numbering continues.
+        ("1. a\n\n2. b\n\n3. c\n", "1.a2.b3.c"),
+        ("0. zero\n1. one\n", "0.zero1.one"),
+        ("123456789. big\n", "123456789.big"),
+    ] {
+        assert_eq!(rendered_text(md), expected, "{md:?}");
+    }
+}
+
+// Literal text shaped like a typst block marker at the start of a line (an
+// escaped markdown marker, list-item text, text after a hard break) must stay
+// literal instead of becoming a nested list / heading / term.
+#[test]
+fn marker_shaped_text_at_line_start_stays_literal() {
+    for (md, expected) in [
+        (
+            "- 1\\. not nested\n- \\- dash\n- \\+ plus\n- \\= eq\n",
+            vec![
+                "•",
+                "1. not nested",
+                "•",
+                "- dash",
+                "•",
+                "+ plus",
+                "•",
+                "= eq",
+            ],
+        ),
+        (
+            "1\\. para\n\n\\- para\n\n\\+ p\n\n\\== p\n\n/ term: x\n",
+            vec!["1. para", "- para", "+ p", "== p", "/ term: x"],
+        ),
+        ("a  \n\\- b\n", vec!["a", "- b"]),
+    ] {
+        assert_eq!(rendered_runs(md), expected, "{md:?}");
+    }
+    // Not markers: left untouched.
+    for md in ["-5 degrees\n", "2024 was\n", "=x\n", "v1.2 ok\n"] {
+        let out = md_to_typst(md, &BTreeMap::new());
+        assert!(!out.contains('\\'), "{md:?} -> {out:?}");
     }
 }

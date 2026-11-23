@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
+use markers::{push_item, push_text};
 use table::TableBuilder;
 
+mod markers;
 mod table;
 
 /// Convert markdown to a Typst-markup string suitable for `eval(.., mode: "markup")`.
@@ -70,7 +72,9 @@ fn render_events(
             Event::End(TagEnd::Heading(_)) => out.push_str("\n\n"),
 
             Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => out.push_str("\n\n"),
+            // Through the capture stack, so a multi-paragraph footnote body
+            // keeps its paragraph break instead of fusing the paragraphs.
+            Event::End(TagEnd::Paragraph) => push_str(&mut out, &mut stack, "\n\n"),
 
             Event::Start(Tag::Emphasis) => push_char(&mut out, &mut stack, '_'),
             Event::End(TagEnd::Emphasis) => push_char(&mut out, &mut stack, '_'),
@@ -84,19 +88,23 @@ fn render_events(
             // in `out` from its start offset and re-emitted at `End(Item)`
             // with its continuation lines indented past the marker, which is
             // how typst attaches nested lists / further paragraphs to it.
+            // Everything goes to the innermost capture buffer, so a list in a
+            // footnote definition stays inside that footnote's body.
             Event::Start(Tag::List(start)) => {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
+                let buf = target(&mut out, &mut stack);
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
                 }
                 list_stack.push(*start);
             }
             Event::End(TagEnd::List(_)) => {
                 list_stack.pop();
-                out.push('\n');
+                push_char(&mut out, &mut stack, '\n');
             }
-            Event::Start(Tag::Item) => item_stack.push(out.len()),
+            Event::Start(Tag::Item) => item_stack.push(target(&mut out, &mut stack).len()),
             Event::End(TagEnd::Item) => {
-                let body = out.split_off(item_stack.pop().unwrap_or(out.len()));
+                let buf = target(&mut out, &mut stack);
+                let body = buf.split_off(item_stack.pop().unwrap_or(buf.len()));
                 let marker = match list_stack.last_mut() {
                     Some(Some(n)) => {
                         let m = format!("{n}. ");
@@ -105,7 +113,7 @@ fn render_events(
                     }
                     _ => "- ".to_string(),
                 };
-                push_item(&mut out, &marker, &body);
+                push_item(buf, &marker, &body);
             }
 
             Event::Start(Tag::BlockQuote(_)) => out.push_str("#quote(block: true)[\n"),
@@ -235,7 +243,7 @@ fn render_events(
                 if let Some((_, body)) = code_block.as_mut() {
                     body.push_str(t);
                 } else if in_image == 0 {
-                    push_str(&mut out, &mut stack, &escape_typst_inline(t));
+                    push_text(target(&mut out, &mut stack), &escape_typst_inline(t));
                 }
             }
             Event::Code(c) => {
@@ -253,23 +261,13 @@ fn render_events(
     (out, collected_defs)
 }
 
-/// Emits one list item: `marker`, then the item's rendered `body` with every
-/// non-empty continuation line indented by the marker's width — typst keeps
-/// a line in an item only while it is indented past the marker's column, so
-/// nested lists and later paragraphs stay inside the item.
-fn push_item(out: &mut String, marker: &str, body: &str) {
-    let indent = " ".repeat(marker.len());
-    out.push_str(marker);
-    for (i, line) in body.trim_matches('\n').trim_end().lines().enumerate() {
-        if i > 0 {
-            out.push('\n');
-            if !line.is_empty() {
-                out.push_str(&indent);
-            }
-        }
-        out.push_str(line);
+/// The innermost open capture buffer (table cell / link text / footnote
+/// body), or `out` when none is open.
+fn target<'a>(out: &'a mut String, stack: &'a mut [String]) -> &'a mut String {
+    match stack.last_mut() {
+        Some(buf) => buf,
+        None => out,
     }
-    out.push('\n');
 }
 
 /// Writes into the innermost open capture buffer (table cell / link text /
