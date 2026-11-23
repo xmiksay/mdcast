@@ -30,9 +30,12 @@ pub(super) fn push_item(out: &mut String, marker: &str, body: &str) {
 /// `1\. x` into `"1"` + `". x"`, so the digit run is checked against what
 /// `buf` already holds on the current line rather than within `text` alone.
 pub(super) fn push_text(buf: &mut String, text: &str) {
-    let line = &buf[buf.rfind('\n').map_or(0, |i| i + 1)..];
+    // Only the end of `buf` is inspected — never a scan back to the last
+    // newline, which made a long single-line paragraph (soft breaks emit a
+    // space) quadratic in its number of text events.
+    let at_line_start = |b: &str| b.is_empty() || b.ends_with('\n');
     let marker_end = |rest: &str| rest.chars().next().is_none_or(char::is_whitespace);
-    if line.is_empty() {
+    if at_line_start(buf) {
         let rest = text.trim_start_matches('=');
         let first = text.chars().next();
         let ends_marker = match first {
@@ -44,17 +47,38 @@ pub(super) fn push_text(buf: &mut String, text: &str) {
             buf.push('\\');
         }
     }
-    let line = &buf[buf.rfind('\n').map_or(0, |i| i + 1)..];
     let digits = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    let numbered = (line.is_empty() || line.bytes().all(|b| b.is_ascii_digit()))
-        && (!line.is_empty() || digits > 0)
-        && text[digits..].starts_with('.')
-        && marker_end(&text[digits + 1..]);
+    // The digit-tail scan runs only for a `.`+whitespace text, which then
+    // ends the run — so each digit in `buf` is scanned at most once.
+    let numbered = text[digits..].starts_with('.') && marker_end(&text[digits + 1..]) && {
+        let tail = buf.bytes().rev().take_while(u8::is_ascii_digit).count();
+        tail + digits > 0 && at_line_start(&buf[..buf.len() - tail])
+    };
     if numbered {
         buf.push_str(&text[..digits]);
         buf.push('\\');
         buf.push_str(&text[digits..]);
     } else {
         buf.push_str(text);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::super::md_to_typst;
+
+    // Review of #105: `push_text` used to scan back to the last newline on
+    // every text event, so one long paragraph (soft breaks emit a space, not
+    // a newline) was quadratic — ~26 s in release for 100k such lines.
+    #[test]
+    fn long_single_line_paragraph_converts_in_linear_time() {
+        let md: String = (0..100_000).map(|i| format!("word{i} 1. x\n")).collect();
+        let start = std::time::Instant::now();
+        let out = md_to_typst(&md, &BTreeMap::new());
+        assert!(!out.contains('\\'), "no marker escapes mid-line");
+        let took = start.elapsed();
+        assert!(took < std::time::Duration::from_secs(10), "took {took:?}");
     }
 }
