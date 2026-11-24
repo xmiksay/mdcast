@@ -5,8 +5,10 @@ use std::collections::BTreeMap;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, LinkType, Options, Parser, Tag, TagEnd};
 
+use markers::{push_item, push_text};
 use table::TableBuilder;
 
+mod markers;
 mod table;
 
 /// Convert markdown to a Typst-markup string suitable for `eval(.., mode: "markup")`.
@@ -56,6 +58,10 @@ fn render_events(
     let mut footnote_label_stack: Vec<String> = Vec::new();
     let mut table: Option<TableBuilder> = None;
     let mut collected_defs = BTreeMap::new();
+    // Per open list: `Some(next number)` for an ordered list, `None` for a
+    // bullet list. `item_stack` holds each open item's start offset in `out`.
+    let mut list_stack: Vec<Option<u64>> = Vec::new();
+    let mut item_stack: Vec<usize> = Vec::new();
 
     for ev in events {
         match ev {
@@ -66,17 +72,49 @@ fn render_events(
             Event::End(TagEnd::Heading(_)) => out.push_str("\n\n"),
 
             Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => out.push_str("\n\n"),
+            // Through the capture stack, so a multi-paragraph footnote body
+            // keeps its paragraph break instead of fusing the paragraphs.
+            Event::End(TagEnd::Paragraph) => push_str(&mut out, &mut stack, "\n\n"),
 
             Event::Start(Tag::Emphasis) => push_char(&mut out, &mut stack, '_'),
             Event::End(TagEnd::Emphasis) => push_char(&mut out, &mut stack, '_'),
             Event::Start(Tag::Strong) => push_char(&mut out, &mut stack, '*'),
             Event::End(TagEnd::Strong) => push_char(&mut out, &mut stack, '*'),
 
-            Event::Start(Tag::List(_)) => {}
-            Event::End(TagEnd::List(_)) => out.push('\n'),
-            Event::Start(Tag::Item) => out.push_str("- "),
-            Event::End(TagEnd::Item) => out.push('\n'),
+            // Lists (issue #105): an ordered list's items get explicit
+            // `N. ` markers counted from the markdown start number, so a
+            // `3.`-started list keeps its numbering and nothing leaks into
+            // the next list; bullets stay `- `. Each item's body is buffered
+            // in `out` from its start offset and re-emitted at `End(Item)`
+            // with its continuation lines indented past the marker, which is
+            // how typst attaches nested lists / further paragraphs to it.
+            // Everything goes to the innermost capture buffer, so a list in a
+            // footnote definition stays inside that footnote's body.
+            Event::Start(Tag::List(start)) => {
+                let buf = target(&mut out, &mut stack);
+                if !buf.is_empty() && !buf.ends_with('\n') {
+                    buf.push('\n');
+                }
+                list_stack.push(*start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_stack.pop();
+                push_char(&mut out, &mut stack, '\n');
+            }
+            Event::Start(Tag::Item) => item_stack.push(target(&mut out, &mut stack).len()),
+            Event::End(TagEnd::Item) => {
+                let buf = target(&mut out, &mut stack);
+                let body = buf.split_off(item_stack.pop().unwrap_or(buf.len()));
+                let marker = match list_stack.last_mut() {
+                    Some(Some(n)) => {
+                        let m = format!("{n}. ");
+                        *n += 1;
+                        m
+                    }
+                    _ => "- ".to_string(),
+                };
+                push_item(buf, &marker, &body);
+            }
 
             Event::Start(Tag::BlockQuote(_)) => out.push_str("#quote(block: true)[\n"),
             Event::End(TagEnd::BlockQuote(_)) => out.push_str("\n]\n\n"),
@@ -205,7 +243,7 @@ fn render_events(
                 if let Some((_, body)) = code_block.as_mut() {
                     body.push_str(t);
                 } else if in_image == 0 {
-                    push_str(&mut out, &mut stack, &escape_typst_inline(t));
+                    push_text(target(&mut out, &mut stack), &escape_typst_inline(t));
                 }
             }
             Event::Code(c) => {
@@ -221,6 +259,15 @@ fn render_events(
         }
     }
     (out, collected_defs)
+}
+
+/// The innermost open capture buffer (table cell / link text / footnote
+/// body), or `out` when none is open.
+fn target<'a>(out: &'a mut String, stack: &'a mut [String]) -> &'a mut String {
+    match stack.last_mut() {
+        Some(buf) => buf,
+        None => out,
+    }
 }
 
 /// Writes into the innermost open capture buffer (table cell / link text /
