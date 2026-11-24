@@ -100,6 +100,7 @@ src/
 │     ├─ markdown/      md_to_typst() — markdown → Typst-markup conversion
 │     │  ├─ mod.rs      render_events() state machine + inline helpers
 │     │  ├─ tests.rs    unit tests for md_to_typst()
+│     │  ├─ markers.rs  push_item() (list item + continuation indent) / push_text() (escapes line-start `- `/`+ `/`/ `/`= `/`N. ` in literal text)
 │     │  └─ table.rs    TableBuilder — `#table(...)` projection for GFM tables
 │     ├─ context.rs     build_context_source() — DocMeta/BrandSpec/assets → `/context.typ`
 │     └─ template.rs    TemplateDoc + render_template()/render_template_html() (Library-default) and render_template_with()/render_template_html_with() (explicit TypstCompiler) — user template + data → PDF/HTML, no markdown
@@ -612,7 +613,10 @@ let artifact = client.render(request::markdown(md, Target::Pdf), &bundle).await?
 ## Known limitations
 
 - The md→Typst converter (`typst/markdown/mod.rs::md_to_typst`) covers a v1
-  subset: headings, paragraphs, emphasis/strong, lists, blockquotes, images,
+  subset: headings, paragraphs, emphasis/strong, lists (ordered ones as explicit
+  `N. ` markers keeping the markdown start number, nested items indented past
+  their marker — issue #105; list markup goes through the capture stack, so a
+  list in a footnote stays in the footnote), blockquotes, images,
   inline code, code blocks, tables, links (inline and reference-style),
   autolinks (`<https://…>`, `<user@host>`), and footnotes. Raw HTML blocks are
   dropped (their text content still comes through). Layouts receive the

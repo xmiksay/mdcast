@@ -205,13 +205,19 @@ fn link_footnote_and_image_calls_are_terminated() {
 /// text with all whitespace removed (typst splits runs into separate
 /// `TextItem`s, and inter-item spacing is not text).
 fn rendered_text(md: &str) -> String {
+    rendered_runs(md).concat().split_whitespace().collect()
+}
+
+/// Every shaped text run of `md`'s compiled output, in frame order, with
+/// whitespace intact (so a code line's leading indentation stays visible).
+fn rendered_runs(md: &str) -> Vec<String> {
     use typst::layout::{Frame, FrameItem, PagedDocument};
     use typst_as_lib::TypstEngine;
 
-    fn walk(frame: &Frame, out: &mut String) {
+    fn walk(frame: &Frame, out: &mut Vec<String>) {
         for (_, item) in frame.items() {
             match item {
-                FrameItem::Text(t) => out.push_str(&t.text),
+                FrameItem::Text(t) => out.push(t.text.to_string()),
                 FrameItem::Group(g) => walk(&g.frame, out),
                 _ => {}
             }
@@ -227,11 +233,11 @@ fn rendered_text(md: &str) -> String {
         .compile()
         .output
         .unwrap_or_else(|e| panic!("{md:?} failed to compile: {e:?}"));
-    let mut text = String::new();
+    let mut runs = Vec::new();
     for page in &doc.pages {
-        walk(&page.frame, &mut text);
+        walk(&page.frame, &mut runs);
     }
-    text.split_whitespace().collect()
+    runs
 }
 
 #[test]
@@ -260,5 +266,169 @@ fn punctuation_after_inline_constructs_survives_typst_compile() {
     ] {
         let got = rendered_text(md);
         assert!(got.contains(expected), "{md:?} rendered as {got:?}");
+    }
+}
+
+// Issue #105: ordered lists used to come out as `- ` bullets.
+#[test]
+fn ordered_list_emits_numbered_markers() {
+    let out = md_to_typst("1. Alpha\n2. Beta\n3. Gamma\n", &BTreeMap::new());
+    assert_eq!(out, "1. Alpha\n2. Beta\n3. Gamma\n\n");
+}
+
+#[test]
+fn ordered_list_keeps_start_number_without_leaking() {
+    let out = md_to_typst("3. Three\n4. Four\n\npara\n\n1. One\n", &BTreeMap::new());
+    assert!(out.starts_with("3. Three\n4. Four\n"), "{out:?}");
+    assert!(out.contains("\n1. One\n"), "{out:?}");
+}
+
+#[test]
+fn bullet_list_still_emits_dashes() {
+    let out = md_to_typst("- a\n- b\n", &BTreeMap::new());
+    assert_eq!(out, "- a\n- b\n\n");
+}
+
+#[test]
+fn nested_lists_are_indented_past_their_marker() {
+    let md = "- outer\n  1. one\n  2. two\n     - deep\n- next\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert_eq!(
+        out, "- outer\n  1. one\n  2. two\n     - deep\n- next\n\n",
+        "{out:?}"
+    );
+}
+
+#[test]
+fn multi_paragraph_item_keeps_continuation_indented() {
+    let md = "1. first `x`; para\n\n   second para\n2. next\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert!(
+        out.starts_with("1. first #raw(\"x\");; para\n\n   second para\n2. next\n"),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn ordered_lists_render_numbers_through_typst() {
+    for (md, expected) in [
+        (
+            "# T\n\n1. Alpha\n2. Beta\n3. Gamma\n",
+            "T1.Alpha2.Beta3.Gamma",
+        ),
+        ("3. Three\n4. Four\n", "3.Three4.Four"),
+        // Start number doesn't leak into a following list.
+        (
+            "3. Three\n\ntext\n\n1. One\n2. Two\n",
+            "3.Threetext1.One2.Two",
+        ),
+        // Ordered inside ordered.
+        (
+            "1. Outer\n   1. Inner a\n   2. Inner b\n2. Outer two\n",
+            "1.Outer1.Innera2.Innerb2.Outertwo",
+        ),
+        // Ordered inside bullet.
+        (
+            "- Bullet\n  1. Step one\n  2. Step two\n",
+            "•Bullet1.Stepone2.Steptwo",
+        ),
+        // Bullet inside ordered.
+        (
+            "1. Step\n   - detail\n2. Step two\n",
+            "1.Step•detail2.Steptwo",
+        ),
+        // Multi-paragraph item and inline code inside an item.
+        (
+            "1. Run `make`; then\n\n   wait.\n2. Done\n",
+            "1.Runmake;thenwait.2.Done",
+        ),
+        // Code block inside an item.
+        (
+            "1. Code:\n\n   ```\n   x = 1\n   ```\n2. After\n",
+            "1.Code:x=12.After",
+        ),
+    ] {
+        let got = rendered_text(md);
+        assert_eq!(
+            got,
+            expected,
+            "{md:?} -> {:?}",
+            md_to_typst(md, &BTreeMap::new())
+        );
+    }
+}
+
+// Review of #105: the item re-indentation must not leak into a fenced code
+// block's content — typst dedents a raw block by its common indentation
+// (closing fence included), so relative indentation survives exactly.
+#[test]
+fn code_block_in_item_keeps_its_own_indentation() {
+    let md = "1. Code:\n\n   ```\n       first\n   def f():\n       x\n\n   y\n   ```\n";
+    let runs = rendered_runs(md);
+    for line in ["    first", "def f():", "    x", "y"] {
+        assert!(runs.iter().any(|r| r == line), "{line:?} not in {runs:?}");
+    }
+}
+
+// Lists inside footnote definitions used to emit their markers into the main
+// flow (where the definition sat) and fuse the items inside the footnote.
+#[test]
+fn list_and_paragraphs_inside_footnote_stay_in_the_footnote() {
+    let md = "Text[^1] end.\n\n[^1]: Note:\n\n    1. a\n    2. b\n\n    Para two.\n";
+    let out = md_to_typst(md, &BTreeMap::new());
+    assert_eq!(
+        out, "Text#footnote[Note:\n\n1. a\n2. b\n\nPara two.]; end.\n\n",
+        "{out:?}"
+    );
+    assert_eq!(rendered_text(md), "Text1end.1Note:1.a2.bParatwo.");
+}
+
+#[test]
+fn lists_in_blockquotes_and_blockquotes_in_items_render() {
+    for (md, expected) in [
+        ("> 1. a\n> 2. b\n>\n> after\n", "1.a2.bafter"),
+        ("1. > quoted\n   > - in\n2. two\n", "1.quoted•in2.two"),
+        ("1. a  \n   hard\n2. b\n", "1.ahard2.b"),
+        ("- | a | b |\n  |---|---|\n  | 1 | 2 |\n- x\n", "•ab12•x"),
+        // Loose list: one list, numbering continues.
+        ("1. a\n\n2. b\n\n3. c\n", "1.a2.b3.c"),
+        ("0. zero\n1. one\n", "0.zero1.one"),
+        ("123456789. big\n", "123456789.big"),
+    ] {
+        assert_eq!(rendered_text(md), expected, "{md:?}");
+    }
+}
+
+// Literal text shaped like a typst block marker at the start of a line (an
+// escaped markdown marker, list-item text, text after a hard break) must stay
+// literal instead of becoming a nested list / heading / term.
+#[test]
+fn marker_shaped_text_at_line_start_stays_literal() {
+    for (md, expected) in [
+        (
+            "- 1\\. not nested\n- \\- dash\n- \\+ plus\n- \\= eq\n",
+            vec![
+                "•",
+                "1. not nested",
+                "•",
+                "- dash",
+                "•",
+                "+ plus",
+                "•",
+                "= eq",
+            ],
+        ),
+        (
+            "1\\. para\n\n\\- para\n\n\\+ p\n\n\\== p\n\n/ term: x\n",
+            vec!["1. para", "- para", "+ p", "== p", "/ term: x"],
+        ),
+        ("a  \n\\- b\n", vec!["a", "- b"]),
+    ] {
+        assert_eq!(rendered_runs(md), expected, "{md:?}");
+    }
+    // Not markers: left untouched.
+    for md in ["-5 degrees\n", "2024 was\n", "=x\n", "v1.2 ok\n"] {
+        let out = md_to_typst(md, &BTreeMap::new());
+        assert!(!out.contains('\\'), "{md:?} -> {out:?}");
     }
 }
