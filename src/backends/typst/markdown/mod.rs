@@ -85,8 +85,11 @@ fn render_events(
                 in_image += 1;
                 match images.get(dest_url.as_ref()) {
                     Some(vpath) => {
-                        let s = format!("#image({})", typst_string(vpath));
-                        push_str(&mut out, &mut stack, &s);
+                        push_call(
+                            &mut out,
+                            &mut stack,
+                            &format!("#image({})", typst_string(vpath)),
+                        );
                     }
                     // No placeholder prose in the artifact — an unresolved
                     // image (remote fetch skipped, missing provider key) is
@@ -121,8 +124,11 @@ fn render_events(
             Event::End(TagEnd::Link) => {
                 let text = stack.pop().unwrap_or_default();
                 let dest = link_dest_stack.pop().unwrap_or_default();
-                let s = format!("#link({})[{text}]", typst_string(&dest));
-                push_str(&mut out, &mut stack, &s);
+                push_call(
+                    &mut out,
+                    &mut stack,
+                    &format!("#link({})[{text}]", typst_string(&dest)),
+                );
             }
 
             Event::Start(Tag::FootnoteDefinition(label)) => {
@@ -137,8 +143,7 @@ fn render_events(
             }
             Event::FootnoteReference(label) => {
                 if let Some(body) = footnote_defs.get(label.as_ref()) {
-                    let s = format!("#footnote[{body}]");
-                    push_str(&mut out, &mut stack, &s);
+                    push_call(&mut out, &mut stack, &format!("#footnote[{body}]"));
                 }
             }
 
@@ -207,8 +212,7 @@ fn render_events(
                 // `raw()` sidesteps the backtick-delimiter counting rules of
                 // Typst's ` `code` ` shorthand, which cannot represent a
                 // backtick inside inline (non-block) raw text at all.
-                let s = format!("#raw({})", typst_string(c));
-                push_str(&mut out, &mut stack, &s);
+                push_call(&mut out, &mut stack, &format!("#raw({})", typst_string(c)));
             }
             Event::SoftBreak => push_char(&mut out, &mut stack, ' '),
             Event::HardBreak => push_str(&mut out, &mut stack, "\\\n"),
@@ -226,6 +230,18 @@ fn push_str(out: &mut String, stack: &mut [String], s: &str) {
         Some(buf) => buf.push_str(s),
         None => out.push_str(s),
     }
+}
+
+/// Writes an inline embedded-code expression (`#raw(..)`, `#link(..)[..]`,
+/// `#footnote[..]`, `#image(..)`) followed by an explicit `;` terminator
+/// (issue #104). Without it typst keeps parsing whatever markup follows as
+/// part of the expression: a directly following `;` is swallowed as the
+/// terminator, `(` / `[` continue it as call arguments / a trailing content
+/// block, and `.ident` as a field or method access. The emitted `;` is the
+/// one typst consumes, so the next character is plain markup again.
+fn push_call(out: &mut String, stack: &mut [String], call: &str) {
+    push_str(out, stack, call);
+    push_char(out, stack, ';');
 }
 
 fn push_char(out: &mut String, stack: &mut [String], c: char) {
